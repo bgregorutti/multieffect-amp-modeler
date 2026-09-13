@@ -13,6 +13,7 @@ dist/
 # Data / local runtime state
 *.db
 control-daemon/data/*.json
+control-daemon/data/assets/
 !control-daemon/data/.gitkeep
 
 # Node (mobile app tooling, if any)
