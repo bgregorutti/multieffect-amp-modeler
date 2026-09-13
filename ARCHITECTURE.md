@@ -77,6 +77,51 @@ client of its API, so the API contract is the thing worth stabilizing early.
   configuration-editing commands from those roles are rejected with a typed
   error rather than silently applied.
 
+## Resource constraints
+
+Target hardware is a Raspberry Pi 4 or 5 with **8GB RAM as the maximum
+configuration** — that budget is shared with the real-time audio engine
+(which loads NAM models and cabinet IRs and must never be starved or
+swapped), so every other process on the box has to stay deliberately small:
+
+- **Control daemon**: pure Python/FastAPI/websockets, JSON-file persistence
+  — no databases, no ML/data libraries, no in-memory caching of large
+  objects. It tracks *metadata* for uploaded `.nam`/IR assets only (id,
+  filename, path, size, checksum); it never holds decoded model/IR bytes in
+  memory — that's the audio engine's job, and only for the one active
+  preset (running multiple simulations in parallel is explicitly out of
+  scope for V1, which keeps that footprint bounded to a single model + a
+  single IR at a time).
+- **Binary asset uploads are streamed to disk**, never buffered whole in a
+  Python object, so a 50MB IR upload doesn't cost 50MB of daemon RSS.
+- Every component should be able to state (and, once hardware exists,
+  measure) its own steady-state and peak memory footprint. The control
+  daemon has an in-repo benchmark proving upload streaming doesn't spike
+  RSS with file size — see `control-daemon/README.md` for the measured
+  numbers.
+
+## Testing strategy: no hardware required
+
+None of this project's software should require a Raspberry Pi, a real audio
+interface, real GPIO, or a real JUCE build to be developed and tested:
+
+- The control daemon's WebSocket API is tested end-to-end with FastAPI/
+  Starlette's in-process test client (`websocket_connect`) — no real
+  network socket or server process needed.
+- Footswitch GPIO is behind a `FootswitchInputBackend` interface; a
+  `MockFootswitchBackend` lets tests synthesize raw pin-level (bouncy)
+  events to exercise the debounce logic deterministically, with a real
+  `gpiozero`/`RPi.GPIO`-backed implementation swapped in only on the actual
+  Pi.
+- The (not yet built) audio engine is behind an `AudioEngineClient`
+  interface with a `NullAudioEngineClient` the daemon uses until a real
+  engine exists, so preset-selection logic is fully testable without any
+  audio hardware or JUCE toolchain in this environment.
+- The same pattern should extend to the audio engine and footswitch relay
+  when they're built: keep hardware access behind a narrow interface with a
+  software fake, so the logic around it stays testable on a plain Linux dev
+  machine/CI runner.
+
 ## Open questions
 
 Tracked in [`docs/open-questions.md`](./docs/open-questions.md) as they get
