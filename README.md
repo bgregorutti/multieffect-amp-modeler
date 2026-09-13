@@ -21,12 +21,16 @@ control-daemon/   Python service: source of truth for preset/bank state,
                   WebSocket API for the app/footswitch/display, JSON
                   persistence. See control-daemon/README.md.
 
-audio-engine/     (planned) C++/JUCE real-time plugin host: loads NAM models,
-                  cabinet IRs, and the effects chain; talks to the control
-                  daemon.
+audio-engine/     C++20 real-time plugin host skeleton: preset/asset model,
+                  real DSP blocks, WAV/IR loading, .nam metadata parsing,
+                  crossfade preset switching, a local control socket. JUCE
+                  integration deferred (see audio-engine/README.md). See
+                  audio-engine/README.md.
 
-mobile-app/       (planned) Flutter app: connects to the pedal over local
-                  Wi-Fi, builds/edits presets, uploads NAM/IR assets.
+mobile-app/       Flutter app: connects to the daemon's WebSocket API over
+                  local Wi-Fi, builds/edits presets and banks, configures
+                  the footswitch mapping, uploads NAM/IR assets. See
+                  mobile-app/README.md.
 
 footswitch/       (planned) GPIO event relay running on the Pi, talking to
                   the control daemon's WebSocket API.
@@ -39,6 +43,16 @@ docs/             Cross-cutting design notes and open questions.
 
 ## Status
 
-- `control-daemon`: in progress — see its own README for how to run it and
-  its test suite.
-- All other components: not yet started.
+- `control-daemon`: **V1 built and tested** (40 passing tests) — see its own
+  README for how to run it and the WebSocket protocol reference.
+- `audio-engine`: **V1 built and tested** (68 passing tests) — real DSP,
+  WAV/IR loading, and preset-switching logic; JUCE audio I/O and real NAM
+  inference are deferred (both require GitHub-hosted dependencies this
+  sandbox's network can't fetch — see audio-engine/README.md). Not yet wired
+  to control-daemon's `AudioEngineClient`.
+- `mobile-app`: **V1 built and tested** (77 passing tests via `flutter test`,
+  `flutter analyze` clean) — full preset/bank/footswitch-mapping editing and
+  asset upload against control-daemon's protocol. OS file-picker integration
+  is stubbed pending on-device testing (needs a real phone/emulator).
+- `footswitch`, `display`: not yet started — real GPIO/I2C hardware is
+  needed to build and validate these properly.
