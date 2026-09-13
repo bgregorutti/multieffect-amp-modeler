@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+
+# Data / local runtime state
+*.db
+control-daemon/data/*.json
+!control-daemon/data/.gitkeep
+
+# Node (mobile app tooling, if any)
+node_modules/
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
