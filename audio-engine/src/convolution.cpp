@@ -52,9 +52,30 @@ void ConvolutionEngine::process(float* buffer, std::size_t numSamples) {
     }
 }
 
+std::vector<float> truncateIrWithFadeOut(std::vector<float> ir, std::size_t maxSamples) {
+    if (ir.size() <= maxSamples) {
+        return ir;
+    }
+    ir.resize(maxSamples);
+
+    const std::size_t fadeLen = std::min<std::size_t>(maxSamples, 256);
+    if (fadeLen >= 2) {
+        for (std::size_t i = 0; i < fadeLen; ++i) {
+            // t sweeps 0 -> 1 across the fade window, so gain sweeps
+            // 1 -> 0 and lands on exactly silence at the very last sample
+            // -- no discontinuity at the cut point.
+            const double t = static_cast<double>(i) / static_cast<double>(fadeLen - 1);
+            const float gain = static_cast<float>(1.0 - t);
+            ir[maxSamples - fadeLen + i] *= gain;
+        }
+    }
+    return ir;
+}
+
 std::vector<float> loadImpulseResponseFile(const std::string& path, double targetSampleRate) {
     WavData wav = parseWavFile(path);
-    return resampleLinear(wav.samples, wav.sampleRate, targetSampleRate);
+    std::vector<float> resampled = resampleLinear(wav.samples, wav.sampleRate, targetSampleRate);
+    return truncateIrWithFadeOut(std::move(resampled), kMaxRealtimeIrSamples);
 }
 
 std::vector<float> convolveFull(const std::vector<float>& input, const std::vector<float>& ir) {

@@ -89,6 +89,17 @@ resamples it to its own 48kHz internal rate at load time (see
 audio-engine/README.md "Sample rate policy"), so it plays back at the
 correct pitch/timing rather than time-compressed.
 
+**Jerky/glitchy/choppy audio through `--audio`?** This was a real bug,
+not a hypothetical: a long cabinet IR (this Ampeg one included -- it's an
+unusually long "room capture" style IR, ~720ms natively) can't be
+convolved by the naive engine within one real-time block's budget, so
+every block underruns. `loadImpulseResponseFile` now caps IR length to a
+measured-safe 8192 samples (~171ms, with a short fade-out so the cut is
+inaudible) -- see audio-engine/README.md "Real-time-safe IR length cap"
+for the exact before/after numbers. If you still hear glitching after
+pulling the latest code, rebuild `build-audio` (a stale binary won't have
+the fix) and check you're not also loading a second long asset.
+
 **No sound at all?** Check, in order:
 - the interface is the OS default input *and* output;
 - terminal 1 (the engine) printed "streaming default audio device" (not

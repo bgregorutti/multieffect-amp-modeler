@@ -117,3 +117,34 @@ TEST(Convolution, LoadsImpulseResponseFromWavFileResamplingToTargetRate) {
     // 441 samples @ 44.1kHz is 10ms; @ 48kHz that's 480 samples.
     EXPECT_EQ(loaded.size(), 480u);
 }
+
+TEST(Convolution, LoadsImpulseResponseFromWavFileTruncatesOverlongIr) {
+    // A real 34623-sample cabinet IR (see README.md "Sample rate policy")
+    // takes ~156% of one real-time block's budget to convolve -- loading
+    // it must come back capped, not full-length.
+    std::vector<float> irSamples(kMaxRealtimeIrSamples + 5000, 0.01f);
+    std::string path = "/tmp/audio_engine_test_ir_overlong.wav";
+    writeWavFile(path, irSamples, 48000.0, WavSampleFormat::Float32);
+
+    std::vector<float> loaded = loadImpulseResponseFile(path, 48000.0);
+    EXPECT_EQ(loaded.size(), kMaxRealtimeIrSamples);
+}
+
+TEST(Convolution, TruncateIrWithFadeOutLeavesShortIrUnchanged) {
+    std::vector<float> ir = {1.0f, 0.5f, 0.25f};
+    std::vector<float> result = truncateIrWithFadeOut(ir, 8192);
+    EXPECT_EQ(result, ir);
+}
+
+TEST(Convolution, TruncateIrWithFadeOutCutsToLengthAndEndsInSilence) {
+    std::vector<float> ir(1000, 0.5f);
+    std::vector<float> result = truncateIrWithFadeOut(ir, 300);
+
+    ASSERT_EQ(result.size(), 300u);
+    EXPECT_FLOAT_EQ(result[0], 0.5f);           // untouched, well before the fade window
+    EXPECT_FLOAT_EQ(result.back(), 0.0f);       // exactly silent at the cut -- no click
+    // Strictly decreasing (not just non-increasing) across the fade window.
+    for (std::size_t i = 300 - 256 + 1; i < 300; ++i) {
+        EXPECT_LT(result[i], result[i - 1]);
+    }
+}

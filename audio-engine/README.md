@@ -130,6 +130,36 @@ time rather than played back as-is:
   error rather than silently running at a different rate than the rest of
   the engine assumes.
 
+## Real-time-safe IR length cap
+
+Also discovered during real hardware testing, alongside the sample-rate
+mismatch above: `ConvolutionEngine`'s naive O(n·m) convolution (deviation
+#3 below) genuinely cannot keep up with a long real-world cabinet IR at
+real-time block rates -- this isn't theoretical. Measured on a real dev
+machine, `--audio`'s default 256-sample/48kHz block gives a 5.33ms
+per-block budget; a real 34623-sample IR (an "8x10 cabinet" capture that
+bakes in room ambience, resampled from 44.1kHz to 48kHz per the policy
+above) took **~8.3ms to convolve one block -- 156% of budget, a guaranteed
+dropout on every single block**, which is exactly the "horrible, jerky"
+audio reported when first testing through real hardware.
+
+`loadImpulseResponseFile` now truncates any IR longer than
+`kMaxRealtimeIrSamples` (8192 samples, ~171ms @ 48kHz) with a short linear
+fade-out (`truncateIrWithFadeOut`) so the cut is inaudible rather than a
+click. 8192 was chosen directly from measurement, not guessed: comparable
+lengths used ~37-43% of the block budget in benchmarking, leaving solid
+headroom for the rest of the effect chain and OS scheduling jitter. Real
+amp-sim cabinet IRs are typically much shorter (10-50ms) -- this cap only
+bites for unusually long "room capture" style IRs, and re-verified against
+the actual triggering IR file: it now loads at exactly 8192 samples and
+uses **2.0ms (38%) of budget**, not 8.3ms.
+
+This is a stopgap, not the fix the naive-convolution deviation below
+already calls for: a partitioned/FFT-based convolution engine would use a
+long IR's *full* length in real time instead of cutting it short. That
+remains the real follow-up; capping IR length is what makes real hardware
+testing usable today without waiting on it.
+
 ## Module map
 
 | Module (`include/audio_engine/` + `src/`) | Responsibility |
@@ -142,7 +172,7 @@ time rather than played back as-is:
 | `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params) |
 | `wav_file`               | Hand-rolled RIFF/WAVE parser + writer (PCM16/PCM32/float, mono or downmixed) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
-| `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate |
+| `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate and truncates to a real-time-safe length (see "Real-time-safe IR length cap") |
 | `nam_model`                  | Real `.nam` JSON metadata parser/validator (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- inference is stubbed, see below) |
 | `preset_switcher`              | Glitch-free crossfade between an "old" and "next" already-prepared processing chain |
 | `resource_manager`                | Owns the one currently-loaded `EngineChain` (NAM + IR + effects); loading a new preset releases the previous one's resources |
@@ -332,13 +362,15 @@ FIR convolution: correct, simple, and fully tested (impulse IR ->
 identity; hand-computed two-tap result; streaming across arbitrary block
 sizes matches one-shot convolution -- see `tests/test_convolution.cpp`),
 but it does not scale to real cabinet-IR lengths (hundreds to thousands of
-taps) at real-time block rates on a Raspberry Pi. A partitioned/FFT-based
-(e.g. uniform-partitioned overlap-save) convolution engine is the known
-follow-up for real-time performance -- flagged rather than attempted here,
-consistent with the product spec's own "latency is the main project risk,
-validate early" framing (this is exactly the kind of thing that should be
-prototyped and benchmarked once real hardware/audio I/O exists, not
-guessed at now).
+taps) at real-time block rates -- confirmed by real benchmarking once real
+hardware/audio I/O existed to test against (not guessed at), see
+"Real-time-safe IR length cap" above for the measured numbers and the
+truncation stopgap now in place. A partitioned/FFT-based (e.g.
+uniform-partitioned overlap-save) convolution engine, which would use a
+long IR's full length instead of capping it, remains the known follow-up
+for real-time performance -- flagged rather than attempted here, consistent
+with the product spec's own "latency is the main project risk, validate
+early" framing.
 
 ### 4. Preset-switching crossfade curve: equal-power, not linear
 
