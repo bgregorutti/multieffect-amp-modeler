@@ -171,6 +171,33 @@ our own processing occasionally running long (`overBudgetCount`) -- prior
 to this, "jerky" audio gave no signal on which of those (or neither) was
 actually happening.
 
+**This instrumentation is what found the actual root cause of a real
+"jerky and saturated" report, and it's worth spelling out because it's an
+easy mistake to repeat: `audio_engine` was being configured with
+`-DCMAKE_BUILD_TYPE=Debug`.** CMakeLists.txt's own default (when
+`CMAKE_BUILD_TYPE` isn't passed at all) is `RelWithDebInfo` -- optimized
+-- but an explicit `Debug` override during development silently replaced
+that. Nothing about real NAM inference is slow; **unoptimized Eigen is.**
+Eigen's matrix operations are deeply-templated expression trees that rely
+on the compiler inlining and vectorizing them -- without `-O2`/`-O3`,
+every one of those expressions materializes as literal, unfused,
+unvectorized function calls. Measured on the exact same code, same model,
+same real recorded signal: **Debug build averaged 3.6ms/block (100% of
+blocks over the 1.33ms budget); `RelWithDebInfo` averaged 0.06ms/block
+(0% over budget) -- a 59x difference from the compiler flag alone.** Every
+offline reproduction attempt during that investigation (`nam_render`,
+`EngineChain::process` run directly) had been built with `-O2` by hand and
+came back clean, while the actual `--audio` binary -- built via CMake with
+`Debug` -- was the only thing actually failing, which is exactly why it
+took real-time callback instrumentation (`xrunCount`/`overBudgetCount`
+above) to catch: **`overBudgetCount` climbing steadily while `xrunCount`
+stayed at 0** was the signature that pointed at "our own code is
+consistently slow," not a device-level problem. **Always build
+`audio_engine` as `RelWithDebInfo` or `Release` for anything real-time
+(`--audio`, or any latency-sensitive testing) -- reserve `Debug` for
+control-socket-only work with no audio device involved, where raw DSP
+throughput doesn't matter.**
+
 ## Sample rate policy
 
 The engine standardizes on a single fixed internal operating rate --
