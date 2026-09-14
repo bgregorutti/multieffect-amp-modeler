@@ -93,6 +93,43 @@ an actual interactive terminal window at least once and approve the
 prompt; a headless/CI invocation of `--audio` will hang at that point
 until permission has already been granted.
 
+## Sample rate policy
+
+The engine standardizes on a single fixed internal operating rate --
+**48kHz** (`ResourceManager`'s/`EngineState`'s default, and what
+`--audio` asks the device for) -- rather than tracking whatever rate each
+loaded asset happens to be at. Chosen over 44.1kHz because it's the
+existing default everywhere in this tree, matches typical class-compliant
+USB audio interfaces and Raspberry Pi audio HATs equally well, and headers
+(control-daemon, mobile app) never asked for a specific rate, so there was
+no reason to prefer the "CD audio" rate over it.
+
+Any asset loaded at a different native rate is converted to 48kHz at load
+time rather than played back as-is:
+
+* **Cabinet IRs**: `loadImpulseResponseFile` (`convolution.cpp`) resamples
+  via `resampleLinear` (`resample.hpp`/`.cpp`) whenever the WAV file's own
+  rate differs from `ResourceManager`'s `sampleRate_`. This was a real,
+  discovered bug, not a hypothetical -- an IR pack captured at 44.1kHz
+  (common) played back audibly time-compressed/detuned against the
+  engine's 48kHz processing before this existed. `resampleLinear` is naive
+  linear interpolation (no anti-aliasing lowpass before downsampling) --
+  the same "correct and simple over maximally faithful" tradeoff this
+  codebase already makes for convolution itself (see deviation #3 below);
+  a proper windowed-sinc resampler is a real follow-up, not attempted
+  here. See `tests/test_resample.cpp` and
+  `Convolution.LoadsImpulseResponseFromWavFileResamplingToTargetRate`.
+* **NAM models**: metadata parsing records `sample_rate`, but nothing
+  reads it yet -- inference itself is stubbed (see deviation #2 below), so
+  there is no real forward pass to feed at the wrong rate today. A real
+  `INamModel` implementation will need to resample its input the same way
+  once inference exists.
+* **The live device** (`PortAudioBackend`, via `--audio`): opened at
+  `EngineState::sampleRate()` (48kHz) directly -- if your audio interface
+  can't run at 48kHz at all, `Pa_OpenStream` fails outright with a clear
+  error rather than silently running at a different rate than the rest of
+  the engine assumes.
+
 ## Module map
 
 | Module (`include/audio_engine/` + `src/`) | Responsibility |
@@ -104,7 +141,8 @@ until permission has already been granted.
 | `eq_block`           | Biquad peaking/shelving EQ (RBJ Audio EQ Cookbook formulas) |
 | `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params) |
 | `wav_file`               | Hand-rolled RIFF/WAVE parser + writer (PCM16/PCM32/float, mono or downmixed) |
-| `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes |
+| `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
+| `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate |
 | `nam_model`                  | Real `.nam` JSON metadata parser/validator (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- inference is stubbed, see below) |
 | `preset_switcher`              | Glitch-free crossfade between an "old" and "next" already-prepared processing chain |
 | `resource_manager`                | Owns the one currently-loaded `EngineChain` (NAM + IR + effects); loading a new preset releases the previous one's resources |
@@ -271,6 +309,21 @@ Swapping in a real implementation backed by `NeuralAmpModelerCore` (e.g.
 as a git submodule, added from a machine with full GitHub access) is a
 drop-in replacement behind this interface -- nothing else in the engine
 (resource manager, preset switcher, control socket) needs to change.
+
+**Known parser gap: only the flat single-model export shape is
+understood.** `parseNamModelMetadata` requires a non-empty top-level
+`weights` array. Verified against a real commercial `.nam` export
+(Darkglass B7K Ultra) that this rejects: some plugins export a
+`"SlimmableContainer"` architecture whose top-level `weights` is `[]`,
+with the actual per-submodel weight data nested under
+`config.submodels[...]` instead -- a materially different shape this
+parser was never written against (it targets the reference
+NeuralAmpModelerCore single-model format). Such a file fails
+`load_preset` with `missing or invalid required field 'weights'`; since
+inference is stubbed regardless (see above), this only blocks the
+upload/register/load *plumbing* today, not any audible capability.
+Supporting nested-submodel exports is unstarted follow-up work, not
+attempted here.
 
 ### 3. Naive (not partitioned/FFT) convolution for cabinet IRs
 

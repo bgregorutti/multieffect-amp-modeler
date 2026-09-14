@@ -27,7 +27,7 @@ public:
         ADD_FAILURE() << "loadNam should not be called by these tests";
         return nullptr;
     }
-    std::shared_ptr<IrHandle> loadIr(const std::string&) override {
+    std::shared_ptr<IrHandle> loadIr(const std::string&, double) override {
         ADD_FAILURE() << "loadIr should not be called by these tests";
         return nullptr;
     }

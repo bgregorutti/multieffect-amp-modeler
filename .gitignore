@@ -16,6 +16,9 @@ dist/
 control-daemon/data/*.json
 control-daemon/data/assets/
 !control-daemon/data/.gitkeep
+# control-daemon's default store path is relative (./data/state.json), so
+# running it from the repo root instead of control-daemon/ writes here.
+/data/
 
 # Node (mobile app tooling, if any)
 node_modules/

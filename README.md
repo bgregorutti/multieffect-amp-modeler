@@ -41,9 +41,11 @@ display/          (planned) Minimal read-only display client (I2C
 docs/             Cross-cutting design notes and open questions.
 
 scripts/          Dev-machine testing tools that don't belong to any one
-                  component, e.g. keyboard_footswitch.py (a stand-in
-                  footswitch relay: right/left arrow = next/previous
-                  preset, for testing before real hardware exists).
+                  component: load a test preset without the mobile app,
+                  and a keyboard stand-in for a footswitch relay
+                  (right/left arrow = next/previous preset). See
+                  scripts/README.md for the full guitar-in-hear-it-out
+                  walkthrough.
 ```
 
 ## Status

@@ -28,6 +28,7 @@ add_library(audio_engine_core
   src/eq_block.cpp
   src/delay_block.cpp
   src/wav_file.cpp
+  src/resample.cpp
   src/convolution.cpp
   src/nam_model.cpp
   src/preset_switcher.cpp
@@ -73,6 +74,7 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     tests/test_eq_block.cpp
     tests/test_delay_block.cpp
     tests/test_wav_file.cpp
+    tests/test_resample.cpp
     tests/test_convolution.cpp
     tests/test_nam_model.cpp
     tests/test_preset_switcher.cpp

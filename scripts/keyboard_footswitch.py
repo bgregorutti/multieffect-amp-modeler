@@ -6,14 +6,16 @@ footswitch-input ingress paths": this script is a stand-in for the second
 one, a footswitch relay process sending already-logical presses over the
 daemon's WS API -- it is not special-cased in the daemon at all).
 
-Right arrow = next preset, left arrow = previous preset. These map to
-switch indices 0 and 1, bound to the daemon's next_preset/prev_preset
-footswitch actions (control-daemon/README.md), which step through every
-assigned preset slot across all banks, skipping empty ones and wrapping
-around.
+Right arrow = next preset, left arrow = previous preset. Down arrow =
+toggle bypass (no simulation at all -- dry signal only, useful for A/B
+testing whatever's currently loaded). These map to switch indices 0, 1,
+and 2, bound to the daemon's next_preset/prev_preset/toggle_bypass
+footswitch actions (control-daemon/README.md); next_preset/prev_preset
+step through every assigned preset slot across all banks, skipping empty
+ones and wrapping around.
 
-On startup this script briefly connects as role="app" to merge switches 0
-and 1 into whatever footswitch_mapping is already configured -- set_
+On startup this script briefly connects as role="app" to merge switches 0,
+1, and 2 into whatever footswitch_mapping is already configured -- set_
 footswitch_mapping is a full replace on the wire, so this reads the
 current mapping first rather than clobbering any other switches you've
 already set up -- then reconnects as role="footswitch" and listens for
@@ -44,6 +46,7 @@ import websockets
 
 NEXT_SWITCH = 0
 PREV_SWITCH = 1
+BYPASS_SWITCH = 2
 
 
 async def ensure_mapping(uri: str) -> None:
@@ -57,6 +60,7 @@ async def ensure_mapping(uri: str) -> None:
         desired = {
             str(NEXT_SWITCH): {"type": "next_preset"},
             str(PREV_SWITCH): {"type": "prev_preset"},
+            str(BYPASS_SWITCH): {"type": "toggle_bypass"},
         }
         if all(mapping.get(k) == v for k, v in desired.items()):
             return  # already configured -- nothing to send
@@ -66,17 +70,21 @@ async def ensure_mapping(uri: str) -> None:
         reply = json.loads(await ws.recv())
         if reply["type"] != "command_ok":
             raise RuntimeError(f"failed to configure footswitch mapping: {reply}")
-        print(f"[keyboard-footswitch] configured switch {NEXT_SWITCH}=next_preset, {PREV_SWITCH}=prev_preset")
+        print(
+            f"[keyboard-footswitch] configured switch {NEXT_SWITCH}=next_preset, "
+            f"{PREV_SWITCH}=prev_preset, {BYPASS_SWITCH}=toggle_bypass"
+        )
 
 
 def _print_active(state: dict) -> None:
+    bypass_suffix = " [BYPASSED -- dry signal only]" if state.get("bypass") else ""
     preset_id = state.get("active_preset_id")
     if preset_id is None:
-        print("[keyboard-footswitch] active preset: (none)")
+        print(f"[keyboard-footswitch] active preset: (none){bypass_suffix}")
         return
     preset = state.get("presets", {}).get(preset_id)
     name = preset["name"] if preset else preset_id
-    print(f"[keyboard-footswitch] active preset: {name}")
+    print(f"[keyboard-footswitch] active preset: {name}{bypass_suffix}")
 
 
 async def run(uri: str) -> None:
@@ -91,7 +99,10 @@ async def run(uri: str) -> None:
         key_queue: asyncio.Queue[str] = asyncio.Queue()
         loop.add_reader(sys.stdin.fileno(), lambda: key_queue.put_nowait(sys.stdin.read(1)))
 
-        print("[keyboard-footswitch] ready -- right arrow = next preset, left arrow = prev preset, q = quit")
+        print(
+            "[keyboard-footswitch] ready -- right arrow = next preset, left arrow = prev preset, "
+            "down arrow = toggle bypass, q = quit"
+        )
 
         async def read_broadcasts() -> None:
             async for raw in ws:
@@ -109,13 +120,15 @@ async def run(uri: str) -> None:
                     break
                 if ch != "\x1b":
                     continue
-                # Arrow keys arrive as the 3-byte escape sequence ESC [ C/D.
+                # Arrow keys arrive as the 3-byte escape sequence ESC [ C/D/B.
                 ch2 = await key_queue.get()
                 ch3 = await key_queue.get()
                 if (ch2, ch3) == ("[", "C"):
                     await ws.send(json.dumps({"type": "footswitch_press", "switch_index": NEXT_SWITCH}))
                 elif (ch2, ch3) == ("[", "D"):
                     await ws.send(json.dumps({"type": "footswitch_press", "switch_index": PREV_SWITCH}))
+                elif (ch2, ch3) == ("[", "B"):
+                    await ws.send(json.dumps({"type": "footswitch_press", "switch_index": BYPASS_SWITCH}))
         finally:
             loop.remove_reader(sys.stdin.fileno())
             broadcast_task.cancel()

@@ -48,8 +48,12 @@ private:
 
 // Loads a mono WAV file as a cabinet IR (thin wrapper over wav_file.hpp
 // that returns just the sample data, since that's all ConvolutionEngine
-// needs). Throws WavParseError -- see wav_file.hpp -- on a malformed file.
-std::vector<float> loadImpulseResponseFile(const std::string& path);
+// needs), resampled to `targetSampleRate` if the file's own sample rate
+// differs (see resample.hpp -- the engine standardizes on one internal
+// rate, and a mismatched IR would otherwise play back time-compressed/
+// detuned). Throws WavParseError -- see wav_file.hpp -- on a malformed
+// file.
+std::vector<float> loadImpulseResponseFile(const std::string& path, double targetSampleRate);
 
 // Pure function form, useful for tests and for one-shot (non-streaming)
 // convolution of two known buffers: output length is input.size() +

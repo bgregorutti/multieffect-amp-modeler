@@ -38,7 +38,14 @@ class IAssetLoader {
 public:
     virtual ~IAssetLoader() = default;
     virtual std::shared_ptr<INamModel> loadNam(const std::string& storedPath) = 0;
-    virtual std::shared_ptr<IrHandle> loadIr(const std::string& storedPath) = 0;
+
+    // `targetSampleRate`: the engine's single internal operating rate (see
+    // resample.hpp) -- an IR captured at a different native rate must be
+    // converted to it, or it plays back time-compressed/detuned. Passed by
+    // the caller (ResourceManager already knows its own sampleRate_)
+    // rather than fixed at loader-construction time, so there's exactly
+    // one place that owns "what rate the engine runs at".
+    virtual std::shared_ptr<IrHandle> loadIr(const std::string& storedPath, double targetSampleRate) = 0;
 };
 
 // Reads real files from disk: `storedPath` for a "nam" asset is parsed via
@@ -48,7 +55,7 @@ public:
 class FileAssetLoader : public IAssetLoader {
 public:
     std::shared_ptr<INamModel> loadNam(const std::string& storedPath) override;
-    std::shared_ptr<IrHandle> loadIr(const std::string& storedPath) override;
+    std::shared_ptr<IrHandle> loadIr(const std::string& storedPath, double targetSampleRate) override;
 };
 
 // Builds one EffectBlock from a preset's EffectBlockSpec. Recognized

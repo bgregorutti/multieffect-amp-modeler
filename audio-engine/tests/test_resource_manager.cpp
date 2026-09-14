@@ -49,7 +49,7 @@ public:
     std::shared_ptr<INamModel> loadNam(const std::string&) override {
         return std::make_shared<CountingNamModel>(liveNamCount, totalNamLoaded);
     }
-    std::shared_ptr<IrHandle> loadIr(const std::string&) override {
+    std::shared_ptr<IrHandle> loadIr(const std::string&, double) override {
         return std::make_shared<CountingIrHandle>(liveIrCount, totalIrLoaded);
     }
 };

@@ -35,9 +35,9 @@ std::shared_ptr<INamModel> FileAssetLoader::loadNam(const std::string& storedPat
     return std::make_shared<StubNamModel>(std::move(meta));
 }
 
-std::shared_ptr<IrHandle> FileAssetLoader::loadIr(const std::string& storedPath) {
+std::shared_ptr<IrHandle> FileAssetLoader::loadIr(const std::string& storedPath, double targetSampleRate) {
     auto handle = std::make_shared<IrHandle>();
-    handle->samples = loadImpulseResponseFile(storedPath);
+    handle->samples = loadImpulseResponseFile(storedPath, targetSampleRate);
     return handle;
 }
 
@@ -65,7 +65,7 @@ void ResourceManager::loadPreset(const Preset& preset) {
             throw std::runtime_error("preset '" + preset.id + "' references unknown ir_asset_id '" +
                                       *preset.ir_asset_id + "'");
         }
-        chain->ir = loader_->loadIr(it->second.stored_path);
+        chain->ir = loader_->loadIr(it->second.stored_path, sampleRate_);
         chain->cabinet = std::make_unique<ConvolutionEngine>(chain->ir->samples);
     }
 

@@ -98,7 +98,22 @@ TEST(Convolution, LoadsImpulseResponseFromWavFile) {
     std::string path = "/tmp/audio_engine_test_ir.wav";
     writeWavFile(path, irSamples, 48000.0, WavSampleFormat::Float32);
 
-    std::vector<float> loaded = loadImpulseResponseFile(path);
+    // Target rate matches the file's own rate -- no resampling should occur.
+    std::vector<float> loaded = loadImpulseResponseFile(path, 48000.0);
     ASSERT_EQ(loaded.size(), irSamples.size());
     for (size_t i = 0; i < irSamples.size(); ++i) EXPECT_NEAR(loaded[i], irSamples[i], 1e-6f);
+}
+
+TEST(Convolution, LoadsImpulseResponseFromWavFileResamplingToTargetRate) {
+    // A 44.1kHz IR (the common real-world case -- see README.md "Sample
+    // rate policy") loaded against a 48kHz engine must come back resampled,
+    // not played back at the wrong rate.
+    std::vector<float> irSamples(441, 0.0f);
+    irSamples[0] = 1.0f;
+    std::string path = "/tmp/audio_engine_test_ir_44100.wav";
+    writeWavFile(path, irSamples, 44100.0, WavSampleFormat::Float32);
+
+    std::vector<float> loaded = loadImpulseResponseFile(path, 48000.0);
+    // 441 samples @ 44.1kHz is 10ms; @ 48kHz that's 480 samples.
+    EXPECT_EQ(loaded.size(), 480u);
 }

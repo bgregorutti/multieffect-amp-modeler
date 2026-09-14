@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "audio_engine/resample.hpp"
 #include "audio_engine/wav_file.hpp"
 
 namespace audio_engine {
@@ -51,9 +52,9 @@ void ConvolutionEngine::process(float* buffer, std::size_t numSamples) {
     }
 }
 
-std::vector<float> loadImpulseResponseFile(const std::string& path) {
+std::vector<float> loadImpulseResponseFile(const std::string& path, double targetSampleRate) {
     WavData wav = parseWavFile(path);
-    return wav.samples;
+    return resampleLinear(wav.samples, wav.sampleRate, targetSampleRate);
 }
 
 std::vector<float> convolveFull(const std::vector<float>& input, const std::vector<float>& ir) {
