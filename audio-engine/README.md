@@ -214,7 +214,7 @@ testing usable today without waiting on it.
 | `gain_block`       | Gain/volume block (`gain_db` param) |
 | `eq_block`           | Biquad peaking/shelving EQ (RBJ Audio EQ Cookbook formulas) |
 | `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params) |
-| `wav_file`               | Hand-rolled RIFF/WAVE parser + writer (PCM16/PCM32/float, mono or downmixed) |
+| `wav_file`               | Hand-rolled RIFF/WAVE parser (reads PCM16/PCM24/PCM32/float32, mono or downmixed) + writer (PCM16/float32) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
 | `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate and truncates to a real-time-safe length (see "Real-time-safe IR length cap") |
 | `nam_model`                  | Real `.nam` JSON metadata parser/validator (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- inference is stubbed, see below) |

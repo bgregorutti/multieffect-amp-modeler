@@ -7,10 +7,13 @@
 // the "no GitHub-fetched C++ dependency" sandbox constraint -- see
 // audio-engine/README.md).
 //
-// Supports: PCM 16-bit, PCM 32-bit (integer), IEEE float 32-bit, mono or
-// interpreted as mono (multi-channel files are downmixed by averaging
-// channels, since cabinet IRs for this engine are always mono). Samples
-// are always returned/written normalized to the [-1, 1] float range.
+// Supports reading: PCM 16-bit, PCM 24-bit, PCM 32-bit (integer), IEEE
+// float 32-bit, mono or interpreted as mono (multi-channel files are
+// downmixed by averaging channels, since cabinet IRs for this engine are
+// always mono). Samples are always returned/written normalized to the
+// [-1, 1] float range. (Writing only supports 16-bit PCM/32-bit float --
+// see WavSampleFormat -- since the writer exists for test fixtures, not
+// for round-tripping real IR packs.)
 #pragma once
 
 #include <cstdint>

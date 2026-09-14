@@ -51,6 +51,53 @@ std::vector<std::uint8_t> buildMinimalPcm16Wav(const std::vector<std::int16_t>& 
     return out;
 }
 
+// 24-bit PCM is tightly packed (3 bytes/sample) -- built separately from
+// buildMinimalPcm16Wav since the sample encoding differs, not just the
+// bitsPerSample field. `samples` are given as full-range 32-bit values
+// (only the low 24 bits are used, matching a real DAW/plugin export).
+std::vector<std::uint8_t> buildMinimalPcm24Wav(const std::vector<std::int32_t>& samples, std::uint32_t sampleRate) {
+    std::vector<std::uint8_t> out;
+    auto putTag = [&](const char* t) { out.insert(out.end(), t, t + 4); };
+    auto putU32 = [&](std::uint32_t v) {
+        out.push_back(v & 0xFF);
+        out.push_back((v >> 8) & 0xFF);
+        out.push_back((v >> 16) & 0xFF);
+        out.push_back((v >> 24) & 0xFF);
+    };
+    auto putU16 = [&](std::uint16_t v) {
+        out.push_back(v & 0xFF);
+        out.push_back((v >> 8) & 0xFF);
+    };
+    auto putS24 = [&](std::int32_t v) {
+        out.push_back(static_cast<std::uint8_t>(v & 0xFF));
+        out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
+        out.push_back(static_cast<std::uint8_t>((v >> 16) & 0xFF));
+    };
+
+    const std::uint16_t numChannels = 1;
+    const std::uint16_t bitsPerSample = 24;
+    const std::uint32_t byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+    const std::uint16_t blockAlign = numChannels * (bitsPerSample / 8);
+    const std::uint32_t dataSize = static_cast<std::uint32_t>(samples.size()) * 3;
+
+    putTag("RIFF");
+    putU32(36 + dataSize);
+    putTag("WAVE");
+    putTag("fmt ");
+    putU32(16);
+    putU16(1);  // PCM
+    putU16(numChannels);
+    putU32(sampleRate);
+    putU32(byteRate);
+    putU16(blockAlign);
+    putU16(bitsPerSample);
+    putTag("data");
+    putU32(dataSize);
+    for (std::int32_t s : samples) putS24(s);
+
+    return out;
+}
+
 }  // namespace
 
 TEST(WavFile, ParsesHandAssembledPcm16Wav) {
@@ -69,6 +116,24 @@ TEST(WavFile, ParsesHandAssembledPcm16Wav) {
     EXPECT_NEAR(wav.samples[2], -16384.0f / 32768.0f, 1e-6f);
     EXPECT_NEAR(wav.samples[3], 32767.0f / 32768.0f, 1e-6f);
     EXPECT_NEAR(wav.samples[4], -1.0f, 1e-6f);
+}
+
+TEST(WavFile, ParsesHandAssembledPcm24Wav) {
+    // 0, +half-scale, -full-scale (min), +full-scale (max) as raw 24-bit
+    // two's-complement values.
+    std::vector<std::int32_t> raw = {0, 4194304, -8388608, 8388607};
+    auto bytes = buildMinimalPcm24Wav(raw, 48000);
+
+    WavData wav = parseWavBytes(bytes);
+    EXPECT_DOUBLE_EQ(wav.sampleRate, 48000.0);
+    EXPECT_EQ(wav.bitsPerSample, 24);
+    EXPECT_FALSE(wav.wasFloat);
+    ASSERT_EQ(wav.samples.size(), raw.size());
+
+    EXPECT_NEAR(wav.samples[0], 0.0f, 1e-6f);
+    EXPECT_NEAR(wav.samples[1], 0.5f, 1e-6f);
+    EXPECT_NEAR(wav.samples[2], -1.0f, 1e-6f);
+    EXPECT_NEAR(wav.samples[3], 1.0f, 1e-6f);
 }
 
 TEST(WavFile, WriteThenParseRoundTripsPcm16) {

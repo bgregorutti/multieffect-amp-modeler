@@ -16,6 +16,17 @@ std::uint16_t readU16LE(const std::uint8_t* p) {
     return static_cast<std::uint16_t>(p[0]) | (static_cast<std::uint16_t>(p[1]) << 8);
 }
 
+// 24-bit PCM is tightly packed (3 bytes/sample, no 4th padding byte) --
+// read the 3 bytes and sign-extend to a full 32-bit two's-complement int.
+std::int32_t readS24LE(const std::uint8_t* p) {
+    std::int32_t raw = static_cast<std::int32_t>(p[0]) | (static_cast<std::int32_t>(p[1]) << 8) |
+                        (static_cast<std::int32_t>(p[2]) << 16);
+    if (raw & 0x00800000) {
+        raw |= static_cast<std::int32_t>(0xFF000000);
+    }
+    return raw;
+}
+
 void writeU32LE(std::vector<std::uint8_t>& out, std::uint32_t v) {
     out.push_back(static_cast<std::uint8_t>(v & 0xFF));
     out.push_back(static_cast<std::uint8_t>((v >> 8) & 0xFF));
@@ -97,9 +108,9 @@ WavData parseWavBytes(const std::vector<std::uint8_t>& bytes) {
     if (isFloat && bitsPerSample != 32) {
         throw WavParseError("IEEE float WAV must be 32-bit, got " + std::to_string(bitsPerSample));
     }
-    if (!isFloat && bitsPerSample != 16 && bitsPerSample != 32) {
+    if (!isFloat && bitsPerSample != 16 && bitsPerSample != 24 && bitsPerSample != 32) {
         throw WavParseError("unsupported PCM bits-per-sample " + std::to_string(bitsPerSample) +
-                             " (only 16 and 32 are supported)");
+                             " (only 16, 24, and 32 are supported)");
     }
 
     const std::size_t bytesPerSample = bitsPerSample / 8;
@@ -129,6 +140,9 @@ WavData parseWavBytes(const std::vector<std::uint8_t>& bytes) {
             } else if (bitsPerSample == 16) {
                 std::int16_t raw = static_cast<std::int16_t>(readU16LE(samplePtr));
                 normalized = static_cast<double>(raw) / 32768.0;
+            } else if (bitsPerSample == 24) {
+                std::int32_t raw = readS24LE(samplePtr);
+                normalized = static_cast<double>(raw) / 8388608.0;  // 2^23
             } else {  // 32-bit PCM
                 std::int32_t raw = static_cast<std::int32_t>(readU32LE(samplePtr));
                 normalized = static_cast<double>(raw) / 2147483648.0;
