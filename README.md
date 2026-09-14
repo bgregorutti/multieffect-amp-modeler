@@ -43,6 +43,10 @@ vst-python/       Python DSP pedal models (Big Muff, Tube Screamer, noise
                   C++ pedal blocks are ported from and validated against.
                   See vst-python/README.md.
 
+deploy/           Raspberry Pi provisioning script + step-by-step deployment
+                  guide: systemd services, Wi-Fi access point setup. See
+                  deploy/README.md.
+
 docs/             Cross-cutting design notes and open questions.
 
 scripts/          Dev-machine testing tools that don't belong to any one
@@ -80,8 +84,8 @@ scripts/          Dev-machine testing tools that don't belong to any one
   asset upload against control-daemon's protocol. OS file-picker integration
   is stubbed pending on-device testing (needs a real phone/emulator).
 - `footswitch`, `display`: not yet started — real GPIO/I2C hardware is
-  needed to build and validate these properly. `next_preset`/`prev_preset`
-  footswitch actions (a minimal two-switch "browse all presets" mapping)
-  are already supported by control-daemon, and exercised today by
-  `scripts/keyboard_footswitch.py`, for whenever a 2-switch pedal is the
-  first one wired up.
+  needed to build and validate these properly.
+- `deploy`: **script + guide written**, shellchecked and validated piece by
+  piece in this dev environment (unit-file verification, production build
+  paths) — but **not yet run end to end on real Raspberry Pi hardware**. See
+  deploy/README.md's "Honesty check" before running it.

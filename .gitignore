@@ -23,6 +23,10 @@ control-daemon/data/assets/
 # Node (mobile app tooling, if any)
 node_modules/
 
+# Deployment secrets (Wi-Fi password etc.) -- copy from
+# deploy/config.env.example instead of committing this.
+deploy/config.env
+
 # OS
 .DS_Store
 

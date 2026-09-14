@@ -1,0 +1,347 @@
+# Deploying to a Raspberry Pi
+
+Step-by-step guide to get `control-daemon` and `audio-engine` running as
+systemd services on a real Raspberry Pi, with the Pi broadcasting its own
+Wi-Fi access point for the mobile app to connect to (per
+[`ARCHITECTURE.md`](../ARCHITECTURE.md)'s "Connectivity" decision).
+
+**Honesty check before you start:** this script and guide were written and
+shellchecked in a sandboxed dev container with no Raspberry Pi, no audio
+hardware, and no way to test `apt`/`systemd`/`NetworkManager` behavior on
+real Pi OS. Every command is standard and individually well-trodden, but the
+script as a whole has **not been run against real hardware**. Treat this as
+a strong first draft: read it before running it, and expect to file a fix
+if something on your specific Pi/OS combination doesn't match. See "What
+this deploys, honestly" below for exactly what does and doesn't work yet
+regardless of deployment success.
+
+## What you need
+
+- A Raspberry Pi 4 or 5 (see `docs/open-questions.md` #1 -- which one is
+  still an open question, either works for this deployment).
+- A microSD card (16GB+) and a way to flash it (another computer with
+  [Raspberry Pi Imager](https://www.raspberrypi.com/software/)).
+- Power supply, and a case/cooling if you have one (not required to follow
+  this guide).
+- Either a monitor+keyboard for the Pi, or a way to SSH into it headlessly
+  (covered below).
+- A USB Audio 2.0 class-compliant interface, if you have one -- **not yet
+  used by anything in this repo** (no real-time audio I/O backend exists
+  yet, see "What this deploys, honestly"), but worth having plugged in so
+  it's there when that lands.
+
+## 1. Flash Raspberry Pi OS
+
+1. Open Raspberry Pi Imager on another computer, choose **Raspberry Pi OS
+   Lite (64-bit)** (no desktop environment needed -- everything here is
+   headless) for your Pi model.
+2. Before writing, click the gear icon (Advanced Options) and set:
+   - Hostname (e.g. `amppedal`).
+   - Enable SSH, with a password or your SSH public key.
+   - Username/password.
+   - Wi-Fi (SSID/password of your home/dev network, plus the **Wi-Fi
+     country** matching where you are) -- this is only so the Pi can reach
+     the internet for `apt`/`git` during setup; the pedal's own AP (set up
+     in step 4) replaces this once deployed, and you can remove this
+     network afterward if you like.
+   - Locale/timezone.
+3. Write the image, insert the SD card into the Pi, power it on.
+
+## 2. First boot and SSH in
+
+```bash
+ssh <username>@<hostname>.local          # or the Pi's IP address
+```
+
+If `.local` (mDNS) doesn't resolve, check your router's DHCP client list for
+the Pi's IP.
+
+```bash
+sudo apt update && sudo apt full-upgrade -y
+sudo reboot
+```
+
+## 3. Get the code onto the Pi
+
+```bash
+git clone https://github.com/bgregorutti/multieffect-amp-modeler.git
+cd multieffect-amp-modeler
+git checkout claude/modest-hypatia-xn646y   # or main/whatever branch you're deploying
+```
+
+(If the repo is private, use your usual GitHub auth -- an SSH remote or a
+personal access token -- `git clone` works the same either way.)
+
+## 4. Configure and run the install script
+
+```bash
+cp deploy/config.env.example deploy/config.env
+nano deploy/config.env        # set WIFI_SSID, WIFI_COUNTRY at minimum
+sudo ./deploy/install.sh
+```
+
+Or skip the config file and pass flags directly:
+
+```bash
+sudo ./deploy/install.sh --ssid MyPedal --wifi-country FR
+```
+
+Run `./deploy/install.sh --help` for the full flag list. What it does, in
+order (see the script itself -- it's commented step by step):
+
+1. Installs system packages (`python3`, build tools, `cmake`,
+   `nlohmann-json3-dev`, NetworkManager).
+2. Creates a dedicated, unprivileged system user (`ampmodeler` by default)
+   that both services run as.
+3. Creates `/var/lib/multieffect-amp-modeler/` (presets/banks/footswitch
+   mapping JSON + uploaded `.nam`/IR assets) -- **outside** the git
+   checkout, so redeploys never touch your data.
+4. Builds `audio-engine` in Release mode and sets up `control-daemon`'s
+   Python virtualenv.
+5. Installs and starts two systemd services: `multieffect-control-daemon`
+   and `multieffect-audio-engine`.
+6. Unless `--skip-ap`: turns the Pi's Wi-Fi into an access point via
+   NetworkManager (`nmcli`) using its built-in `ipv4.method shared` mode --
+   this runs a DHCP server + NAT for you, no manual `hostapd`/`dnsmasq`
+   config needed on a current (Bookworm+) Raspberry Pi OS. See the
+   appendix below if your image predates NetworkManager.
+
+It's idempotent: re-run it after a `git pull` to rebuild and redeploy, or
+after editing `deploy/config.env`. Use `--skip-build` for a config-only
+re-run (e.g. you only changed the SSID) or `--skip-ap` to leave networking
+alone (e.g. you're iterating on the services over Ethernet/your existing
+Wi-Fi and don't want to switch networks each time).
+
+## 5. Verify
+
+```bash
+systemctl status multieffect-control-daemon
+systemctl status multieffect-audio-engine
+journalctl -u multieffect-control-daemon -f    # Ctrl-C to stop following
+```
+
+From another machine on the same network as the Pi (or after connecting to
+the pedal's own AP -- see below), sanity-check the control daemon is
+actually answering:
+
+```bash
+curl -i http://<pi-ip>:8765/assets/upload   # expect a 405/400, not "connection refused"
+```
+
+or, for a real protocol check, install `websocat` on your dev machine and
+run through the handshake described in `control-daemon/README.md`:
+
+```bash
+websocat ws://<pi-ip>:8765/ws
+{"type": "hello", "role": "app"}
+```
+You should get a `state_snapshot` back.
+
+For `audio-engine`'s control socket (only reachable on the Pi itself, it's
+a Unix socket):
+
+```bash
+echo '{"cmd":"get_state"}' | nc -U /run/multieffect-amp-modeler/audio-engine.sock
+```
+
+Connect a phone to the `MultiEffectPedal` (or whatever `--ssid` you chose)
+Wi-Fi network and confirm it gets an IP address -- that's NetworkManager's
+DHCP-server-in-shared-mode working. The mobile app itself isn't packaged
+for install yet (no APK/IPA build step exists in this repo), so pointing
+the app at `ws://<pi-ip>:8765/ws` currently means running it from a dev
+machine per `mobile-app/README.md` while your phone/dev machine is on the
+pedal's AP or the same network.
+
+## 6. Reboot test
+
+```bash
+sudo reboot
+```
+
+After it comes back up, `systemctl status multieffect-control-daemon` and
+`multieffect-audio-engine` should both show `active (running)` without you
+doing anything -- both units are `enable`d, and the AP connection profile
+has `autoconnect yes`.
+
+## Redeploying after code changes
+
+```bash
+cd multieffect-amp-modeler
+git pull
+sudo ./deploy/install.sh --skip-ap    # skip-ap: no need to touch networking again
+```
+
+## Uninstalling
+
+```bash
+sudo ./deploy/uninstall.sh            # stops/disables services, keeps your data + AP config
+sudo ./deploy/uninstall.sh --purge    # also deletes /var/lib/multieffect-amp-modeler and the AP profile
+```
+
+## What this deploys, honestly
+
+Getting `systemctl status` to say `active (running)` is not the same as a
+working guitar pedal. As of this V1:
+
+- **`control-daemon` and `audio-engine` are not wired together.**
+  `control-daemon` still talks to a `NullAudioEngineClient` (it logs preset
+  changes but doesn't call anyone). `audio-engine`'s Unix control socket
+  exists and works (see step 5 above) but nothing drives it yet. Connecting
+  them is a documented follow-up -- see `audio-engine/README.md`'s
+  "Deviations from the plan" #5 and control-daemon's `AudioEngineClient`.
+- **`audio-engine` has no real-time audio I/O.** No ALSA/JACK/PortAudio
+  backend exists (see `audio-engine/README.md` deviation #1) -- plugging a
+  guitar into a USB interface right now does nothing. The engine currently
+  only proves out preset-loading/control-plane logic.
+- **No real NAM (WaveNet) inference yet** -- `.nam` files are parsed and
+  validated for real, but processed audio would currently just be a
+  passthrough/gain stub (deviation #2).
+- **No footswitch or onboard display exists yet** -- `footswitch/` and
+  `display/` in the repo layout are still just planned.
+- **No PREEMPT_RT kernel by default.** `docs/open-questions.md` #1 (Pi 4 vs
+  5, latency) is still open and needs this kernel (or Elk Audio OS) plus
+  real benchmarking once real audio I/O exists. `--enable-rt-kernel`
+  installs the `linux-image-rt-arm64` package if you want to get a head
+  start, but does not reboot into it or verify anything for you -- see
+  "Real-time kernel" below.
+
+In short: this deploys the two *processes* correctly and gets them running
+reliably as system services with real (if still partial) functionality
+behind them, on a Pi actually broadcasting its own Wi-Fi network -- but the
+guitar-to-speaker signal path itself isn't wired up yet.
+
+## Real-time kernel (optional, manual verification required)
+
+`--enable-rt-kernel` installs `linux-image-rt-arm64` (a PREEMPT_RT-patched
+kernel package, when available for your Raspberry Pi OS release) but
+deliberately does **not** reboot the Pi or make any other change --
+switching the kernel that boots is exactly the kind of hard-to-reverse,
+whole-system change this script shouldn't do unattended. After installing
+it:
+
+```bash
+sudo reboot
+uname -r        # look for a "-rt" suffix confirming the RT kernel booted
+```
+
+If `linux-image-rt-arm64` isn't available for your OS/architecture, the
+script says so and continues -- the alternative is
+[Elk Audio OS](https://elk.audio/) (a separate OS image, not an apt
+package; flashing it is a different path from this guide entirely, and
+would replace Raspberry Pi OS rather than layer on top of it).
+
+## Security notes
+
+- Both services run as a dedicated, unprivileged system user
+  (`ampmodeler`), not root, with systemd sandboxing (`ProtectSystem=strict`,
+  `NoNewPrivileges`, `ProtectHome`) limiting filesystem access to exactly
+  the data directory each one needs.
+- **Change the default Wi-Fi AP password.** If you didn't pass
+  `--wifi-password`/set it in `config.env`, `install.sh` generated a random
+  16-character one and printed it once -- it is not stored anywhere else.
+  Re-run `sudo ./deploy/install.sh --wifi-password 'new-password'` to
+  change it later.
+- `control-daemon`'s WebSocket API has no authentication (matching its
+  current design -- see `control-daemon/README.md`); this is acceptable
+  only because the Pi's own Wi-Fi AP is the trust boundary. Don't expose
+  port 8765 to a network you don't control (e.g. don't put the Pi on your
+  home Wi-Fi *and* port-forward 8765 to the internet).
+
+## Troubleshooting
+
+**`nmcli: command not found` / AP step warns and skips.** Your OS image
+predates NetworkManager (pre-Bookworm Raspberry Pi OS uses `dhcpcd` +
+`hostapd` + `dnsmasq` instead). Either upgrade to a current Raspberry Pi OS
+image, or set it up manually -- see the appendix below for the equivalent
+`hostapd`/`dnsmasq` config, then re-run `install.sh --skip-ap`.
+
+**Phones can't see the `MultiEffectPedal` network at all.** Almost always a
+missing/wrong Wi-Fi country code -- the radio won't transmit without one.
+Run `sudo raspi-config nonint get_wifi_country` to check, or
+`sudo raspi-config` > *Localisation Options* > *WLAN Country* to set it, then
+`sudo ./deploy/install.sh --skip-build` to reapply networking.
+
+**`multieffect-control-daemon` fails to start.** Check
+`journalctl -u multieffect-control-daemon -e`. Common causes: port 8765
+already bound by something else (`sudo ss -tlnp | grep 8765`); the venv at
+`control-daemon/.venv` is missing/broken (`sudo ./deploy/install.sh` without
+`--skip-build` rebuilds it).
+
+**`multieffect-audio-engine` fails to start.** Check
+`journalctl -u multieffect-audio-engine -e`. Common cause: the build is
+missing/stale -- `sudo ./deploy/install.sh` without `--skip-build` rebuilds
+it. If the build itself fails, check `nlohmann-json3-dev` actually
+installed (`dpkg -l | grep nlohmann`).
+
+**Permission denied writing to the data directory.** Check ownership:
+`ls -ld /var/lib/multieffect-amp-modeler` should be owned by the service
+user (`ampmodeler` by default). `sudo chown -R ampmodeler:ampmodeler
+/var/lib/multieffect-amp-modeler` fixes a mismatch (e.g. after manually
+poking around as root).
+
+**I changed `--service-user` and now nothing matches.** The service user is
+baked into the generated systemd units and the data directory's ownership;
+changing it after the fact requires either a full `uninstall.sh --purge`
+then reinstall, or manually `chown -R`ing the data directory to the new
+user and re-running `install.sh`.
+
+## Appendix: Wi-Fi AP without NetworkManager (older Raspberry Pi OS)
+
+If `nmcli` isn't available, the classic `dhcpcd` + `hostapd` + `dnsmasq`
+recipe (not automated by `install.sh` -- do this manually, then run
+`install.sh --skip-ap`):
+
+```bash
+sudo apt install -y hostapd dnsmasq
+sudo systemctl unmask hostapd
+```
+
+`/etc/hostapd/hostapd.conf`:
+```
+interface=wlan0
+driver=nl80211
+ssid=MultiEffectPedal
+hw_mode=g
+channel=7
+wmm_enabled=0
+auth_algs=1
+wpa=2
+wpa_passphrase=<your-password>
+wpa_key_mgmt=WPA-PSK
+rsn_pairwise=CCMP
+country_code=<CC>
+```
+
+`/etc/default/hostapd`: set `DAEMON_CONF="/etc/hostapd/hostapd.conf"`.
+
+`/etc/dnsmasq.conf` (append):
+```
+interface=wlan0
+dhcp-range=192.168.4.2,192.168.4.20,255.255.255.0,24h
+```
+
+`/etc/dhcpcd.conf` (append):
+```
+interface=wlan0
+static ip_address=192.168.4.1/24
+nohook wpa_supplicant
+```
+
+Then:
+```bash
+sudo systemctl enable --now hostapd dnsmasq
+sudo systemctl restart dhcpcd
+```
+
+## Reference: exactly what gets installed/changed on the Pi
+
+For anyone auditing before running this on their own hardware:
+
+| What | Where |
+|---|---|
+| apt packages | `python3`, `python3-venv`, `python3-pip`, `build-essential`, `cmake`, `pkg-config`, `nlohmann-json3-dev`, `network-manager`, `ca-certificates`, `curl` (+ `linux-image-rt-arm64` only with `--enable-rt-kernel`) |
+| system user | `ampmodeler` (or `--service-user`), no login shell |
+| data directory | `/var/lib/multieffect-amp-modeler/` (`state.json` + `assets/`) |
+| systemd units | `/etc/systemd/system/multieffect-control-daemon.service`, `/etc/systemd/system/multieffect-audio-engine.service` |
+| build output | `<repo>/audio-engine/build/`, `<repo>/control-daemon/.venv/` (inside your checkout, gitignored) |
+| NetworkManager | one connection profile named `multieffect-ap` (skippable with `--skip-ap`) |

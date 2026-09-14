@@ -31,11 +31,12 @@ client of its API, so the API contract is the thing worth stabilizing early.
 
 | Component | Language/Stack | Status |
 |---|---|---|
-| Control daemon | Python, FastAPI, WebSockets | In progress (`control-daemon/`) |
-| Audio engine | C++, JUCE (planned) | Not started |
-| Mobile app | Flutter | Not started |
+| Control daemon | Python, FastAPI, WebSockets | V1 built + tested (`control-daemon/`) |
+| Audio engine | C++20, CMake (JUCE deferred) | V1 built + tested (`audio-engine/`); not wired to control-daemon yet |
+| Mobile app | Flutter | V1 built + tested (`mobile-app/`) |
 | Footswitch relay | Python/C, GPIO (Pi) | Not started |
 | Onboard display | I2C LCD/OLED, driven by daemon broadcasts | Not started |
+| Deployment | Bash + systemd + NetworkManager | Script + guide written (`deploy/`); not yet run on real hardware |
 
 ## Design decisions
 
@@ -76,6 +77,22 @@ client of its API, so the API contract is the thing worth stabilizing early.
   connections are read-only/trigger-only per the guiding UX principle —
   configuration-editing commands from those roles are rejected with a typed
   error rather than silently applied.
+
+- **Deployment: systemd services + NetworkManager AP, not a custom init
+  system or hand-rolled hostapd/dnsmasq config.** `control-daemon` and
+  `audio-engine` run as systemd services under a dedicated unprivileged
+  system user, with `ProtectSystem=strict`/`ReadWritePaths`/`ReadOnlyPaths`
+  sandboxing scoped to exactly the persistent data directory each needs —
+  standard, auditable, and gives `Restart=on-failure` + boot-time
+  autostart for free. The Wi-Fi access point (spec section 3
+  "Connectivity") uses NetworkManager's built-in `ipv4.method shared` AP
+  mode rather than manually configuring `hostapd`/`dnsmasq`/`dhcpcd`,
+  since current (Bookworm+) Raspberry Pi OS ships NetworkManager by
+  default and `shared` mode already runs the DHCP server + NAT a
+  from-scratch AP needs. See `deploy/README.md` for the older-OS fallback
+  recipe. Persistent data (`/var/lib/multieffect-amp-modeler/`) lives
+  outside the git checkout so a redeploy (`git pull` + re-run) never
+  touches presets/banks/uploaded assets.
 
 ## Resource constraints
 

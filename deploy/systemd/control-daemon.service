@@ -1,0 +1,28 @@
+[Unit]
+Description=Multi-Effect Amp Modeler - control daemon
+Documentation=file://__REPO_DIR__/control-daemon/README.md
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__REPO_DIR__/control-daemon
+Environment=CONTROL_DAEMON_STORE_PATH=__DATA_DIR__/state.json
+Environment=CONTROL_DAEMON_HOST=0.0.0.0
+Environment=CONTROL_DAEMON_PORT=8765
+Environment=CONTROL_DAEMON_LOG_LEVEL=info
+ExecStart=__REPO_DIR__/control-daemon/.venv/bin/control-daemon
+Restart=on-failure
+RestartSec=2
+
+# Hardening (kept loose enough that writing __DATA_DIR__ still works).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=__DATA_DIR__
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

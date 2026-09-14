@@ -1,0 +1,27 @@
+[Unit]
+Description=Multi-Effect Amp Modeler - audio engine
+Documentation=file://__REPO_DIR__/audio-engine/README.md
+After=network.target
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+WorkingDirectory=__REPO_DIR__/audio-engine
+RuntimeDirectory=multieffect-amp-modeler
+RuntimeDirectoryMode=0770
+ExecStart=__REPO_DIR__/audio-engine/build/audio_engine /run/multieffect-amp-modeler/audio-engine.sock
+Restart=on-failure
+RestartSec=2
+
+# Hardening. The engine only ever READS uploaded .nam/IR files (never
+# writes into __DATA_DIR__ -- the control daemon owns writing there), so
+# this gets ReadOnlyPaths rather than control-daemon's ReadWritePaths.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadOnlyPaths=__DATA_DIR__
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
