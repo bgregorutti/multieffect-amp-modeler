@@ -9,6 +9,12 @@ This module is deliberately independent of asyncio/websockets: it exposes
 plain, synchronous methods. The WS layer (app.py) is responsible for role
 checks and for translating a successful mutation into a broadcast to
 connected clients, via the ``on_change`` callback hook.
+
+The rig/preset split (see models.py) lands here as two navigation paths:
+``_change_rig`` swaps the whole backline and reloads the engine's chain,
+while ``_change_preset`` only flips which of the current rig's blocks are
+enabled. Both end in the same place -- pushing a ``ResolvedPreset`` to the
+engine -- but only the former implies reloading a NAM model or an IR.
 """
 
 from __future__ import annotations
@@ -21,18 +27,21 @@ from .audio_engine_client import AudioEngineClient
 from .models import (
     Asset,
     AssetKind,
-    Bank,
     DaemonState,
     EffectBlock,
     FootswitchAction,
-    NextBankAction,
     NextPresetAction,
+    NextRigAction,
     Preset,
-    PrevBankAction,
+    PresetBlockState,
     PrevPresetAction,
-    SelectSlotAction,
+    PrevRigAction,
+    ResolvedPreset,
+    Rig,
+    SelectPresetAction,
     TapTempoAction,
     ToggleBypassAction,
+    resolve_preset,
 )
 from .persistence import load_state, save_state
 
@@ -82,146 +91,232 @@ class DaemonStateManager:
             self.on_change(reason)
 
     def state_view(self) -> dict:
-        """A JSON-serializable snapshot of the full daemon state."""
-        return self.state.model_dump(mode="json")
+        """A JSON-serializable snapshot of the full daemon state.
 
-    # -- presets --------------------------------------------------------------
+        ``active_rig_id``/``active_preset_id`` are derived rather than
+        stored: clients (the app, the onboard display) want to highlight
+        what is live without re-deriving it from two indices, but indices
+        remain the authoritative position.
+        """
+        view = self.state.model_dump(mode="json")
+        rig = self.active_rig()
+        preset = self.active_preset()
+        view["active_rig_id"] = rig.id if rig is not None else None
+        view["active_preset_id"] = preset.id if preset is not None else None
+        return view
+
+    # -- active position ----------------------------------------------------
+
+    def active_rig(self) -> Optional[Rig]:
+        if not (0 <= self.state.active_rig_index < len(self.state.rigs)):
+            return None
+        return self.state.rigs[self.state.active_rig_index]
+
+    def active_preset(self) -> Optional[Preset]:
+        rig = self.active_rig()
+        if rig is None:
+            return None
+        if not (0 <= self.state.active_preset_index < len(rig.presets)):
+            return None
+        return rig.presets[self.state.active_preset_index]
+
+    def resolved_active(self) -> Optional[ResolvedPreset]:
+        rig = self.active_rig()
+        preset = self.active_preset()
+        if rig is None or preset is None:
+            return None
+        return resolve_preset(rig, preset)
+
+    def _load_active(self) -> None:
+        """Push the currently-active resolved chain to the engine.
+
+        A no-op when nothing is selected -- an empty rig list or a rig with
+        no presets is a normal first-run state, not an error.
+        """
+        resolved = self.resolved_active()
+        if resolved is not None:
+            self.audio_engine.load_preset(resolved)
+
+    def _clamp_active(self) -> None:
+        """Keep the active indices inside the current rig/preset lists.
+
+        Called after any structural edit (delete, reorder) so the active
+        position can never dangle past the end of a shortened list.
+        """
+        if not self.state.rigs:
+            self.state.active_rig_index = 0
+            self.state.active_preset_index = 0
+            return
+
+        self.state.active_rig_index = max(
+            0, min(self.state.active_rig_index, len(self.state.rigs) - 1)
+        )
+        rig = self.state.rigs[self.state.active_rig_index]
+        if not rig.presets:
+            self.state.active_preset_index = 0
+        else:
+            self.state.active_preset_index = max(
+                0, min(self.state.active_preset_index, len(rig.presets) - 1)
+            )
+
+    # -- rigs ---------------------------------------------------------------
+
+    def create_rig(
+        self,
+        name: str,
+        chain: Optional[List[EffectBlock]] = None,
+    ) -> Rig:
+        for block in chain or []:
+            self._validate_asset_ref(block.asset_id)
+        rig = Rig(name=name, chain=list(chain or []))
+        self.state.rigs.append(rig)
+        self._notify("create_rig")
+        return rig
+
+    def update_rig(
+        self,
+        rig_id: str,
+        name: Optional[str] = None,
+        chain: Optional[List[EffectBlock]] = None,
+    ) -> Rig:
+        rig = self._get_rig(rig_id)
+        if name is not None:
+            rig.name = name
+        if chain is not None:
+            for block in chain:
+                self._validate_asset_ref(block.asset_id)
+            rig.chain = list(chain)
+            # Presets may reference blocks this edit removed. Drop those
+            # entries rather than leaving them to accumulate as silent
+            # cruft that resolves to nothing.
+            live_block_ids = {b.id for b in rig.chain}
+            for preset in rig.presets:
+                preset.block_states = {
+                    bid: st
+                    for bid, st in preset.block_states.items()
+                    if bid in live_block_ids
+                }
+
+        if rig is self.active_rig():
+            self._load_active()
+
+        self._notify("update_rig")
+        return rig
+
+    def delete_rig(self, rig_id: str) -> None:
+        rig = self._get_rig(rig_id)
+        was_active = rig is self.active_rig()
+        self.state.rigs = [r for r in self.state.rigs if r.id != rig_id]
+        self._clamp_active()
+        if was_active:
+            self._load_active()
+        self._notify("delete_rig")
+
+    def reorder_rigs(self, rig_ids: List[str]) -> None:
+        existing_ids = {r.id for r in self.state.rigs}
+        if set(rig_ids) != existing_ids or len(rig_ids) != len(self.state.rigs):
+            raise StateError(
+                "validation_error",
+                "reorder_rigs must list every existing rig id exactly once",
+            )
+        # Follow the active rig to its new position rather than letting the
+        # index point at whatever rig happens to land there.
+        active = self.active_rig()
+        by_id = {r.id: r for r in self.state.rigs}
+        self.state.rigs = [by_id[rig_id] for rig_id in rig_ids]
+        if active is not None:
+            self.state.active_rig_index = rig_ids.index(active.id)
+        self._clamp_active()
+        self._notify("reorder_rigs")
+
+    # -- presets (within a rig) ---------------------------------------------
 
     def create_preset(
         self,
+        rig_id: str,
         name: str,
-        blocks: Optional[List[EffectBlock]] = None,
-        nam_asset_id: Optional[str] = None,
-        ir_asset_id: Optional[str] = None,
+        block_states: Optional[Dict[str, PresetBlockState]] = None,
     ) -> Preset:
-        self._validate_asset_ref(nam_asset_id, AssetKind.NAM)
-        self._validate_asset_ref(ir_asset_id, AssetKind.IR)
-        preset = Preset(
-            name=name,
-            blocks=blocks or [],
-            nam_asset_id=nam_asset_id,
-            ir_asset_id=ir_asset_id,
-        )
-        self.state.presets[preset.id] = preset
+        rig = self._get_rig(rig_id)
+        self._validate_block_states(rig, block_states)
+        preset = Preset(name=name, block_states=dict(block_states or {}))
+        rig.presets.append(preset)
         self._notify("create_preset")
         return preset
 
     def update_preset(
         self,
+        rig_id: str,
         preset_id: str,
         name: Optional[str] = None,
-        blocks: Optional[List[EffectBlock]] = None,
-        nam_asset_id: Optional[str] = None,
-        ir_asset_id: Optional[str] = None,
+        block_states: Optional[Dict[str, PresetBlockState]] = None,
     ) -> Preset:
-        preset = self._get_preset(preset_id)
+        rig = self._get_rig(rig_id)
+        preset = self._get_preset(rig, preset_id)
+
         if name is not None:
             preset.name = name
-        if blocks is not None:
-            preset.blocks = blocks
-        if nam_asset_id is not None:
-            self._validate_asset_ref(nam_asset_id, AssetKind.NAM)
-            preset.nam_asset_id = nam_asset_id
-        if ir_asset_id is not None:
-            self._validate_asset_ref(ir_asset_id, AssetKind.IR)
-            preset.ir_asset_id = ir_asset_id
+        if block_states is not None:
+            self._validate_block_states(rig, block_states)
+            preset.block_states = dict(block_states)
         preset.updated_at = time.time()
 
-        if preset_id == self.state.active_preset_id:
-            # The currently-live preset changed shape -- push it to the
-            # engine again so what's playing matches what's stored.
-            self.audio_engine.load_preset(preset)
+        if preset is self.active_preset():
+            # The live preset changed shape -- push it again so what is
+            # playing matches what is stored.
+            self._load_active()
 
         self._notify("update_preset")
         return preset
 
-    def delete_preset(self, preset_id: str) -> None:
-        self._get_preset(preset_id)  # raises not_found if missing
-        del self.state.presets[preset_id]
-
-        for bank in self.state.banks:
-            bank.slots = [None if pid == preset_id else pid for pid in bank.slots]
-
-        if self.state.active_preset_id == preset_id:
-            self.state.active_preset_id = None
-
+    def delete_preset(self, rig_id: str, preset_id: str) -> None:
+        rig = self._get_rig(rig_id)
+        preset = self._get_preset(rig, preset_id)
+        was_active = preset is self.active_preset()
+        rig.presets = [p for p in rig.presets if p.id != preset_id]
+        self._clamp_active()
+        if was_active:
+            self._load_active()
         self._notify("delete_preset")
 
     def select_preset(
         self,
-        preset_id: Optional[str] = None,
-        bank_index: Optional[int] = None,
-        slot: Optional[int] = None,
+        rig_index: Optional[int] = None,
+        preset_index: Optional[int] = None,
     ) -> None:
-        if preset_id is not None:
-            preset = self._get_preset(preset_id)
-            self.state.active_preset_id = preset.id
-            location = self._find_slot_for_preset(preset_id)
-            if location is not None:
-                self.state.active_bank_index, self.state.active_slot = location
-            self.audio_engine.load_preset(preset)
-            self._notify("select_preset")
-            return
-
-        if bank_index is not None and slot is not None:
-            bank = self._get_bank_by_index(bank_index)
-            if not (0 <= slot < len(bank.slots)):
-                raise StateError(
-                    "validation_error",
-                    f"slot {slot} out of range for bank {bank_index!r} "
-                    f"(has {len(bank.slots)} slots)",
-                )
-            self.state.active_bank_index = bank_index
-            self.state.active_slot = slot
-            selected_preset_id = bank.slots[slot]
-            self.state.active_preset_id = selected_preset_id
-            if selected_preset_id is not None:
-                self.audio_engine.load_preset(self.state.presets[selected_preset_id])
-            self._notify("select_preset")
-            return
-
-        raise StateError(
-            "validation_error",
-            "select_preset requires either preset_id or (bank_index and slot)",
-        )
-
-    # -- banks ------------------------------------------------------------
-
-    def create_bank(self, name: str, num_slots: int = 4) -> Bank:
-        if num_slots < 1:
-            raise StateError("validation_error", "num_slots must be >= 1")
-        bank = Bank(name=name, slots=[None] * num_slots)
-        self.state.banks.append(bank)
-        self._notify("create_bank")
-        return bank
-
-    def update_bank(
-        self,
-        bank_id: str,
-        name: Optional[str] = None,
-        slots: Optional[List[Optional[str]]] = None,
-    ) -> Bank:
-        bank = self._get_bank(bank_id)
-        if name is not None:
-            bank.name = name
-        if slots is not None:
-            for preset_id in slots:
-                if preset_id is not None:
-                    self._get_preset(preset_id)
-            bank.slots = list(slots)
-        self._notify("update_bank")
-        return bank
-
-    def reorder_banks(self, bank_ids: List[str]) -> None:
-        existing_ids = {b.id for b in self.state.banks}
-        if set(bank_ids) != existing_ids or len(bank_ids) != len(self.state.banks):
+        """Move the active position. Either index may be given alone;
+        omitting ``rig_index`` selects within the current rig."""
+        if rig_index is None and preset_index is None:
             raise StateError(
                 "validation_error",
-                "reorder_banks must list every existing bank id exactly once",
+                "select_preset requires rig_index, preset_index, or both",
             )
-        by_id = {b.id: b for b in self.state.banks}
-        self.state.banks = [by_id[bank_id] for bank_id in bank_ids]
-        self._notify("reorder_banks")
+
+        target_rig_index = (
+            self.state.active_rig_index if rig_index is None else rig_index
+        )
+        if not (0 <= target_rig_index < len(self.state.rigs)):
+            raise StateError(
+                "validation_error",
+                f"rig_index {target_rig_index} out of range "
+                f"(have {len(self.state.rigs)} rigs)",
+            )
+        rig = self.state.rigs[target_rig_index]
+
+        target_preset_index = (
+            self.state.active_preset_index if preset_index is None else preset_index
+        )
+        if not (0 <= target_preset_index < len(rig.presets)):
+            raise StateError(
+                "validation_error",
+                f"preset_index {target_preset_index} out of range for rig "
+                f"{rig.name!r} (has {len(rig.presets)} presets)",
+            )
+
+        self.state.active_rig_index = target_rig_index
+        self.state.active_preset_index = target_preset_index
+        self._load_active()
+        self._notify("select_preset")
 
     # -- bypass / footswitch mapping ---------------------------------------
 
@@ -239,6 +334,20 @@ class DaemonStateManager:
 
     # -- assets -------------------------------------------------------------
 
+    def find_asset_by_sha256(self, sha256: Optional[str]) -> Optional[Asset]:
+        """Return the already-registered asset with this checksum, if any.
+
+        Content-addressed rather than filename-addressed on purpose: the same
+        IR routinely arrives under different names, and two different IRs
+        routinely arrive under the same name.
+        """
+        if sha256 is None:
+            return None
+        for asset in self.state.assets.values():
+            if asset.sha256 == sha256:
+                return asset
+        return None
+
     def register_asset(
         self,
         kind: AssetKind,
@@ -247,6 +356,13 @@ class DaemonStateManager:
         size_bytes: int = 0,
         sha256: Optional[str] = None,
     ) -> Asset:
+        existing = self.find_asset_by_sha256(sha256)
+        if existing is not None:
+            raise StateError(
+                "duplicate_asset",
+                f"asset with sha256 {sha256} already registered as "
+                f"{existing.id!r} ({existing.filename!r})",
+            )
         asset = Asset(
             kind=kind,
             filename=filename,
@@ -255,9 +371,9 @@ class DaemonStateManager:
             sha256=sha256,
         )
         self.state.assets[asset.id] = asset
-        # The engine resolves nam_asset_id/ir_asset_id off its own copy of
-        # this registry (it never reads the daemon's state directly), so a
-        # newly-registered asset must be pushed there before any preset
+        # The engine resolves block asset ids off its own copy of this
+        # registry (it never reads the daemon's state directly), so a
+        # newly-registered asset must be pushed there before any chain
         # referencing it is loaded -- otherwise a real AudioEngineClient's
         # load_preset() fails with "unknown asset id" for every fresh
         # upload. See audio_engine_client.py.
@@ -277,71 +393,55 @@ class DaemonStateManager:
         if action is None:
             return
 
-        if isinstance(action, SelectSlotAction):
-            self.select_preset(bank_index=self.state.active_bank_index, slot=action.slot)
-        elif isinstance(action, NextBankAction):
-            self._change_bank(+1)
-        elif isinstance(action, PrevBankAction):
-            self._change_bank(-1)
-        elif isinstance(action, ToggleBypassAction):
-            self.set_bypass(not self.state.bypass)
+        if isinstance(action, NextRigAction):
+            self._change_rig(+1)
+        elif isinstance(action, PrevRigAction):
+            self._change_rig(-1)
         elif isinstance(action, NextPresetAction):
             self._change_preset(+1)
         elif isinstance(action, PrevPresetAction):
             self._change_preset(-1)
+        elif isinstance(action, SelectPresetAction):
+            self.select_preset(preset_index=action.index)
+        elif isinstance(action, ToggleBypassAction):
+            self.set_bypass(not self.state.bypass)
         elif isinstance(action, TapTempoAction):
             self._tap_tempo()
 
-    def _change_bank(self, delta: int) -> None:
-        if not self.state.banks:
+    def _change_rig(self, delta: int) -> None:
+        """Step to the next/previous rig, wrapping around.
+
+        This is the expensive path: a different rig means a different amp
+        and cab, so the engine reloads its NAM model and IR.
+        """
+        if not self.state.rigs:
             return
-        new_index = (self.state.active_bank_index + delta) % len(self.state.banks)
-        self.state.active_bank_index = new_index
-        bank = self.state.banks[new_index]
-        slot = self.state.active_slot
-        preset_id = bank.slots[slot] if 0 <= slot < len(bank.slots) else None
-        self.state.active_preset_id = preset_id
-        if preset_id is not None:
-            self.audio_engine.load_preset(self.state.presets[preset_id])
-        reason = "footswitch_next_bank" if delta > 0 else "footswitch_prev_bank"
-        self._notify(reason)
+        self.state.active_rig_index = (
+            self.state.active_rig_index + delta
+        ) % len(self.state.rigs)
+        # Landing on a rig with fewer presets must not leave the preset
+        # index dangling past the end.
+        self._clamp_active()
+        self._load_active()
+        self._notify("footswitch_next_rig" if delta > 0 else "footswitch_prev_rig")
 
     def _change_preset(self, delta: int) -> None:
-        """Steps to the next/previous assigned slot, scanning across banks
-        in (bank order, slot order), wrapping around. A no-op if no bank
-        has any preset assigned."""
-        assigned = [
-            (bank_index, slot_index, preset_id)
-            for bank_index, bank in enumerate(self.state.banks)
-            for slot_index, preset_id in enumerate(bank.slots)
-            if preset_id is not None
-        ]
-        if not assigned:
+        """Step within the current rig's presets, wrapping around.
+
+        Never crosses into another rig: preset block ids are only meaningful
+        against their own rig's chain, and a switch that silently swapped
+        the amp mid-song would be a bug.
+        """
+        rig = self.active_rig()
+        if rig is None or not rig.presets:
             return
-
-        # Keyed on active_preset_id rather than (active_bank_index,
-        # active_slot): those coordinates default to (0, 0) even when
-        # nothing is actually selected (active_preset_id is None), which
-        # would otherwise collide with a real assigned slot at (0, 0) and
-        # make the very first "next" press skip over it.
-        current = next(
-            (i for i, (_, _, pid) in enumerate(assigned) if pid == self.state.active_preset_id),
-            None,
+        self.state.active_preset_index = (
+            self.state.active_preset_index + delta
+        ) % len(rig.presets)
+        self._load_active()
+        self._notify(
+            "footswitch_next_preset" if delta > 0 else "footswitch_prev_preset"
         )
-        if current is None:
-            # Nothing currently active in the assigned list -- "next" from
-            # here should land on the first entry, "prev" on the last.
-            current = -1 if delta > 0 else 0
-
-        new_bank_index, new_slot, preset_id = assigned[(current + delta) % len(assigned)]
-
-        self.state.active_bank_index = new_bank_index
-        self.state.active_slot = new_slot
-        self.state.active_preset_id = preset_id
-        self.audio_engine.load_preset(self.state.presets[preset_id])
-
-        reason = "footswitch_next_preset" if delta > 0 else "footswitch_prev_preset"
-        self._notify(reason)
 
     def _tap_tempo(self) -> None:
         now = self._clock()
@@ -369,44 +469,45 @@ class DaemonStateManager:
 
     # -- lookups / validation -------------------------------------------------
 
-    def _get_preset(self, preset_id: str) -> Preset:
-        preset = self.state.presets.get(preset_id)
-        if preset is None:
-            raise StateError("not_found", f"no preset with id {preset_id!r}")
-        return preset
+    def _get_rig(self, rig_id: str) -> Rig:
+        for rig in self.state.rigs:
+            if rig.id == rig_id:
+                return rig
+        raise StateError("not_found", f"no rig with id {rig_id!r}")
 
-    def _get_bank(self, bank_id: str) -> Bank:
-        for bank in self.state.banks:
-            if bank.id == bank_id:
-                return bank
-        raise StateError("not_found", f"no bank with id {bank_id!r}")
+    def _get_preset(self, rig: Rig, preset_id: str) -> Preset:
+        for preset in rig.presets:
+            if preset.id == preset_id:
+                return preset
+        raise StateError(
+            "not_found", f"no preset with id {preset_id!r} in rig {rig.id!r}"
+        )
 
-    def _get_bank_by_index(self, bank_index: int) -> Bank:
-        if not (0 <= bank_index < len(self.state.banks)):
+    def _validate_block_states(
+        self, rig: Rig, block_states: Optional[Dict[str, PresetBlockState]]
+    ) -> None:
+        if not block_states:
+            return
+        chain_ids = {b.id for b in rig.chain}
+        unknown = set(block_states) - chain_ids
+        if unknown:
             raise StateError(
                 "validation_error",
-                f"bank_index {bank_index} out of range (have {len(self.state.banks)} banks)",
+                f"block_states references blocks not in rig {rig.id!r}: "
+                f"{sorted(unknown)}",
             )
-        return self.state.banks[bank_index]
 
-    def _find_slot_for_preset(self, preset_id: str) -> Optional[tuple]:
-        for bank_index, bank in enumerate(self.state.banks):
-            for slot_index, slot_preset_id in enumerate(bank.slots):
-                if slot_preset_id == preset_id:
-                    return (bank_index, slot_index)
-        return None
-
-    def _validate_asset_ref(self, asset_id: Optional[str], kind: AssetKind) -> None:
+    def _validate_asset_ref(self, asset_id: Optional[str]) -> None:
+        """Assets must exist, but a block's ``type`` is not checked against
+        the asset's ``kind``: block types are opaque engine-defined strings
+        (see models.py) and this daemon deliberately keeps no catalog of
+        which types imply which asset kind. Existence is the invariant that
+        actually matters -- the engine hard-errors on an unknown asset id.
+        """
         if asset_id is None:
             return
-        asset = self.state.assets.get(asset_id)
-        if asset is None:
+        if asset_id not in self.state.assets:
             raise StateError("not_found", f"no asset with id {asset_id!r}")
-        if asset.kind != kind:
-            raise StateError(
-                "validation_error",
-                f"asset {asset_id!r} is kind {asset.kind!r}, expected {kind!r}",
-            )
 
 
 def _default_engine() -> AudioEngineClient:

@@ -5,7 +5,8 @@ import '../models/ws_messages.dart';
 import '../state/daemon_state_controller.dart';
 
 /// Configures the footswitch mapping: which of the five action types
-/// (`select_slot`, `next_bank`, `prev_bank`, `toggle_bypass`, `tap_tempo`)
+/// (`next_rig`, `prev_rig`, `next_preset`, `prev_preset`, `select_preset`,
+/// `toggle_bypass`, `tap_tempo`)
 /// each physical switch index triggers.
 ///
 /// `set_footswitch_mapping` replaces the *entire* mapping (not a merge), so
@@ -57,14 +58,18 @@ class _FootswitchMappingScreenState extends State<FootswitchMappingScreen> {
 
   FootswitchAction _actionForKind(String kind, FootswitchAction current) {
     switch (kind) {
-      case 'select_slot':
-        return SelectSlotAction(
-          slot: current is SelectSlotAction ? current.slot : 0,
+      case 'next_rig':
+        return const NextRigAction();
+      case 'prev_rig':
+        return const PrevRigAction();
+      case 'next_preset':
+        return const NextPresetAction();
+      case 'prev_preset':
+        return const PrevPresetAction();
+      case 'select_preset':
+        return SelectPresetAction(
+          index: current is SelectPresetAction ? current.index : 0,
         );
-      case 'next_bank':
-        return const NextBankAction();
-      case 'prev_bank':
-        return const PrevBankAction();
       case 'toggle_bypass':
         return const ToggleBypassAction();
       case 'tap_tempo':
@@ -132,17 +137,19 @@ class _FootswitchMappingScreenState extends State<FootswitchMappingScreen> {
                         },
                       ),
                     ),
-                    if (_mapping[index] is SelectSlotAction)
+                    if (_mapping[index] is SelectPresetAction)
                       SizedBox(
                         width: 64,
                         child: TextFormField(
-                          key: Key('select-slot-field-$index'),
+                          key: Key('select-preset-index-field-$index'),
                           initialValue:
-                              (_mapping[index] as SelectSlotAction).slot.toString(),
+                              (_mapping[index] as SelectPresetAction)
+                                  .index
+                                  .toString(),
                           keyboardType: TextInputType.number,
                           onChanged: (v) {
-                            final slot = int.tryParse(v) ?? 0;
-                            _setAction(index, SelectSlotAction(slot: slot));
+                            final i = int.tryParse(v) ?? 0;
+                            _setAction(index, SelectPresetAction(index: i));
                           },
                         ),
                       ),

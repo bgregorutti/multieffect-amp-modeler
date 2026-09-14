@@ -20,9 +20,12 @@
 namespace audio_engine {
 
 void EngineChain::process(float* buffer, std::size_t numSamples) {
-    if (namModel) namModel->process(buffer, numSamples);
-    for (auto& block : effects) block->process(buffer, numSamples);
-    if (cabinet) cabinet->process(buffer, numSamples);
+    // `processOrder` is the preset's own block order (amp and cab
+    // included), not a fixed amp -> effects -> cab topology: the daemon
+    // sends a fully resolved chain whose ordering is a user-visible
+    // decision (a delay before vs. after the cab is audibly different), so
+    // the engine replays exactly what it was given.
+    for (EffectBlock* block : processOrder) block->process(buffer, numSamples);
 
     // Defensive final clamp, not a design assumption that anything above
     // is broken: cabinet-IR energy normalization (convolution.hpp) makes
@@ -86,29 +89,51 @@ void ResourceManager::loadPreset(const Preset& preset) {
     auto chain = std::make_unique<EngineChain>();
     chain->presetId = preset.id;
 
-    if (preset.nam_asset_id.has_value()) {
-        auto it = assets_.find(*preset.nam_asset_id);
-        if (it == assets_.end()) {
-            throw std::runtime_error("preset '" + preset.id + "' references unknown nam_asset_id '" +
-                                      *preset.nam_asset_id + "'");
+    // Asset references live on the blocks now (the daemon's ResolvedBlock
+    // carries its own asset_id), so validate every one of them up front --
+    // including blocks that are currently disabled, since a preset that
+    // names an asset the engine was never told about is a desync with the
+    // daemon regardless of whether that block happens to be switched on.
+    // Doing it before any loading also means an unknown id leaves the
+    // previously loaded chain untouched rather than half-replaced.
+    for (const auto& blockSpec : preset.blocks) {
+        if (!blockSpec.asset_id.has_value()) continue;
+        if (assets_.find(*blockSpec.asset_id) == assets_.end()) {
+            throw std::runtime_error("preset '" + preset.id + "' block '" + blockSpec.id +
+                                     "' references unknown asset_id '" + *blockSpec.asset_id + "'");
         }
-        chain->namModel = loader_->loadNam(it->second.stored_path);
-    }
-
-    if (preset.ir_asset_id.has_value()) {
-        auto it = assets_.find(*preset.ir_asset_id);
-        if (it == assets_.end()) {
-            throw std::runtime_error("preset '" + preset.id + "' references unknown ir_asset_id '" +
-                                      *preset.ir_asset_id + "'");
-        }
-        chain->ir = loader_->loadIr(it->second.stored_path, sampleRate_);
-        chain->cabinet = std::make_unique<ConvolutionEngine>(chain->ir->samples);
     }
 
     chain->effects.reserve(preset.blocks.size());
+    chain->processOrder.reserve(preset.blocks.size());
     for (const auto& blockSpec : preset.blocks) {
         if (!blockSpec.enabled) continue;
+
+        // "nam" and "ir" blocks are the amp and the cab: they're ordinary
+        // chain positions, but their processing comes from a loaded binary
+        // asset rather than from createEffectBlock(). A block of either
+        // type with no asset_id has nothing to play through, so it's
+        // simply skipped (fail safe, same spirit as the unknown-type
+        // fallback in createEffectBlock).
+        if (blockSpec.type == "nam") {
+            if (!blockSpec.asset_id.has_value()) continue;
+            const Asset& asset = assets_.at(*blockSpec.asset_id);
+            chain->namModel = loader_->loadNam(asset.stored_path);
+            if (chain->namModel) chain->processOrder.push_back(chain->namModel.get());
+            continue;
+        }
+        if (blockSpec.type == "ir") {
+            if (!blockSpec.asset_id.has_value()) continue;
+            const Asset& asset = assets_.at(*blockSpec.asset_id);
+            chain->ir = loader_->loadIr(asset.stored_path, sampleRate_);
+            if (!chain->ir) continue;
+            chain->cabinet = std::make_unique<ConvolutionEngine>(chain->ir->samples);
+            chain->processOrder.push_back(chain->cabinet.get());
+            continue;
+        }
+
         chain->effects.push_back(createEffectBlock(blockSpec));
+        chain->processOrder.push_back(chain->effects.back().get());
     }
 
     chain->prepare(sampleRate_);

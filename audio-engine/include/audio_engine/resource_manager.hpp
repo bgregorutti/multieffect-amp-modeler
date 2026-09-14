@@ -62,27 +62,38 @@ public:
 // `type` values: "gain", "eq", "delay", "passthrough". An unrecognized
 // type falls back to a PassthroughBlock (fail safe rather than fail
 // closed -- a preset referencing a not-yet-implemented block type still
-// loads and plays, just without that block's processing).
+// loads and plays, just without that block's processing). The asset-backed
+// types "nam" and "ir" are NOT built here: ResourceManager::loadPreset
+// handles those itself, since they need an IAssetLoader.
 std::unique_ptr<EffectBlock> createEffectBlock(const EffectBlockSpec& spec);
 
 // The fully-prepared, ready-to-run resources for one preset: the NAM
-// model (possibly null if the preset has no nam_asset_id), the cabinet IR
-// (possibly null likewise), and the ordered effect chain built from
-// preset.blocks. Every EffectBlock (including the NAM model) has already
-// had prepare(sampleRate) called on it -- an EngineChain is meant to be
-// fully "preloaded" before it's handed to a PresetSwitcher crossfade (see
+// model (possibly null if no enabled block of type "nam" carries an
+// asset_id), the cabinet IR (possibly null likewise), and the effect
+// blocks built from the preset's remaining enabled blocks. Every
+// EffectBlock (including the NAM model) has already had
+// prepare(sampleRate) called on it -- an EngineChain is meant to be fully
+// "preloaded" before it's handed to a PresetSwitcher crossfade (see
 // preset_switcher.hpp).
 struct EngineChain {
     std::string presetId;
-    std::shared_ptr<INamModel> namModel;         // null if preset has no nam_asset_id
-    std::shared_ptr<IrHandle> ir;                 // null if preset has no ir_asset_id
+    std::shared_ptr<INamModel> namModel;         // null if no enabled "nam" block with an asset
+    std::shared_ptr<IrHandle> ir;                 // null if no enabled "ir" block with an asset
     std::unique_ptr<ConvolutionEngine> cabinet;   // built from ir->samples; null iff ir is null
-    std::vector<std::unique_ptr<EffectBlock>> effects;  // from preset.blocks, in order
+    std::vector<std::unique_ptr<EffectBlock>> effects;  // non-amp/cab blocks, in preset order
 
-    // Runs the whole chain over `buffer` in place, in signal-path order:
-    // NAM model (amp/preamp sim) -> preset.blocks effects, in order ->
-    // cabinet IR convolution. Suitable for adapting directly to a
-    // PresetSwitcher::ChainFn via a lambda capturing `this`.
+    // Every block to run, in the preset's own order (amp and cab
+    // included). Non-owning: each pointer aliases `namModel`, `cabinet` or
+    // an element of `effects`, all of which outlive it because they're
+    // members of the same chain. Populated by ResourceManager::loadPreset,
+    // which reserves `effects` up front so these stay valid.
+    std::vector<EffectBlock*> processOrder;
+
+    // Runs the whole chain over `buffer` in place, walking `processOrder`
+    // -- i.e. the exact block order the daemon sent, amp and cab included,
+    // since where the cab sits relative to the effects is audible and is
+    // the user's choice, not the engine's. Suitable for adapting directly
+    // to a PresetSwitcher::ChainFn via a lambda capturing `this`.
     void process(float* buffer, std::size_t numSamples);
     void prepare(double sampleRate);
 };
@@ -97,18 +108,19 @@ public:
     void registerAsset(const Asset& asset);
     const std::map<std::string, Asset>& assets() const { return assets_; }
 
-    // Builds a brand new EngineChain for `preset` (loading its nam/ir
-    // assets, if referenced and registered, and constructing its effect
-    // blocks), then atomically replaces the current chain. The old
+    // Builds a brand new EngineChain for `preset` (loading the assets its
+    // blocks reference and constructing its effect blocks, in the
+    // preset's own order), then atomically replaces the current chain. The old
     // chain's shared_ptrs are dropped as part of this call, so if nothing
     // else is holding a reference (the expected steady-state case), its
     // NAM model / IR resources are released synchronously, before this
     // call returns.
     //
     // Throws PresetParseError (via preset validation) is not done here --
-    // callers pass an already-parsed Preset; throws std::out_of_range /
-    // a descriptive std::runtime_error if nam_asset_id/ir_asset_id is set
-    // but not a registered asset id.
+    // callers pass an already-parsed Preset; throws a descriptive
+    // std::runtime_error if any block (enabled or not) carries an
+    // asset_id that is not a registered asset id, in which case the
+    // currently loaded chain is left untouched.
     void loadPreset(const Preset& preset);
 
     // The currently active chain, or nullptr if nothing has been loaded

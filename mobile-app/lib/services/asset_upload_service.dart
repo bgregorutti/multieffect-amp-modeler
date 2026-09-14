@@ -82,6 +82,16 @@ class AssetUploadService {
       body: file.bytes,
     );
 
+    // The daemon dedups by content checksum, so re-uploading the same IR or
+    // .nam under any filename is refused rather than silently duplicated.
+    if (response.statusCode == 409) {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      throw DuplicateAssetException(
+        body['message'] as String? ?? 'asset already registered',
+        existingAssetId: body['existing_asset_id'] as String?,
+      );
+    }
+
     if (response.statusCode != 200) {
       throw AssetUploadException(
         'upload failed with status ${response.statusCode}: ${response.body}',
@@ -122,4 +132,15 @@ class AssetUploadException implements Exception {
 
   @override
   String toString() => 'AssetUploadException: $message';
+}
+
+/// The uploaded bytes are already in the daemon's asset library. Carries the
+/// id of the asset that already holds this content so the UI can point at it
+/// instead of just reporting a failure.
+class DuplicateAssetException extends AssetUploadException {
+  final String? existingAssetId;
+  const DuplicateAssetException(super.message, {this.existingAssetId});
+
+  @override
+  String toString() => 'DuplicateAssetException: $message';
 }

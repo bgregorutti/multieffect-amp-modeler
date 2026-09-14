@@ -4,7 +4,7 @@ import 'services/asset_upload_service.dart';
 import 'services/daemon_client.dart';
 import 'state/daemon_state_controller.dart';
 import 'screens/assets_screen.dart';
-import 'screens/banks_screen.dart';
+import 'screens/rig_list_screen.dart';
 import 'screens/connection_screen.dart';
 import 'screens/footswitch_mapping_screen.dart';
 import 'screens/preset_list_screen.dart';
@@ -70,7 +70,7 @@ class _MultiEffectAppState extends State<MultiEffectApp> {
   }
 }
 
-/// Bottom-navigation shell holding the six top-level screens.
+/// Bottom-navigation shell holding the five top-level screens.
 class HomeShell extends StatefulWidget {
   final DaemonStateController controller;
   final AssetUploadService uploadService;
@@ -106,8 +106,8 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final screens = [
       ConnectionScreen(controller: widget.controller),
+      RigListScreen(controller: widget.controller),
       PresetListScreen(controller: widget.controller),
-      BanksScreen(controller: widget.controller),
       FootswitchMappingScreen(controller: widget.controller),
       AssetsScreen(
         controller: widget.controller,
@@ -122,10 +122,10 @@ class _HomeShellState extends State<HomeShell> {
         selectedIndex: _index,
         onDestinationSelected: (i) => setState(() => _index = i),
         destinations: const [
-          NavigationDestination(icon: Icon(Icons.speaker), label: 'Status'),
-          NavigationDestination(icon: Icon(Icons.piano), label: 'Presets'),
           NavigationDestination(
-              icon: Icon(Icons.view_column), label: 'Banks'),
+              icon: Icon(Icons.monitor_heart), label: 'Status'),
+          NavigationDestination(icon: Icon(Icons.speaker), label: 'Rigs'),
+          NavigationDestination(icon: Icon(Icons.piano), label: 'Presets'),
           NavigationDestination(
               icon: Icon(Icons.settings_input_component), label: 'Footswitch'),
           NavigationDestination(

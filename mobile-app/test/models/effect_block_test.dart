@@ -1,47 +1,63 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_app/models/effect_block.dart';
 
-import 'protocol_fixtures.dart';
-
 void main() {
-  group('EffectBlock', () {
-    test('parses the create_preset README fixture block', () {
-      final blockJson =
-          (createPresetFixture['blocks'] as List).first as Map<String, dynamic>;
-      final block = EffectBlock.fromJson(blockJson);
+  test('round-trips every field through JSON', () {
+    const json = {
+      'id': 'amp',
+      'type': 'nam',
+      'asset_id': 'nam1',
+      'pinned': true,
+      'enabled': true,
+      'params': {'gain': 4.2, 'label': 'hall', 'sync': false, 'count': 3},
+    };
 
-      expect(block.type, 'reverb');
-      expect(block.enabled, true);
-      expect(block.params, {'decay': 4.2});
+    final block = EffectBlock.fromJson(Map<String, dynamic>.from(json));
+
+    expect(block.id, 'amp');
+    expect(block.type, 'nam');
+    expect(block.assetId, 'nam1');
+    expect(block.pinned, isTrue);
+    expect(block.params['gain'], 4.2);
+    expect(block.params['label'], 'hall');
+    expect(block.params['sync'], false);
+    expect(block.params['count'], 3);
+    expect(block.toJson(), json);
+  });
+
+  test('asset_id survives as null rather than being dropped', () {
+    final block = EffectBlock.fromJson({
+      'id': 'dist',
+      'type': 'distortion',
+      'asset_id': null,
+      'enabled': false,
     });
 
-    test('round-trips through toJson/fromJson', () {
-      const original = EffectBlock(
-        type: 'delay',
-        enabled: false,
-        params: {'time_ms': 350, 'feedback': 0.4, 'sync': true, 'name': 'x'},
-      );
+    expect(block.assetId, isNull);
+    expect(block.pinned, isFalse, reason: 'pinned defaults to false');
+    expect(block.toJson()['asset_id'], isNull);
+    expect(block.toJson().containsKey('asset_id'), isTrue);
+  });
 
-      final roundTripped = EffectBlock.fromJson(original.toJson());
+  test('defaults match the daemon: enabled true, pinned false, no params', () {
+    final block = EffectBlock.fromJson({'id': 'x', 'type': 'reverb'});
 
-      expect(roundTripped.type, original.type);
-      expect(roundTripped.enabled, original.enabled);
-      expect(roundTripped.params, original.params);
-    });
+    expect(block.enabled, isTrue);
+    expect(block.pinned, isFalse);
+    expect(block.params, isEmpty);
+    expect(block.assetId, isNull);
+  });
 
-    test('defaults enabled=true and params={} when omitted', () {
-      final block = EffectBlock.fromJson({'type': 'noop'});
-      expect(block.enabled, true);
-      expect(block.params, isEmpty);
-    });
+  test('copyWith can clear assetId via the sentinel closure', () {
+    const block = EffectBlock(id: 'cab', type: 'ir', assetId: 'ir1');
 
-    test('copyWith overrides only the given fields', () {
-      const original = EffectBlock(type: 'reverb', params: {'decay': 1.0});
-      final updated = original.copyWith(enabled: false);
+    expect(block.copyWith().assetId, 'ir1', reason: 'omitted means unchanged');
+    expect(block.copyWith(assetId: () => null).assetId, isNull);
+    expect(block.copyWith(assetId: () => 'ir2').assetId, 'ir2');
+  });
 
-      expect(updated.type, 'reverb');
-      expect(updated.enabled, false);
-      expect(updated.params, {'decay': 1.0});
-    });
+  test('copyWith preserves the id', () {
+    const block = EffectBlock(id: 'amp', type: 'nam');
+    expect(block.copyWith(type: 'other').id, 'amp');
   });
 }

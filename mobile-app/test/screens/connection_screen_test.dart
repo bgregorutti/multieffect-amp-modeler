@@ -8,7 +8,7 @@ import 'fake_daemon_client.dart';
 import 'test_fixtures.dart';
 
 void main() {
-  testWidgets('shows connected status, active preset, bypass and tempo',
+  testWidgets('shows connected status, active rig and preset, bypass and tempo',
       (tester) async {
     final fakeClient = FakeDaemonClient(state: sampleState);
     final controller = DaemonStateController(fakeClient);
@@ -18,7 +18,11 @@ void main() {
     ));
 
     expect(find.text('Connected'), findsOneWidget);
-    expect(find.text('Ambient Swell'), findsOneWidget);
+    // Both levels are shown: which backline is loaded, and which preset of
+    // it is live.
+    expect(find.text('Ampeg SVT'), findsOneWidget);
+    expect(find.text('Clean'), findsOneWidget);
+    expect(find.text('Preset 1 of 2'), findsOneWidget);
     expect(find.text('120.0 BPM'), findsOneWidget);
 
     final bypassSwitch =

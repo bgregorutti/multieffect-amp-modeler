@@ -25,6 +25,7 @@ class _FakeUploadServer {
   HttpServer? _server;
   final List<Map<String, String>> receivedQuery = [];
   final List<List<int>> receivedBodies = [];
+  final Map<String, String> _registeredByDigest = {};
 
   int get port => _server!.port;
   Uri get baseUrl => Uri.parse('http://127.0.0.1:$port');
@@ -54,6 +55,24 @@ class _FakeUploadServer {
         }
 
         final digest = sha256.convert(bodyBytes);
+
+        // Mirror the real daemon's content-checksum dedup: identical bytes
+        // under any filename are refused with 409, never stored twice.
+        final existingId = _registeredByDigest[digest.toString()];
+        if (existingId != null) {
+          request.response.statusCode = 409;
+          request.response.headers.contentType = ContentType.json;
+          request.response.write(jsonEncode({
+            'error': 'duplicate_asset',
+            'message':
+                'identical content already registered as asset $existingId',
+            'existing_asset_id': existingId,
+          }));
+          await request.response.close();
+          continue;
+        }
+        _registeredByDigest[digest.toString()] =
+            'asset-${_registeredByDigest.length + 1}';
 
         request.response.headers.contentType = ContentType.json;
         request.response.write(jsonEncode({
@@ -126,13 +145,17 @@ class _FakeDaemonClientForRegister extends DaemonClientBase {
   Future<Map<String, dynamic>> selectPreset(SelectPresetCommand cmd) =>
       throw UnimplementedError();
   @override
-  Future<Map<String, dynamic>> createBank(CreateBankCommand cmd) =>
+  Future<Map<String, dynamic>> createRig(CreateRigCommand cmd) =>
       throw UnimplementedError();
   @override
-  Future<Map<String, dynamic>> updateBank(UpdateBankCommand cmd) =>
+  Future<Map<String, dynamic>> updateRig(UpdateRigCommand cmd) =>
       throw UnimplementedError();
   @override
-  Future<Map<String, dynamic>> reorderBanks(ReorderBanksCommand cmd) =>
+  Future<Map<String, dynamic>> deleteRig(DeleteRigCommand cmd) =>
+      throw UnimplementedError();
+
+  @override
+  Future<Map<String, dynamic>> reorderRigs(ReorderRigsCommand cmd) =>
       throw UnimplementedError();
   @override
   Future<Map<String, dynamic>> setBypass(SetBypassCommand cmd) =>
@@ -212,6 +235,49 @@ void main() {
       expect(result['asset']['id'], 'registered-1');
     },
   );
+
+  test(
+    're-uploading identical bytes under a different name throws '
+    'DuplicateAssetException carrying the existing asset id',
+    () async {
+      final bytes = Uint8List.fromList(List.generate(512, (i) => i % 256));
+
+      final first = await service.uploadBytes(
+        kind: 'ir',
+        file: PickedFile(filename: 'cab_8x10.wav', bytes: bytes),
+      );
+      expect(first.filename, 'cab_8x10.wav');
+
+      try {
+        await service.uploadBytes(
+          kind: 'ir',
+          file: PickedFile(filename: 'ampeg_fridge.wav', bytes: bytes),
+        );
+        fail('expected a DuplicateAssetException');
+      } on DuplicateAssetException catch (e) {
+        expect(e.existingAssetId, 'asset-1');
+        expect(e.message, contains('already registered'));
+      }
+    },
+  );
+
+  test('different bytes are not treated as duplicates', () async {
+    await service.uploadBytes(
+      kind: 'ir',
+      file: PickedFile(
+        filename: 'a.wav',
+        bytes: Uint8List.fromList([1, 2, 3]),
+      ),
+    );
+    final second = await service.uploadBytes(
+      kind: 'ir',
+      file: PickedFile(
+        filename: 'b.wav',
+        bytes: Uint8List.fromList([4, 5, 6]),
+      ),
+    );
+    expect(second.filename, 'b.wav');
+  });
 
   test('a non-200 response throws AssetUploadException', () async {
     await expectLater(

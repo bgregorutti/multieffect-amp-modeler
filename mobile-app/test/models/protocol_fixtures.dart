@@ -1,9 +1,11 @@
-/// Fixture payloads copied verbatim from `control-daemon/README.md`'s
-/// "WebSocket protocol" section, so this app's model round-tripping is
-/// verified against the actual documented daemon contract rather than
-/// against payloads this app's author merely assumed were right.
+/// Fixture payloads mirroring the control daemon's WebSocket protocol, so
+/// this app's model round-tripping is verified against the actual daemon
+/// contract rather than against payloads this app's author merely assumed
+/// were right.
 ///
-/// If the daemon's README examples change, update these to match and re-run
+/// These are built field-by-field from
+/// `control-daemon/src/control_daemon/models.py` and `ws_protocol.py`. If
+/// the daemon's schema changes, update these to match and re-run
 /// `flutter test` -- that's the whole point of keeping them side by side.
 library;
 
@@ -26,9 +28,9 @@ const stateChangedEnvelopeFixture = {
 
 const commandOkFixture = {
   "type": "command_ok",
-  "command": "create_preset",
+  "command": "create_rig",
   "result": {
-    "preset": {"...": "..."}
+    "rig": {"...": "..."}
   },
 };
 
@@ -39,66 +41,87 @@ const errorFixture = {
       "role 'display' may not send 'set_bypass'; this is an app-only command",
 };
 
-const createPresetFixture = {
-  "type": "create_preset",
-  "name": "Ambient Swell",
-  "blocks": [
+const createRigFixture = {
+  "type": "create_rig",
+  "name": "Ampeg SVT",
+  "chain": [
     {
-      "type": "reverb",
+      "id": "amp",
+      "type": "nam",
+      "asset_id": "nam1",
+      "pinned": true,
       "enabled": true,
-      "params": {"decay": 4.2},
+      "params": {},
+    },
+    {
+      "id": "dist",
+      "type": "distortion",
+      "asset_id": null,
+      "pinned": false,
+      "enabled": false,
+      "params": {"gain": 7.0},
     }
   ],
-  "nam_asset_id": null,
-  "ir_asset_id": null,
+};
+
+const updateRigFixture = {
+  "type": "update_rig",
+  "rig_id": "rig1",
+  "name": "Ampeg SVT II",
+};
+
+const deleteRigFixture = {"type": "delete_rig", "rig_id": "rig1"};
+
+const reorderRigsFixture = {
+  "type": "reorder_rigs",
+  "rig_ids": ["rig2", "rig1"],
+};
+
+const createPresetFixture = {
+  "type": "create_preset",
+  "rig_id": "rig1",
+  "name": "Drive",
+  "block_states": {
+    "dist": {"enabled": true, "params": {}}
+  },
 };
 
 const updatePresetFixture = {
   "type": "update_preset",
+  "rig_id": "rig1",
   "preset_id": "abc123",
-  "name": "Ambient Swell v2",
+  "name": "Drive v2",
 };
 
-const deletePresetFixture = {"type": "delete_preset", "preset_id": "abc123"};
-
-const selectPresetByIdFixture = {
-  "type": "select_preset",
+const deletePresetFixture = {
+  "type": "delete_preset",
+  "rig_id": "rig1",
   "preset_id": "abc123",
 };
 
-const selectPresetBySlotFixture = {
+const selectPresetFixture = {
   "type": "select_preset",
-  "bank_index": 0,
-  "slot": 2,
+  "rig_index": 0,
+  "preset_index": 2,
 };
 
-const createBankFixture = {
-  "type": "create_bank",
-  "name": "Live Set 1",
-  "num_slots": 4,
-};
-
-const updateBankFixture = {
-  "type": "update_bank",
-  "bank_id": "bank1",
-  "slots": ["abc123", null, null, null],
-};
-
-const reorderBanksFixture = {
-  "type": "reorder_banks",
-  "bank_ids": ["bank2", "bank1"],
+const selectPresetWithinRigFixture = {
+  "type": "select_preset",
+  "preset_index": 1,
 };
 
 const setBypassFixture = {"type": "set_bypass", "bypass": true};
 
+/// The four-switch layout the pedal is built around: up/down step rigs,
+/// left/right step presets within the current rig.
 const setFootswitchMappingFixture = {
   "type": "set_footswitch_mapping",
   "mapping": {
-    "0": {"type": "select_slot", "slot": 0},
-    "1": {"type": "select_slot", "slot": 1},
-    "2": {"type": "next_bank"},
-    "3": {"type": "toggle_bypass"},
-    "4": {"type": "tap_tempo"},
+    "0": {"type": "next_preset"},
+    "1": {"type": "prev_preset"},
+    "2": {"type": "next_rig"},
+    "3": {"type": "prev_rig"},
+    "4": {"type": "toggle_bypass"},
   },
 };
 
@@ -126,34 +149,53 @@ const uploadResponseFixture = {
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 };
 
+/// The daemon's 409 reply when uploaded bytes are already in the library.
+/// Dedup is by content checksum, not filename.
+const duplicateUploadResponseFixture = {
+  "error": "duplicate_asset",
+  "message": "identical content already registered as asset nam1 (my_amp.nam)",
+  "existing_asset_id": "nam1",
+};
+
 /// A full, self-consistent `DaemonState` shaped exactly like the field list
-/// in models.py (README's summary doesn't spell out a complete example, so
-/// this is built directly from `control_daemon/src/control_daemon/models.py`
-/// field-by-field rather than invented ad hoc).
+/// in models.py. `active_rig_id`/`active_preset_id` are derived by the
+/// daemon into its state view (see `DaemonStateManager.state_view`), so they
+/// appear here even though they are not part of the stored schema.
 const fullDaemonStateFixture = {
-  "version": 1,
-  "presets": {
-    "abc123": {
-      "id": "abc123",
-      "name": "Ambient Swell",
-      "blocks": [
+  "version": 2,
+  "rigs": [
+    {
+      "id": "rig1",
+      "name": "Ampeg SVT",
+      "chain": [
         {
+          "id": "amp",
+          "type": "nam",
+          "asset_id": "nam1",
+          "pinned": true,
+          "enabled": true,
+          "params": {},
+        },
+        {
+          "id": "reverb",
           "type": "reverb",
+          "asset_id": null,
+          "pinned": false,
           "enabled": true,
           "params": {"decay": 4.2, "mix": 0.5, "label": "hall", "sync": false},
         }
       ],
-      "nam_asset_id": "nam1",
-      "ir_asset_id": null,
-      "created_at": 1000.0,
-      "updated_at": 1001.5,
-    }
-  },
-  "banks": [
-    {
-      "id": "bank1",
-      "name": "Live Set 1",
-      "slots": ["abc123", null, null, null],
+      "presets": [
+        {
+          "id": "abc123",
+          "name": "Clean",
+          "block_states": {
+            "reverb": {"enabled": false, "params": {}}
+          },
+          "created_at": 1000.0,
+          "updated_at": 1001.5,
+        }
+      ],
     }
   ],
   "assets": {
@@ -169,15 +211,17 @@ const fullDaemonStateFixture = {
     }
   },
   "footswitch_mapping": {
-    "0": {"type": "select_slot", "slot": 0},
-    "1": {"type": "select_slot", "slot": 1},
-    "2": {"type": "next_bank"},
-    "3": {"type": "prev_bank"},
+    "0": {"type": "next_preset"},
+    "1": {"type": "prev_preset"},
+    "2": {"type": "next_rig"},
+    "3": {"type": "prev_rig"},
     "4": {"type": "toggle_bypass"},
     "5": {"type": "tap_tempo"},
+    "6": {"type": "select_preset", "index": 2},
   },
-  "active_bank_index": 0,
-  "active_slot": 0,
+  "active_rig_index": 0,
+  "active_preset_index": 0,
+  "active_rig_id": "rig1",
   "active_preset_id": "abc123",
   "bypass": false,
   "tempo_bpm": 120.0,

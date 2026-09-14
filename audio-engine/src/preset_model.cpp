@@ -59,6 +59,20 @@ T fieldOr(const json& j, const char* name, T fallback) {
     }
 }
 
+// Nullable string field: JSON null and an absent key both mean "not set"
+// (the daemon emits an explicit null, but tolerating absence keeps
+// hand-written/partial payloads working); anything that is present and
+// non-null must actually be a string, or it's a parse error rather than a
+// silently dropped value.
+std::optional<std::string> optionalStringField(const json& j, const char* name) {
+    auto it = j.find(name);
+    if (it == j.end() || it->is_null()) return std::nullopt;
+    if (!it->is_string()) {
+        throw PresetParseError(std::string("field '") + name + "' must be a string or null");
+    }
+    return it->get<std::string>();
+}
+
 }  // namespace
 
 void to_json(json& j, const EffectBlockSpec& b) {
@@ -66,12 +80,18 @@ void to_json(json& j, const EffectBlockSpec& b) {
     for (const auto& [k, v] : b.params) {
         params[k] = paramValueToJson(v);
     }
-    j = json{{"type", b.type}, {"enabled", b.enabled}, {"params", params}};
+    j = json{{"id", b.id},
+             {"type", b.type},
+             {"asset_id", b.asset_id.has_value() ? json(*b.asset_id) : json(nullptr)},
+             {"enabled", b.enabled},
+             {"params", params}};
 }
 
 void from_json(const json& j, EffectBlockSpec& b) {
     if (!j.is_object()) throw PresetParseError("effect block must be a JSON object");
+    b.id = requireField<std::string>(j, "id");
     b.type = requireField<std::string>(j, "type");
+    b.asset_id = optionalStringField(j, "asset_id");
     b.enabled = fieldOr<bool>(j, "enabled", true);
     b.params.clear();
     auto it = j.find("params");
@@ -112,35 +132,29 @@ void from_json(const json& j, Asset& a) {
 void to_json(json& j, const Preset& p) {
     j = json{{"id", p.id},
              {"name", p.name},
-             {"blocks", p.blocks},
-             {"nam_asset_id", p.nam_asset_id.has_value() ? json(*p.nam_asset_id) : json(nullptr)},
-             {"ir_asset_id", p.ir_asset_id.has_value() ? json(*p.ir_asset_id) : json(nullptr)},
-             {"created_at", p.created_at},
-             {"updated_at", p.updated_at}};
+             {"rig_id", p.rig_id},
+             {"rig_name", p.rig_name},
+             {"blocks", p.blocks}};
 }
 
 void from_json(const json& j, Preset& p) {
     if (!j.is_object()) throw PresetParseError("preset must be a JSON object");
     p.id = requireField<std::string>(j, "id");
     p.name = requireField<std::string>(j, "name");
+    // Required in the daemon's ResolvedPreset (models.py), so required
+    // here too -- this file's whole point is that optionality matches.
+    p.rig_id = requireField<std::string>(j, "rig_id");
+    p.rig_name = requireField<std::string>(j, "rig_name");
     p.blocks.clear();
     auto blocksIt = j.find("blocks");
     if (blocksIt != j.end() && !blocksIt->is_null()) {
         if (!blocksIt->is_array()) throw PresetParseError("preset 'blocks' must be an array");
+        // Order is the signal chain order (amp and cab included), so it is
+        // preserved exactly as it arrives -- never sorted or regrouped.
         for (const auto& blockJson : *blocksIt) {
             p.blocks.push_back(blockJson.get<EffectBlockSpec>());
         }
     }
-    auto namIt = j.find("nam_asset_id");
-    p.nam_asset_id = (namIt != j.end() && !namIt->is_null())
-                         ? std::optional<std::string>(namIt->get<std::string>())
-                         : std::nullopt;
-    auto irIt = j.find("ir_asset_id");
-    p.ir_asset_id = (irIt != j.end() && !irIt->is_null())
-                        ? std::optional<std::string>(irIt->get<std::string>())
-                        : std::nullopt;
-    p.created_at = fieldOr<double>(j, "created_at", 0.0);
-    p.updated_at = fieldOr<double>(j, "updated_at", 0.0);
 }
 
 Preset parsePresetJson(const std::string& jsonText) {

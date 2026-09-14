@@ -1,81 +1,108 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:mobile_app/models/asset.dart';
 import 'package:mobile_app/models/daemon_state.dart';
 import 'package:mobile_app/models/footswitch_action.dart';
 
 import 'protocol_fixtures.dart';
 
 void main() {
-  group('DaemonState', () {
-    test('parses the full daemon state fixture field-by-field', () {
-      final state = DaemonState.fromJson(fullDaemonStateFixture);
+  test('parses the full daemon state fixture', () {
+    final state =
+        DaemonState.fromJson(Map<String, dynamic>.from(fullDaemonStateFixture));
 
-      expect(state.version, 1);
-      expect(state.presets.keys, ['abc123']);
-      expect(state.presets['abc123']!.name, 'Ambient Swell');
+    expect(state.version, 2);
+    expect(state.rigs, hasLength(1));
 
-      expect(state.banks, hasLength(1));
-      expect(state.banks.first.id, 'bank1');
+    final rig = state.rigs.single;
+    expect(rig.id, 'rig1');
+    expect(rig.name, 'Ampeg SVT');
+    expect(rig.chain, hasLength(2));
+    expect(rig.presets, hasLength(1));
 
-      expect(state.assets.keys, ['nam1']);
-      expect(state.assets['nam1']!.kind, AssetKind.nam);
+    expect(state.assets['nam1']!.filename, 'my_amp.nam');
+    expect(state.footswitchMapping[0], const NextPresetAction());
+    expect(state.footswitchMapping[2], const NextRigAction());
+    expect(state.footswitchMapping[6], const SelectPresetAction(index: 2));
+    expect(state.bypass, isFalse);
+    expect(state.tempoBpm, 120.0);
+  });
 
-      // Wire keys are JSON-object strings ("0", "1", ...); DaemonState
-      // exposes them as int keys for convenient Dart use.
-      expect(state.footswitchMapping.keys.toSet(), {0, 1, 2, 3, 4, 5});
-      expect(state.footswitchMapping[0], isA<SelectSlotAction>());
-      expect(state.footswitchMapping[2], isA<NextBankAction>());
-      expect(state.footswitchMapping[3], isA<PrevBankAction>());
+  test('separates pinned backline from switchable effects', () {
+    final state =
+        DaemonState.fromJson(Map<String, dynamic>.from(fullDaemonStateFixture));
+    final rig = state.rigs.single;
 
-      expect(state.activeBankIndex, 0);
-      expect(state.activeSlot, 0);
-      expect(state.activePresetId, 'abc123');
-      expect(state.bypass, false);
-      expect(state.tempoBpm, 120.0);
+    expect(rig.pinnedBlocks.map((b) => b.id), ['amp']);
+    expect(rig.switchableBlocks.map((b) => b.id), ['reverb']);
+  });
 
-      expect(state.activePreset?.id, 'abc123');
-    });
+  test('preserves chain order, which is the signal path', () {
+    final state =
+        DaemonState.fromJson(Map<String, dynamic>.from(fullDaemonStateFixture));
+    expect(state.rigs.single.chain.map((b) => b.id), ['amp', 'reverb']);
+  });
 
-    test('round-trips through toJson/fromJson, including int->string keys', () {
-      final original = DaemonState.fromJson(fullDaemonStateFixture);
-      final roundTripped = DaemonState.fromJson(original.toJson());
+  test('resolves the active rig and preset from the indices', () {
+    final state =
+        DaemonState.fromJson(Map<String, dynamic>.from(fullDaemonStateFixture));
 
-      expect(roundTripped.presets.keys, original.presets.keys);
-      expect(roundTripped.banks.length, original.banks.length);
-      expect(roundTripped.assets.keys, original.assets.keys);
-      expect(
-        roundTripped.footswitchMapping.keys.toSet(),
-        original.footswitchMapping.keys.toSet(),
-      );
-      expect(roundTripped.activePresetId, original.activePresetId);
-      expect(roundTripped.tempoBpm, original.tempoBpm);
-    });
+    expect(state.activeRig!.id, 'rig1');
+    expect(state.activePreset!.id, 'abc123');
+    expect(state.activeRigId, 'rig1');
+    expect(state.activePresetId, 'abc123');
+  });
 
-    test('DaemonState.empty has no active preset and default fields', () {
-      const state = DaemonState.empty;
-      expect(state.activePreset, isNull);
-      expect(state.presets, isEmpty);
-      expect(state.banks, isEmpty);
-      expect(state.bypass, false);
-      expect(state.tempoBpm, isNull);
-    });
+  test('out-of-range indices resolve to null instead of throwing', () {
+    // The daemon clamps, but a stale snapshot mid-delete could still arrive
+    // with an index past the end -- the UI must not crash on it.
+    final json = Map<String, dynamic>.from(fullDaemonStateFixture);
+    json['active_rig_index'] = 9;
+    final state = DaemonState.fromJson(json);
 
-    test(
-      'handles a placeholder-shaped snapshot state (envelope fixture) '
-      'gracefully by defaulting missing fields',
-      () {
-        // The README's state_snapshot/state_changed example envelopes use a
-        // placeholder `"...": "..."` for `state` rather than a real
-        // DaemonState (the full shape is in models.py) -- parsing that
-        // shouldn't throw, it should just come back as all-defaults.
-        final state = DaemonState.fromJson(
-          Map<String, dynamic>.from(
-            stateSnapshotEnvelopeFixture['state'] as Map,
-          ),
-        );
-        expect(state.presets, isEmpty);
-        expect(state.activePresetId, isNull);
-      },
-    );
+    expect(state.activeRig, isNull);
+    expect(state.activePreset, isNull);
+  });
+
+  test('an empty state parses and resolves to nothing active', () {
+    final state = DaemonState.fromJson({'version': 2});
+
+    expect(state.rigs, isEmpty);
+    expect(state.activeRig, isNull);
+    expect(state.activePreset, isNull);
+    expect(DaemonState.empty.activeRig, isNull);
+  });
+
+  test('rigById finds a rig by id', () {
+    final state =
+        DaemonState.fromJson(Map<String, dynamic>.from(fullDaemonStateFixture));
+
+    expect(state.rigById('rig1')!.name, 'Ampeg SVT');
+    expect(state.rigById('nope'), isNull);
+  });
+
+  test('round-trips the stored schema, omitting the derived active ids', () {
+    final state =
+        DaemonState.fromJson(Map<String, dynamic>.from(fullDaemonStateFixture));
+    final json = state.toJson();
+
+    expect(json['version'], 2);
+    expect(json['active_rig_index'], 0);
+    expect(json['active_preset_index'], 0);
+    // Derived by the daemon's state_view, not part of what it stores.
+    expect(json.containsKey('active_rig_id'), isFalse);
+    expect(json.containsKey('active_preset_id'), isFalse);
+
+    final reparsed = DaemonState.fromJson(json);
+    expect(reparsed.rigs.single.chain.map((b) => b.id),
+        state.rigs.single.chain.map((b) => b.id));
+    expect(reparsed.footswitchMapping, state.footswitchMapping);
+  });
+
+  test('footswitch mapping keys convert between string wire and int', () {
+    final state =
+        DaemonState.fromJson(Map<String, dynamic>.from(fullDaemonStateFixture));
+
+    expect(state.footswitchMapping.keys, everyElement(isA<int>()));
+    expect(state.toJson()['footswitch_mapping'].keys,
+        everyElement(isA<String>()));
   });
 }

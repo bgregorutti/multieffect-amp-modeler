@@ -1,5 +1,6 @@
-"""Tests for DaemonStateManager: preset/bank CRUD, selection transitions,
-bypass, and footswitch mapping -> state change (including tap tempo)."""
+"""Tests for DaemonStateManager: rig/preset CRUD, chain resolution,
+selection transitions, bypass, asset dedup, and footswitch mapping -> state
+change (including tap tempo)."""
 
 from pathlib import Path
 from typing import List
@@ -9,13 +10,17 @@ import pytest
 from control_daemon.audio_engine_client import AudioEngineClient
 from control_daemon.models import (
     Asset,
-    NextBankAction,
+    AssetKind,
+    EffectBlock,
     NextPresetAction,
-    PrevBankAction,
+    NextRigAction,
+    PresetBlockState,
     PrevPresetAction,
-    SelectSlotAction,
+    PrevRigAction,
+    SelectPresetAction,
     TapTempoAction,
     ToggleBypassAction,
+    resolve_preset,
 )
 from control_daemon.state import DaemonStateManager, StateError
 
@@ -23,12 +28,16 @@ from control_daemon.state import DaemonStateManager, StateError
 class RecordingAudioEngine(AudioEngineClient):
     def __init__(self) -> None:
         self.loaded_presets: List[str] = []
+        self.loaded_chains: List[list] = []
         self.bypass_calls: List[bool] = []
         self.tempo_calls: List[float] = []
         self.registered_assets: List[str] = []
 
     def load_preset(self, preset) -> None:
         self.loaded_presets.append(preset.id)
+        self.loaded_chains.append(
+            [(b.type, b.enabled) for b in preset.blocks]
+        )
 
     def set_bypass(self, bypass: bool) -> None:
         self.bypass_calls.append(bypass)
@@ -68,90 +77,233 @@ def manager(tmp_path: Path):
     return mgr
 
 
-# -- presets ---------------------------------------------------------------
+def _bass_rig(manager, name="Ampeg SVT"):
+    """A representative rig: pinned amp + cab, two switchable effects."""
+    return manager.create_rig(
+        name=name,
+        chain=[
+            EffectBlock(id="amp", type="nam", pinned=True),
+            EffectBlock(id="cab", type="ir", pinned=True),
+            EffectBlock(id="dist", type="distortion", enabled=False),
+            EffectBlock(id="fuzz", type="fuzz", enabled=False),
+        ],
+    )
 
 
-def test_create_and_get_preset(manager):
-    preset = manager.create_preset(name="Clean Tone")
-    assert preset.id in manager.state.presets
+# -- rigs ---------------------------------------------------------------------
+
+
+def test_create_rig(manager):
+    rig = _bass_rig(manager)
+    assert manager.state.rigs == [rig]
+    assert manager.changes[-1] == "create_rig"
+
+
+def test_create_rig_rejects_unknown_asset_ref(manager):
+    with pytest.raises(StateError) as exc:
+        manager.create_rig(
+            name="Bad", chain=[EffectBlock(type="nam", asset_id="nope")]
+        )
+    assert exc.value.code == "not_found"
+
+
+def test_update_rig_chain_drops_preset_states_for_removed_blocks(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(
+        rig.id,
+        name="Drive",
+        block_states={"dist": PresetBlockState(enabled=True)},
+    )
+
+    # Remove the distortion block entirely.
+    manager.update_rig(
+        rig.id,
+        chain=[
+            EffectBlock(id="amp", type="nam", pinned=True),
+            EffectBlock(id="cab", type="ir", pinned=True),
+        ],
+    )
+
+    assert preset.block_states == {}
+
+
+def test_update_rig_reloads_engine_when_active(manager):
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="Clean")
+    manager.select_preset(rig_index=0, preset_index=0)
+    loads_before = len(manager.engine.loaded_presets)
+
+    manager.update_rig(rig.id, name="Ampeg SVT II")
+
+    assert manager.state.rigs[0].name == "Ampeg SVT II"
+    assert len(manager.engine.loaded_presets) == loads_before + 1
+
+
+def test_delete_rig_clamps_active_position(manager):
+    first = _bass_rig(manager, name="One")
+    second = _bass_rig(manager, name="Two")
+    manager.create_preset(second.id, name="P")
+    manager.select_preset(rig_index=1, preset_index=0)
+
+    manager.delete_rig(second.id)
+
+    assert [r.id for r in manager.state.rigs] == [first.id]
+    assert manager.state.active_rig_index == 0
+
+
+def test_reorder_rigs_follows_the_active_rig(manager):
+    one = _bass_rig(manager, name="One")
+    two = _bass_rig(manager, name="Two")
+    manager.create_preset(two.id, name="P")
+    manager.select_preset(rig_index=1, preset_index=0)
+
+    manager.reorder_rigs([two.id, one.id])
+
+    assert [r.name for r in manager.state.rigs] == ["Two", "One"]
+    # The active rig moved to index 0, so the index must follow it rather
+    # than continue pointing at whatever is now in slot 1.
+    assert manager.state.active_rig_index == 0
+    assert manager.active_rig().id == two.id
+
+
+def test_reorder_rigs_rejects_incomplete_list(manager):
+    one = _bass_rig(manager, name="One")
+    _bass_rig(manager, name="Two")
+    with pytest.raises(StateError):
+        manager.reorder_rigs([one.id])
+
+
+# -- presets ------------------------------------------------------------------
+
+
+def test_create_preset_inside_a_rig(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig.id, name="Clean")
+    assert manager.state.rigs[0].presets == [preset]
     assert manager.changes[-1] == "create_preset"
 
 
-def test_update_preset_reloads_engine_when_active(manager):
-    preset = manager.create_preset(name="Lead")
-    manager.select_preset(preset_id=preset.id)
-    assert manager.engine.loaded_presets == [preset.id]
+def test_create_preset_rejects_block_states_for_unknown_blocks(manager):
+    rig = _bass_rig(manager)
+    with pytest.raises(StateError) as exc:
+        manager.create_preset(
+            rig.id,
+            name="Bogus",
+            block_states={"not-a-block": PresetBlockState(enabled=True)},
+        )
+    assert exc.value.code == "validation_error"
 
-    manager.update_preset(preset.id, name="Lead v2")
-    assert manager.state.presets[preset.id].name == "Lead v2"
-    # engine reloaded because the active preset changed shape
-    assert manager.engine.loaded_presets == [preset.id, preset.id]
+
+def test_update_preset_reloads_engine_when_active(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig.id, name="Clean")
+    manager.select_preset(rig_index=0, preset_index=0)
+    loads_before = len(manager.engine.loaded_presets)
+
+    manager.update_preset(
+        rig.id, preset.id, block_states={"dist": PresetBlockState(enabled=True)}
+    )
+
+    assert len(manager.engine.loaded_presets) == loads_before + 1
+    assert manager.engine.loaded_chains[-1] == [
+        ("nam", True),
+        ("ir", True),
+        ("distortion", True),
+        ("fuzz", False),
+    ]
 
 
 def test_update_preset_missing_raises_not_found(manager):
-    with pytest.raises(StateError) as exc_info:
-        manager.update_preset("does-not-exist", name="x")
-    assert exc_info.value.code == "not_found"
+    rig = _bass_rig(manager)
+    with pytest.raises(StateError) as exc:
+        manager.update_preset(rig.id, "does-not-exist", name="x")
+    assert exc.value.code == "not_found"
 
 
-def test_delete_preset_clears_bank_slots_and_active(manager):
-    preset = manager.create_preset(name="To Delete")
-    bank = manager.create_bank(name="A", num_slots=2)
-    manager.update_bank(bank.id, slots=[preset.id, None])
-    manager.select_preset(preset_id=preset.id)
+def test_delete_preset_clamps_active_position(manager):
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="A")
+    second = manager.create_preset(rig.id, name="B")
+    manager.select_preset(rig_index=0, preset_index=1)
 
-    manager.delete_preset(preset.id)
+    manager.delete_preset(rig.id, second.id)
 
-    assert preset.id not in manager.state.presets
-    assert manager.state.banks[0].slots == [None, None]
-    assert manager.state.active_preset_id is None
-
-
-def test_select_preset_by_bank_and_slot(manager):
-    preset = manager.create_preset(name="P1")
-    bank = manager.create_bank(name="A", num_slots=4)
-    manager.update_bank(bank.id, slots=[None, preset.id, None, None])
-
-    manager.select_preset(bank_index=0, slot=1)
-
-    assert manager.state.active_preset_id == preset.id
-    assert manager.state.active_bank_index == 0
-    assert manager.state.active_slot == 1
-    assert manager.engine.loaded_presets == [preset.id]
+    assert [p.name for p in manager.state.rigs[0].presets] == ["A"]
+    assert manager.state.active_preset_index == 0
 
 
 def test_select_preset_requires_a_target(manager):
-    with pytest.raises(StateError) as exc_info:
+    with pytest.raises(StateError) as exc:
         manager.select_preset()
-    assert exc_info.value.code == "validation_error"
+    assert exc.value.code == "validation_error"
 
 
-def test_select_preset_out_of_range_slot(manager):
-    manager.create_bank(name="A", num_slots=2)
+def test_select_preset_out_of_range(manager):
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="Only")
     with pytest.raises(StateError):
-        manager.select_preset(bank_index=0, slot=5)
+        manager.select_preset(rig_index=0, preset_index=5)
 
 
-# -- banks ------------------------------------------------------------------
+# -- chain resolution ---------------------------------------------------------
 
 
-def test_create_bank_defaults_to_four_empty_slots(manager):
-    bank = manager.create_bank(name="Main")
-    assert bank.slots == [None, None, None, None]
+def test_resolve_forces_pinned_blocks_on(manager):
+    rig = _bass_rig(manager)
+    # A preset that (wrongly) tries to switch the amp and cab off.
+    preset = manager.create_preset(
+        rig.id,
+        name="Broken",
+        block_states={
+            "amp": PresetBlockState(enabled=False),
+            "cab": PresetBlockState(enabled=False),
+        },
+    )
+
+    resolved = resolve_preset(rig, preset)
+
+    by_id = {b.id: b for b in resolved.blocks}
+    assert by_id["amp"].enabled is True
+    assert by_id["cab"].enabled is True
 
 
-def test_reorder_banks(manager):
-    b1 = manager.create_bank(name="One")
-    b2 = manager.create_bank(name="Two")
-    manager.reorder_banks([b2.id, b1.id])
-    assert [b.name for b in manager.state.banks] == ["Two", "One"]
+def test_resolve_falls_back_to_block_defaults(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig.id, name="Untouched")
+
+    resolved = resolve_preset(rig, preset)
+
+    # dist/fuzz default to disabled on the block itself.
+    assert [(b.id, b.enabled) for b in resolved.blocks] == [
+        ("amp", True),
+        ("cab", True),
+        ("dist", False),
+        ("fuzz", False),
+    ]
 
 
-def test_reorder_banks_rejects_incomplete_list(manager):
-    b1 = manager.create_bank(name="One")
-    manager.create_bank(name="Two")
-    with pytest.raises(StateError):
-        manager.reorder_banks([b1.id])
+def test_resolve_merges_params_as_overrides(manager):
+    rig = manager.create_rig(
+        name="R",
+        chain=[EffectBlock(id="dist", type="distortion", params={"gain": 3.0, "tone": 5.0})],
+    )
+    preset = manager.create_preset(
+        rig.id,
+        name="Hot",
+        block_states={"dist": PresetBlockState(enabled=True, params={"gain": 9.0})},
+    )
+
+    resolved = resolve_preset(rig, preset)
+
+    # gain overridden, tone inherited from the block.
+    assert resolved.blocks[0].params == {"gain": 9.0, "tone": 5.0}
+
+
+def test_resolved_chain_preserves_order(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig.id, name="P")
+    resolved = resolve_preset(rig, preset)
+    assert [b.id for b in resolved.blocks] == ["amp", "cab", "dist", "fuzz"]
 
 
 # -- bypass -------------------------------------------------------------------
@@ -167,8 +319,6 @@ def test_set_bypass_calls_engine_and_persists(manager):
 
 
 def test_register_asset_forwards_to_engine(manager):
-    from control_daemon.models import AssetKind
-
     asset = manager.register_asset(
         kind=AssetKind.NAM, filename="amp.nam", stored_path="/data/assets/amp.nam"
     )
@@ -176,36 +326,168 @@ def test_register_asset_forwards_to_engine(manager):
     assert manager.engine.registered_assets == [asset.id]
 
 
+def test_register_asset_refuses_duplicate_content(manager):
+    first = manager.register_asset(
+        kind=AssetKind.IR,
+        filename="cab_8x10.wav",
+        stored_path="/data/assets/a.wav",
+        sha256="a" * 64,
+    )
+
+    # Same bytes, different filename and path -- still a duplicate.
+    with pytest.raises(StateError) as exc:
+        manager.register_asset(
+            kind=AssetKind.IR,
+            filename="ampeg_fridge.wav",
+            stored_path="/data/assets/b.wav",
+            sha256="a" * 64,
+        )
+
+    assert exc.value.code == "duplicate_asset"
+    assert first.id in str(exc.value)
+    assert list(manager.state.assets) == [first.id]
+    assert manager.engine.registered_assets == [first.id]
+
+
+def test_register_asset_allows_distinct_content(manager):
+    first = manager.register_asset(
+        kind=AssetKind.IR, filename="a.wav", stored_path="/x/a.wav", sha256="a" * 64
+    )
+    second = manager.register_asset(
+        kind=AssetKind.IR, filename="b.wav", stored_path="/x/b.wav", sha256="b" * 64
+    )
+    assert {first.id, second.id} == set(manager.state.assets)
+
+
+def test_register_asset_without_checksum_is_not_deduped(manager):
+    """A missing sha256 is unknown content, not identical content."""
+    first = manager.register_asset(
+        kind=AssetKind.NAM, filename="a.nam", stored_path="/x/a.nam"
+    )
+    second = manager.register_asset(
+        kind=AssetKind.NAM, filename="b.nam", stored_path="/x/b.nam"
+    )
+    assert {first.id, second.id} == set(manager.state.assets)
+
+
+def test_block_can_reference_a_registered_asset(manager):
+    asset = manager.register_asset(
+        kind=AssetKind.IR, filename="cab.wav", stored_path="/x/cab.wav"
+    )
+    rig = manager.create_rig(
+        name="R", chain=[EffectBlock(type="ir", asset_id=asset.id, pinned=True)]
+    )
+    assert rig.chain[0].asset_id == asset.id
+
+
 # -- footswitch mapping -> state change --------------------------------------
 
 
-def test_footswitch_select_slot(manager):
-    preset = manager.create_preset(name="P")
-    bank = manager.create_bank(name="A", num_slots=1)
-    manager.update_bank(bank.id, slots=[preset.id])
-    manager.set_footswitch_mapping({0: SelectSlotAction(slot=0)})
+def test_footswitch_next_and_prev_rig_wraps(manager):
+    one = _bass_rig(manager, name="One")
+    two = _bass_rig(manager, name="Two")
+    manager.create_preset(one.id, name="P")
+    manager.create_preset(two.id, name="P")
+    manager.set_footswitch_mapping({0: NextRigAction(), 1: PrevRigAction()})
 
     manager.apply_footswitch_press(0)
+    assert manager.state.active_rig_index == 1
 
-    assert manager.state.active_preset_id == preset.id
-    assert manager.engine.loaded_presets[-1] == preset.id
+    manager.apply_footswitch_press(0)  # wraps back to the first rig
+    assert manager.state.active_rig_index == 0
+    assert manager.changes[-1] == "footswitch_next_rig"
+
+    manager.apply_footswitch_press(1)  # prev wraps to the last rig
+    assert manager.state.active_rig_index == 1
+    assert manager.changes[-1] == "footswitch_prev_rig"
 
 
-def test_footswitch_next_and_prev_bank_wraps(manager):
-    b1 = manager.create_bank(name="One")
-    b2 = manager.create_bank(name="Two")
-    manager.set_footswitch_mapping(
-        {0: NextBankAction(), 1: PrevBankAction()}
+def test_footswitch_rig_change_clamps_preset_index(manager):
+    """Landing on a rig with fewer presets must not dangle past the end."""
+    one = _bass_rig(manager, name="One")
+    two = _bass_rig(manager, name="Two")
+    manager.create_preset(one.id, name="A")
+    manager.create_preset(one.id, name="B")
+    manager.create_preset(one.id, name="C")
+    manager.create_preset(two.id, name="Only")
+
+    manager.select_preset(rig_index=0, preset_index=2)
+    manager.set_footswitch_mapping({0: NextRigAction()})
+    manager.apply_footswitch_press(0)
+
+    assert manager.state.active_rig_index == 1
+    assert manager.state.active_preset_index == 0
+    assert manager.active_preset().name == "Only"
+
+
+def test_footswitch_next_and_prev_preset_wraps_within_the_rig(manager):
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="Clean")
+    manager.create_preset(rig.id, name="Drive")
+    manager.create_preset(rig.id, name="Solo")
+    manager.set_footswitch_mapping({0: NextPresetAction(), 1: PrevPresetAction()})
+
+    manager.apply_footswitch_press(0)
+    assert manager.active_preset().name == "Drive"
+
+    manager.apply_footswitch_press(0)
+    assert manager.active_preset().name == "Solo"
+
+    manager.apply_footswitch_press(0)  # wraps
+    assert manager.active_preset().name == "Clean"
+    assert manager.changes[-1] == "footswitch_next_preset"
+
+    manager.apply_footswitch_press(1)  # prev wraps to the last
+    assert manager.active_preset().name == "Solo"
+    assert manager.changes[-1] == "footswitch_prev_preset"
+
+
+def test_footswitch_preset_stepping_never_crosses_rigs(manager):
+    """Stepping presets must stay inside the current rig -- a switch that
+    silently swapped the amp mid-song would be a bug, not a feature."""
+    one = _bass_rig(manager, name="One")
+    two = _bass_rig(manager, name="Two")
+    manager.create_preset(one.id, name="Only A")
+    manager.create_preset(two.id, name="Only B")
+    manager.set_footswitch_mapping({0: NextPresetAction()})
+
+    manager.apply_footswitch_press(0)
+    manager.apply_footswitch_press(0)
+
+    assert manager.state.active_rig_index == 0
+    assert manager.active_preset().name == "Only A"
+
+
+def test_footswitch_preset_change_does_not_reload_a_different_rig(manager):
+    """The real-time point of the rig/preset split: stepping presets keeps
+    the same amp and cab, so the chain the engine gets keeps the same
+    pinned blocks and only its enable flags move."""
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="Clean")
+    manager.create_preset(
+        rig.id, name="Drive", block_states={"dist": PresetBlockState(enabled=True)}
     )
+    manager.set_footswitch_mapping({0: NextPresetAction()})
 
     manager.apply_footswitch_press(0)
-    assert manager.state.active_bank_index == manager.state.banks.index(b2)
 
-    manager.apply_footswitch_press(0)  # wraps back to bank 0
-    assert manager.state.active_bank_index == manager.state.banks.index(b1)
+    assert manager.engine.loaded_chains[-1] == [
+        ("nam", True),
+        ("ir", True),
+        ("distortion", True),
+        ("fuzz", False),
+    ]
 
-    manager.apply_footswitch_press(1)  # prev wraps to last bank
-    assert manager.state.active_bank_index == manager.state.banks.index(b2)
+
+def test_footswitch_select_preset_by_index(manager):
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="A")
+    manager.create_preset(rig.id, name="B")
+    manager.set_footswitch_mapping({0: SelectPresetAction(index=1)})
+
+    manager.apply_footswitch_press(0)
+
+    assert manager.active_preset().name == "B"
 
 
 def test_footswitch_toggle_bypass(manager):
@@ -224,44 +506,24 @@ def test_footswitch_unmapped_switch_is_a_silent_noop(manager):
     assert manager.changes == changes_before
 
 
-def test_footswitch_next_and_prev_preset_scans_across_banks_and_wraps(manager):
-    p1 = manager.create_preset(name="P1")
-    p2 = manager.create_preset(name="P2")
-    p3 = manager.create_preset(name="P3")
-    bank1 = manager.create_bank(name="A", num_slots=2)
-    bank2 = manager.create_bank(name="B", num_slots=2)
-    manager.update_bank(bank1.id, slots=[p1.id, None])  # slot 1 empty -- skipped
-    manager.update_bank(bank2.id, slots=[p2.id, p3.id])
-    manager.set_footswitch_mapping({0: NextPresetAction(), 1: PrevPresetAction()})
-
-    manager.apply_footswitch_press(0)  # nothing active yet -- lands on the first assigned slot
-    assert manager.state.active_preset_id == p1.id
-
-    manager.apply_footswitch_press(0)  # skips bank1 slot 1 (empty), lands on p2
-    assert manager.state.active_preset_id == p2.id
-
-    manager.apply_footswitch_press(0)
-    assert manager.state.active_preset_id == p3.id
-
-    manager.apply_footswitch_press(0)  # wraps back to p1
-    assert manager.state.active_preset_id == p1.id
-    assert manager.changes[-1] == "footswitch_next_preset"
-
-    manager.apply_footswitch_press(1)  # prev wraps back to p3
-    assert manager.state.active_preset_id == p3.id
-    assert manager.changes[-1] == "footswitch_prev_preset"
-    assert manager.engine.loaded_presets == [p1.id, p2.id, p3.id, p1.id, p3.id]
-
-
-def test_footswitch_next_preset_is_a_noop_with_no_assigned_slots(manager):
-    manager.create_bank(name="Empty", num_slots=2)
+def test_footswitch_preset_step_is_a_noop_with_no_presets(manager):
+    _bass_rig(manager)
     manager.set_footswitch_mapping({0: NextPresetAction()})
     changes_before = list(manager.changes)
 
     manager.apply_footswitch_press(0)
 
     assert manager.changes == changes_before
-    assert manager.state.active_preset_id is None
+    assert manager.active_preset() is None
+
+
+def test_footswitch_rig_step_is_a_noop_with_no_rigs(manager):
+    manager.set_footswitch_mapping({0: NextRigAction()})
+    changes_before = list(manager.changes)
+
+    manager.apply_footswitch_press(0)
+
+    assert manager.changes == changes_before
 
 
 def test_footswitch_tap_tempo_computes_bpm(manager):
@@ -292,3 +554,23 @@ def test_footswitch_tap_tempo_resets_after_long_gap(manager):
     manager.fake_clock.advance(1.0)  # 1s interval -> 60 BPM
     manager.apply_footswitch_press(0)
     assert manager.state.tempo_bpm == pytest.approx(60.0)
+
+
+# -- derived state view -------------------------------------------------------
+
+
+def test_state_view_exposes_derived_active_ids(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig.id, name="Clean")
+    manager.select_preset(rig_index=0, preset_index=0)
+
+    view = manager.state_view()
+
+    assert view["active_rig_id"] == rig.id
+    assert view["active_preset_id"] == preset.id
+
+
+def test_state_view_active_ids_are_none_when_nothing_selected(manager):
+    view = manager.state_view()
+    assert view["active_rig_id"] is None
+    assert view["active_preset_id"] is None

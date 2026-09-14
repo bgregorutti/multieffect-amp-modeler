@@ -35,9 +35,10 @@ abstract class DaemonClientBase {
   Future<Map<String, dynamic>> updatePreset(UpdatePresetCommand cmd);
   Future<Map<String, dynamic>> deletePreset(DeletePresetCommand cmd);
   Future<Map<String, dynamic>> selectPreset(SelectPresetCommand cmd);
-  Future<Map<String, dynamic>> createBank(CreateBankCommand cmd);
-  Future<Map<String, dynamic>> updateBank(UpdateBankCommand cmd);
-  Future<Map<String, dynamic>> reorderBanks(ReorderBanksCommand cmd);
+  Future<Map<String, dynamic>> createRig(CreateRigCommand cmd);
+  Future<Map<String, dynamic>> updateRig(UpdateRigCommand cmd);
+  Future<Map<String, dynamic>> deleteRig(DeleteRigCommand cmd);
+  Future<Map<String, dynamic>> reorderRigs(ReorderRigsCommand cmd);
   Future<Map<String, dynamic>> setBypass(SetBypassCommand cmd);
   Future<Map<String, dynamic>> setFootswitchMapping(
       SetFootswitchMappingCommand cmd);
@@ -206,15 +207,19 @@ class DaemonClient extends DaemonClientBase {
       _sendCommand(cmd);
 
   @override
-  Future<Map<String, dynamic>> createBank(CreateBankCommand cmd) =>
+  Future<Map<String, dynamic>> createRig(CreateRigCommand cmd) =>
       _sendCommand(cmd);
 
   @override
-  Future<Map<String, dynamic>> updateBank(UpdateBankCommand cmd) =>
+  Future<Map<String, dynamic>> updateRig(UpdateRigCommand cmd) =>
       _sendCommand(cmd);
 
   @override
-  Future<Map<String, dynamic>> reorderBanks(ReorderBanksCommand cmd) =>
+  Future<Map<String, dynamic>> deleteRig(DeleteRigCommand cmd) =>
+      _sendCommand(cmd);
+
+  @override
+  Future<Map<String, dynamic>> reorderRigs(ReorderRigsCommand cmd) =>
       _sendCommand(cmd);
 
   @override

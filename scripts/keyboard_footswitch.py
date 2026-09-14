@@ -6,20 +6,38 @@ footswitch-input ingress paths": this script is a stand-in for the second
 one, a footswitch relay process sending already-logical presses over the
 daemon's WS API -- it is not special-cased in the daemon at all).
 
-Right arrow = next preset, left arrow = previous preset. Down arrow =
-toggle bypass (no simulation at all -- dry signal only, useful for A/B
-testing whatever's currently loaded). These map to switch indices 0, 1,
-and 2, bound to the daemon's next_preset/prev_preset/toggle_bypass
-footswitch actions (control-daemon/README.md); next_preset/prev_preset
-step through every assigned preset slot across all banks, skipping empty
-ones and wrapping around.
+This mirrors the four-switch layout the real pedal is planned around, one
+switch per arrow key:
 
-On startup this script briefly connects as role="app" to merge switches 0,
-1, and 2 into whatever footswitch_mapping is already configured -- set_
+    up / down arrow     next / prev **rig**    -- swaps the whole backline
+                                                  (amp + cab), so this is
+                                                  the expensive path: the
+                                                  engine reloads its NAM
+                                                  model and IR.
+    right / left arrow  next / prev **preset** -- flips which effects are on
+                                                  underneath an unchanged
+                                                  amp and cab. No asset
+                                                  reload, so it is the fast,
+                                                  click-free path.
+    b                   toggle bypass          -- dry signal only, useful
+                                                  for A/B testing whatever
+                                                  is currently loaded.
+
+Bypass is on `b` rather than an arrow because all four arrows are now
+spoken for; it is a dev convenience anyway, since the final hardware drops
+the bypass switch entirely.
+
+These map to switch indices 0-4, bound to the daemon's
+next_preset/prev_preset/next_rig/prev_rig/toggle_bypass footswitch actions
+(control-daemon/README.md). Preset stepping deliberately stays inside the
+current rig and never crosses into another one.
+
+On startup this script briefly connects as role="app" to merge those
+switches into whatever footswitch_mapping is already configured -- set_
 footswitch_mapping is a full replace on the wire, so this reads the
 current mapping first rather than clobbering any other switches you've
 already set up -- then reconnects as role="footswitch" and listens for
-arrow keys.
+keys.
 
 Usage:
     control-daemon/.venv/bin/python3 scripts/keyboard_footswitch.py [--host HOST] [--port PORT]
@@ -45,9 +63,11 @@ import tty
 
 import websockets
 
-NEXT_SWITCH = 0
-PREV_SWITCH = 1
-BYPASS_SWITCH = 2
+NEXT_PRESET_SWITCH = 0
+PREV_PRESET_SWITCH = 1
+NEXT_RIG_SWITCH = 2
+PREV_RIG_SWITCH = 3
+BYPASS_SWITCH = 4
 
 
 async def ensure_mapping(uri: str) -> None:
@@ -59,8 +79,10 @@ async def ensure_mapping(uri: str) -> None:
         mapping = dict(snapshot["state"]["footswitch_mapping"])
 
         desired = {
-            str(NEXT_SWITCH): {"type": "next_preset"},
-            str(PREV_SWITCH): {"type": "prev_preset"},
+            str(NEXT_PRESET_SWITCH): {"type": "next_preset"},
+            str(PREV_PRESET_SWITCH): {"type": "prev_preset"},
+            str(NEXT_RIG_SWITCH): {"type": "next_rig"},
+            str(PREV_RIG_SWITCH): {"type": "prev_rig"},
             str(BYPASS_SWITCH): {"type": "toggle_bypass"},
         }
         if all(mapping.get(k) == v for k, v in desired.items()):
@@ -72,20 +94,39 @@ async def ensure_mapping(uri: str) -> None:
         if reply["type"] != "command_ok":
             raise RuntimeError(f"failed to configure footswitch mapping: {reply}")
         print(
-            f"[keyboard-footswitch] configured switch {NEXT_SWITCH}=next_preset, "
-            f"{PREV_SWITCH}=prev_preset, {BYPASS_SWITCH}=toggle_bypass"
+            f"[keyboard-footswitch] configured switch "
+            f"{NEXT_PRESET_SWITCH}=next_preset, {PREV_PRESET_SWITCH}=prev_preset, "
+            f"{NEXT_RIG_SWITCH}=next_rig, {PREV_RIG_SWITCH}=prev_rig, "
+            f"{BYPASS_SWITCH}=toggle_bypass"
         )
+
+
+async def _press(ws, switch_index: int) -> None:
+    await ws.send(json.dumps({"type": "footswitch_press", "switch_index": switch_index}))
 
 
 def _print_active(state: dict) -> None:
     bypass_suffix = " [BYPASSED -- dry signal only]" if state.get("bypass") else ""
-    preset_id = state.get("active_preset_id")
-    if preset_id is None:
-        print(f"[keyboard-footswitch] active preset: (none){bypass_suffix}")
+    rigs = state.get("rigs", [])
+    rig_index = state.get("active_rig_index", 0)
+    preset_index = state.get("active_preset_index", 0)
+
+    if not (0 <= rig_index < len(rigs)):
+        print(f"[keyboard-footswitch] no rig selected{bypass_suffix}")
         return
-    preset = state.get("presets", {}).get(preset_id)
-    name = preset["name"] if preset else preset_id
-    print(f"[keyboard-footswitch] active preset: {name}{bypass_suffix}")
+
+    rig = rigs[rig_index]
+    presets = rig.get("presets", [])
+    preset_name = (
+        presets[preset_index]["name"]
+        if 0 <= preset_index < len(presets)
+        else "(no preset)"
+    )
+    print(
+        f"[keyboard-footswitch] rig: {rig.get('name')} "
+        f"[{rig_index + 1}/{len(rigs)}]  |  preset: {preset_name} "
+        f"[{preset_index + 1}/{len(presets)}]{bypass_suffix}"
+    )
 
 
 async def run(uri: str) -> None:
@@ -116,8 +157,9 @@ async def run(uri: str) -> None:
         loop.add_reader(stdin_fd, lambda: key_queue.put_nowait(os.read(stdin_fd, 1).decode(errors="replace")))
 
         print(
-            "[keyboard-footswitch] ready -- right arrow = next preset, left arrow = prev preset, "
-            "down arrow = toggle bypass, q = quit"
+            "[keyboard-footswitch] ready -- up/down arrow = next/prev rig "
+            "(swaps amp + cab), right/left arrow = next/prev preset "
+            "(flips effects under the same amp), b = toggle bypass, q = quit"
         )
 
         async def read_broadcasts() -> None:
@@ -134,17 +176,25 @@ async def run(uri: str) -> None:
                 ch = await key_queue.get()
                 if ch == "q":
                     break
+                if ch == "b":
+                    # Bypass has no arrow key left now that up/down drive the
+                    # rig switches. It is a dev-tool convenience anyway --
+                    # the final hardware drops the bypass switch entirely.
+                    await _press(ws, BYPASS_SWITCH)
+                    continue
                 if ch != "\x1b":
                     continue
                 # Arrow keys arrive as the 3-byte escape sequence ESC [ C/D/B.
                 ch2 = await key_queue.get()
                 ch3 = await key_queue.get()
                 if (ch2, ch3) == ("[", "C"):
-                    await ws.send(json.dumps({"type": "footswitch_press", "switch_index": NEXT_SWITCH}))
+                    await _press(ws, NEXT_PRESET_SWITCH)
                 elif (ch2, ch3) == ("[", "D"):
-                    await ws.send(json.dumps({"type": "footswitch_press", "switch_index": PREV_SWITCH}))
+                    await _press(ws, PREV_PRESET_SWITCH)
+                elif (ch2, ch3) == ("[", "A"):
+                    await _press(ws, NEXT_RIG_SWITCH)
                 elif (ch2, ch3) == ("[", "B"):
-                    await ws.send(json.dumps({"type": "footswitch_press", "switch_index": BYPASS_SWITCH}))
+                    await _press(ws, PREV_RIG_SWITCH)
         finally:
             loop.remove_reader(sys.stdin.fileno())
             broadcast_task.cancel()

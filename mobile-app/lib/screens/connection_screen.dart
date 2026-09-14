@@ -4,7 +4,7 @@ import '../services/daemon_client.dart';
 import '../state/daemon_state_controller.dart';
 
 /// The phone-side mirror of what an onboard display would show: connection
-/// state, the active preset's name, bypass, and tempo.
+/// state, the active rig and preset, bypass, and tempo.
 class ConnectionScreen extends StatelessWidget {
   final DaemonStateController controller;
 
@@ -45,6 +45,7 @@ class ConnectionScreen extends StatelessWidget {
         builder: (context, _) {
           final state = controller.state;
           final status = controller.status;
+          final activeRig = state.activeRig;
           final activePreset = state.activePreset;
 
           return ListView(
@@ -68,11 +69,31 @@ class ConnectionScreen extends StatelessWidget {
               const SizedBox(height: 12),
               Card(
                 child: ListTile(
+                  key: const Key('active-rig-tile'),
+                  leading: const Icon(Icons.speaker),
+                  title: Text(activeRig?.name ?? 'No rig selected'),
+                  subtitle: Text(
+                    activeRig == null
+                        ? 'up / down switches step through rigs'
+                        : activeRig.pinnedBlocks.isEmpty
+                            ? 'no pinned amp/cab'
+                            : activeRig.pinnedBlocks
+                                .map((b) => b.type)
+                                .join(' + '),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Card(
+                child: ListTile(
                   key: const Key('active-preset-tile'),
                   leading: const Icon(Icons.piano),
                   title: Text(activePreset?.name ?? 'No preset selected'),
                   subtitle: Text(
-                    'Bank ${state.activeBankIndex + 1}, slot ${state.activeSlot + 1}',
+                    activeRig == null || activePreset == null
+                        ? 'left / right switches step through presets'
+                        : 'Preset ${state.activePresetIndex + 1} of '
+                            '${activeRig.presets.length}',
                   ),
                 ),
               ),

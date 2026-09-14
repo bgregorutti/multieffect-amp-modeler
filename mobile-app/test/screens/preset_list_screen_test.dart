@@ -16,11 +16,11 @@ void main() {
       home: PresetListScreen(controller: controller),
     ));
 
-    expect(find.text('Ambient Swell'), findsOneWidget);
-    expect(find.text('Crunch Rhythm'), findsOneWidget);
+    expect(find.text('Clean'), findsOneWidget);
+    expect(find.text('Drive'), findsOneWidget);
   });
 
-  testWidgets('tapping a preset sends select_preset with its id',
+  testWidgets('tapping a preset sends select_preset with its index',
       (tester) async {
     final fakeClient = FakeDaemonClient(state: sampleState);
     final controller = DaemonStateController(fakeClient);
@@ -35,7 +35,9 @@ void main() {
     expect(fakeClient.sentCommands, hasLength(1));
     final cmd =
         fakeClient.sentCommands.single.command as SelectPresetCommand;
-    expect(cmd.presetId, 'preset-b');
+    expect(cmd.presetIndex, 1);
+    // Omitting rig_index keeps the selection inside the current rig.
+    expect(cmd.rigIndex, isNull);
   });
 
   testWidgets('tapping delete sends delete_preset for that preset',
@@ -54,10 +56,9 @@ void main() {
         .where((c) => c.type == 'delete_preset')
         .toList();
     expect(deleteCommands, hasLength(1));
-    expect(
-      (deleteCommands.single.command as DeletePresetCommand).presetId,
-      'preset-a',
-    );
+    final deleteCmd = deleteCommands.single.command as DeletePresetCommand;
+    expect(deleteCmd.presetId, 'preset-a');
+    expect(deleteCmd.rigId, 'rig-1');
   });
 
   testWidgets(
@@ -84,15 +85,13 @@ void main() {
           .where((c) => c.type == 'create_preset')
           .toList();
       expect(createCommands, hasLength(1));
-      expect(
-        (createCommands.single.command as CreatePresetCommand).name,
-        'New Lead Tone',
-      );
+      final createCmd = createCommands.single.command as CreatePresetCommand;
+      expect(createCmd.name, 'New Lead Tone');
+      expect(createCmd.rigId, 'rig-1');
     },
   );
 
-  testWidgets('shows an empty message when there are no presets',
-      (tester) async {
+  testWidgets('prompts to pick a rig when none is active', (tester) async {
     final fakeClient = FakeDaemonClient();
     final controller = DaemonStateController(fakeClient);
 
@@ -100,6 +99,23 @@ void main() {
       home: PresetListScreen(controller: controller),
     ));
 
-    expect(find.text('No presets yet'), findsOneWidget);
+    expect(
+      find.text('No rig selected -- pick one on the Rigs screen'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('summarises which effects each preset turns on', (tester) async {
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    final controller = DaemonStateController(fakeClient);
+
+    await tester.pumpWidget(MaterialApp(
+      home: PresetListScreen(controller: controller),
+    ));
+
+    // "Clean" overrides nothing and both effects default to off.
+    expect(find.text('no effects on'), findsOneWidget);
+    // "Drive" switches the distortion on.
+    expect(find.text('distortion'), findsOneWidget);
   });
 }

@@ -27,13 +27,13 @@ class FakeControlDaemon {
   /// In-memory state, shaped like `DaemonState`. Deliberately minimal --
   /// just enough fields for the test scenarios that exercise it.
   Map<String, dynamic> state = {
-    'version': 1,
-    'presets': <String, dynamic>{},
-    'banks': <dynamic>[],
+    'version': 2,
+    'rigs': <dynamic>[],
     'assets': <String, dynamic>{},
     'footswitch_mapping': <String, dynamic>{},
-    'active_bank_index': 0,
-    'active_slot': 0,
+    'active_rig_index': 0,
+    'active_preset_index': 0,
+    'active_rig_id': null,
     'active_preset_id': null,
     'bypass': false,
     'tempo_bpm': null,
@@ -85,18 +85,46 @@ class FakeControlDaemon {
     switch (type) {
       case 'hello':
         _send(socket, {'type': 'state_snapshot', 'state': state});
-      case 'create_preset':
-        final id = 'preset-${(state['presets'] as Map).length + 1}';
-        final preset = {
-          'id': id,
+      case 'create_rig':
+        final rigs = state['rigs'] as List<dynamic>;
+        final rigId = 'rig-${rigs.length + 1}';
+        final rig = {
+          'id': rigId,
           'name': json['name'],
-          'blocks': json['blocks'] ?? [],
-          'nam_asset_id': json['nam_asset_id'],
-          'ir_asset_id': json['ir_asset_id'],
+          'chain': json['chain'] ?? <dynamic>[],
+          'presets': <dynamic>[],
+        };
+        rigs.add(rig);
+        _send(socket, {
+          'type': 'command_ok',
+          'command': 'create_rig',
+          'result': {'rig': rig},
+        });
+        _broadcastStateChanged('create_rig');
+      case 'create_preset':
+        final rigs = state['rigs'] as List<dynamic>;
+        final rigId = json['rig_id'] as String?;
+        final rig = rigs.cast<Map<String, dynamic>>().firstWhere(
+              (r) => r['id'] == rigId,
+              orElse: () => <String, dynamic>{},
+            );
+        if (rig.isEmpty) {
+          _send(socket, {
+            'type': 'error',
+            'code': 'not_found',
+            'message': 'no such rig: $rigId',
+          });
+          return;
+        }
+        final presets = rig['presets'] as List<dynamic>;
+        final preset = {
+          'id': 'preset-${presets.length + 1}',
+          'name': json['name'],
+          'block_states': json['block_states'] ?? <String, dynamic>{},
           'created_at': 0.0,
           'updated_at': 0.0,
         };
-        (state['presets'] as Map<String, dynamic>)[id] = preset;
+        presets.add(preset);
         _send(socket, {
           'type': 'command_ok',
           'command': 'create_preset',
@@ -112,9 +140,15 @@ class FakeControlDaemon {
         });
         _broadcastStateChanged('set_bypass');
       case 'delete_preset':
-        final presets = state['presets'] as Map<String, dynamic>;
+        final rigs = state['rigs'] as List<dynamic>;
         final presetId = json['preset_id'] as String?;
-        if (presetId == null || !presets.containsKey(presetId)) {
+        final rig = rigs.cast<Map<String, dynamic>>().firstWhere(
+              (r) => (r['presets'] as List<dynamic>)
+                  .cast<Map<String, dynamic>>()
+                  .any((p) => p['id'] == presetId),
+              orElse: () => <String, dynamic>{},
+            );
+        if (presetId == null || rig.isEmpty) {
           _send(socket, {
             'type': 'error',
             'code': 'not_found',
@@ -122,7 +156,8 @@ class FakeControlDaemon {
           });
           return;
         }
-        presets.remove(presetId);
+        (rig['presets'] as List<dynamic>)
+            .removeWhere((p) => (p as Map<String, dynamic>)['id'] == presetId);
         _send(socket, {
           'type': 'command_ok',
           'command': 'delete_preset',

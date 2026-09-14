@@ -48,21 +48,22 @@ from .ws_protocol import (
     APP_ONLY_MESSAGES,
     FOOTSWITCH_ONLY_MESSAGES,
     MESSAGE_MODELS,
-    CreateBankMessage,
     CreatePresetMessage,
+    CreateRigMessage,
     DeletePresetMessage,
+    DeleteRigMessage,
     ErrorMessage,
     FootswitchPressMessage,
     HelloMessage,
     RegisterAssetMessage,
-    ReorderBanksMessage,
+    ReorderRigsMessage,
     SelectPresetMessage,
     SetBypassMessage,
     SetFootswitchMappingMessage,
     StateChangedMessage,
     StateSnapshotMessage,
-    UpdateBankMessage,
     UpdatePresetMessage,
+    UpdateRigMessage,
 )
 
 logger = logging.getLogger("control_daemon.app")
@@ -172,13 +173,34 @@ def create_app(
                 hasher.update(chunk)
                 size += len(chunk)
 
+        digest = hasher.hexdigest()
+
+        # Dedup by content, not filename. The checksum is only known once the
+        # whole body has streamed, so the file is already on disk by now --
+        # unlink it rather than leaving an orphan no asset id will ever
+        # reference.
+        existing = state_manager.find_asset_by_sha256(digest)
+        if existing is not None:
+            dest.unlink(missing_ok=True)
+            return JSONResponse(
+                {
+                    "error": "duplicate_asset",
+                    "message": (
+                        f"identical content already registered as asset "
+                        f"{existing.id} ({existing.filename})"
+                    ),
+                    "existing_asset_id": existing.id,
+                },
+                status_code=409,
+            )
+
         return JSONResponse(
             {
                 "kind": kind,
                 "filename": filename,
                 "stored_path": str(dest),
                 "size_bytes": size,
-                "sha256": hasher.hexdigest(),
+                "sha256": digest,
             }
         )
 
@@ -312,50 +334,55 @@ def _apply(state_manager: DaemonStateManager, message) -> Optional[dict]:
     dict to send back to the sender as `command_ok.result`, or None to send
     nothing beyond the (already-happening) broadcast."""
 
+    if isinstance(message, CreateRigMessage):
+        rig = state_manager.create_rig(name=message.name, chain=message.chain)
+        return {"rig": rig.model_dump(mode="json")}
+
+    if isinstance(message, UpdateRigMessage):
+        rig = state_manager.update_rig(
+            rig_id=message.rig_id, name=message.name, chain=message.chain
+        )
+        return {"rig": rig.model_dump(mode="json")}
+
+    if isinstance(message, DeleteRigMessage):
+        state_manager.delete_rig(message.rig_id)
+        return {"rig_id": message.rig_id}
+
+    if isinstance(message, ReorderRigsMessage):
+        state_manager.reorder_rigs(message.rig_ids)
+        return {"rig_ids": message.rig_ids}
+
     if isinstance(message, CreatePresetMessage):
         preset = state_manager.create_preset(
+            rig_id=message.rig_id,
             name=message.name,
-            blocks=message.blocks,
-            nam_asset_id=message.nam_asset_id,
-            ir_asset_id=message.ir_asset_id,
+            block_states=message.block_states,
         )
         return {"preset": preset.model_dump(mode="json")}
 
     if isinstance(message, UpdatePresetMessage):
         preset = state_manager.update_preset(
+            rig_id=message.rig_id,
             preset_id=message.preset_id,
             name=message.name,
-            blocks=message.blocks,
-            nam_asset_id=message.nam_asset_id,
-            ir_asset_id=message.ir_asset_id,
+            block_states=message.block_states,
         )
         return {"preset": preset.model_dump(mode="json")}
 
     if isinstance(message, DeletePresetMessage):
-        state_manager.delete_preset(message.preset_id)
+        state_manager.delete_preset(message.rig_id, message.preset_id)
         return {"preset_id": message.preset_id}
 
     if isinstance(message, SelectPresetMessage):
         state_manager.select_preset(
-            preset_id=message.preset_id,
-            bank_index=message.bank_index,
-            slot=message.slot,
+            rig_index=message.rig_index,
+            preset_index=message.preset_index,
         )
-        return {"active_preset_id": state_manager.state.active_preset_id}
-
-    if isinstance(message, CreateBankMessage):
-        bank = state_manager.create_bank(name=message.name, num_slots=message.num_slots)
-        return {"bank": bank.model_dump(mode="json")}
-
-    if isinstance(message, UpdateBankMessage):
-        bank = state_manager.update_bank(
-            bank_id=message.bank_id, name=message.name, slots=message.slots
-        )
-        return {"bank": bank.model_dump(mode="json")}
-
-    if isinstance(message, ReorderBanksMessage):
-        state_manager.reorder_banks(message.bank_ids)
-        return {"bank_ids": message.bank_ids}
+        view = state_manager.state_view()
+        return {
+            "active_rig_id": view["active_rig_id"],
+            "active_preset_id": view["active_preset_id"],
+        }
 
     if isinstance(message, SetBypassMessage):
         state_manager.set_bypass(message.bypass)

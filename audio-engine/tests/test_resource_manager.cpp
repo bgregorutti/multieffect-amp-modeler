@@ -3,6 +3,9 @@
 #include <atomic>
 #include <cmath>
 #include <memory>
+#include <optional>
+#include <string>
+#include <utility>
 
 #include <gtest/gtest.h>
 
@@ -55,17 +58,30 @@ public:
     }
 };
 
+EffectBlockSpec makeBlock(const std::string& id, const std::string& type,
+                          std::optional<std::string> assetId = std::nullopt, bool enabled = true) {
+    EffectBlockSpec spec;
+    spec.id = id;
+    spec.type = type;
+    spec.asset_id = std::move(assetId);
+    spec.enabled = enabled;
+    return spec;
+}
+
+// A resolved chain in the shape the daemon now sends: amp ("nam") and cab
+// ("ir") are ordinary blocks carrying their own asset_id, sitting in an
+// explicit signal-chain order alongside the effects.
 Preset makePreset(const std::string& id, const std::string& namAssetId, const std::string& irAssetId) {
     Preset p;
     p.id = id;
     p.name = "preset-" + id;
-    p.nam_asset_id = namAssetId;
-    p.ir_asset_id = irAssetId;
-    EffectBlockSpec gain;
-    gain.type = "gain";
-    gain.enabled = true;
+    p.rig_id = "rig-" + id;
+    p.rig_name = "Rig " + id;
+    p.blocks.push_back(makeBlock("amp", "nam", namAssetId));
+    EffectBlockSpec gain = makeBlock("boost", "gain");
     gain.params["gain_db"] = 0.0;
     p.blocks.push_back(gain);
+    p.blocks.push_back(makeBlock("cab", "ir", irAssetId));
     return p;
 }
 
@@ -151,6 +167,143 @@ TEST(ResourceManager, UnknownAssetIdThrows) {
     ResourceManager manager(loader);
     Preset p = makePreset("X", "does-not-exist", "also-missing");
     EXPECT_THROW(manager.loadPreset(p), std::runtime_error);
+}
+
+TEST(ResourceManager, BlockReferencingUnregisteredAssetIsRejected) {
+    // Asset references now hang off individual blocks, so validation has
+    // to walk the whole chain -- including a block whose type the engine
+    // doesn't otherwise treat specially, and including a *disabled* one
+    // (a preset naming an asset the engine was never told about means the
+    // engine and daemon are out of sync either way).
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+
+    Asset nam;
+    nam.id = "nam1";
+    nam.kind = AssetKind::Nam;
+    nam.filename = "a.nam";
+    nam.stored_path = "/fake/a.nam";
+    manager.registerAsset(nam);
+
+    // Sanity: a fully registered chain loads, so the failures below are
+    // really about the unknown id and not about the fixture.
+    Preset ok;
+    ok.id = "ok";
+    ok.name = "ok";
+    ok.blocks = {makeBlock("amp", "nam", "nam1")};
+    ASSERT_NO_THROW(manager.loadPreset(ok));
+
+    Preset bad;
+    bad.id = "bad";
+    bad.name = "bad";
+    bad.blocks = {makeBlock("amp", "nam", "nam1"), makeBlock("cab", "ir", "never-uploaded")};
+    EXPECT_THROW(manager.loadPreset(bad), std::runtime_error);
+
+    Preset badDisabled;
+    badDisabled.id = "bad-disabled";
+    badDisabled.name = "bad-disabled";
+    badDisabled.blocks = {makeBlock("fuzz", "gain", "never-uploaded", /*enabled=*/false)};
+    EXPECT_THROW(manager.loadPreset(badDisabled), std::runtime_error);
+
+    // Rejection must leave the previously loaded chain in place rather
+    // than half-swapping it.
+    ASSERT_NE(manager.currentChain(), nullptr);
+    EXPECT_EQ(manager.currentChain()->presetId, "ok");
+    EXPECT_EQ(loader->liveIrCount.load(), 0);
+}
+
+TEST(ResourceManager, ChainRunsBlocksInPresetOrder) {
+    // The daemon sends the signal chain already ordered, amp and cab
+    // included; the engine must replay that order rather than forcing a
+    // fixed amp -> effects -> cab topology.
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+
+    Asset nam;
+    nam.id = "n";
+    nam.kind = AssetKind::Nam;
+    nam.filename = "n.nam";
+    nam.stored_path = "/fake/n.nam";
+    Asset ir;
+    ir.id = "i";
+    ir.kind = AssetKind::Ir;
+    ir.filename = "i.wav";
+    ir.stored_path = "/fake/i.wav";
+    manager.registerAsset(nam);
+    manager.registerAsset(ir);
+
+    Preset p;
+    p.id = "ordered";
+    p.name = "ordered";
+    EffectBlockSpec boost = makeBlock("boost", "gain");
+    boost.params["gain_db"] = 6.0;
+    // Deliberately amp -> cab -> gain: the gain sits AFTER the cab here.
+    p.blocks = {makeBlock("amp", "nam", "n"), makeBlock("cab", "ir", "i"), boost};
+    manager.loadPreset(p);
+
+    EngineChain* chain = manager.currentChain();
+    ASSERT_NE(chain, nullptr);
+    ASSERT_EQ(chain->processOrder.size(), 3u);
+    EXPECT_EQ(chain->processOrder[0], chain->namModel.get());
+    EXPECT_EQ(chain->processOrder[1], chain->cabinet.get());
+    ASSERT_EQ(chain->effects.size(), 1u);
+    EXPECT_EQ(chain->processOrder[2], chain->effects[0].get());
+}
+
+TEST(ResourceManager, AmpAndCabBlocksLoadTheirOwnAssets) {
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    CountingAssetLoader& loader = *loaderOwned;
+    ResourceManager manager(loaderOwned);
+
+    Asset nam;
+    nam.id = "n";
+    nam.kind = AssetKind::Nam;
+    nam.filename = "n.nam";
+    nam.stored_path = "/fake/n.nam";
+    Asset ir;
+    ir.id = "i";
+    ir.kind = AssetKind::Ir;
+    ir.filename = "i.wav";
+    ir.stored_path = "/fake/i.wav";
+    manager.registerAsset(nam);
+    manager.registerAsset(ir);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("amp", "nam", "n"), makeBlock("cab", "ir", "i")};
+    manager.loadPreset(p);
+
+    EXPECT_EQ(loader.totalNamLoaded.load(), 1);
+    EXPECT_EQ(loader.totalIrLoaded.load(), 1);
+    ASSERT_NE(manager.currentChain(), nullptr);
+    EXPECT_NE(manager.currentChain()->namModel, nullptr);
+    EXPECT_NE(manager.currentChain()->cabinet, nullptr);
+    // Amp/cab are not duplicated into the generic effect list.
+    EXPECT_TRUE(manager.currentChain()->effects.empty());
+}
+
+TEST(ResourceManager, DisabledAmpBlockIsNotLoaded) {
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    CountingAssetLoader& loader = *loaderOwned;
+    ResourceManager manager(loaderOwned);
+
+    Asset nam;
+    nam.id = "n";
+    nam.kind = AssetKind::Nam;
+    nam.filename = "n.nam";
+    nam.stored_path = "/fake/n.nam";
+    manager.registerAsset(nam);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("amp", "nam", "n", /*enabled=*/false)};
+    manager.loadPreset(p);
+
+    EXPECT_EQ(loader.totalNamLoaded.load(), 0);
+    EXPECT_EQ(manager.currentChain()->namModel, nullptr);
+    EXPECT_TRUE(manager.currentChain()->processOrder.empty());
 }
 
 TEST(ResourceManager, DisabledBlocksAreSkipped) {

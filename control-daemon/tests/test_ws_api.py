@@ -33,11 +33,11 @@ def test_hello_gives_initial_state_snapshot(client: TestClient):
     with client.websocket_connect("/ws") as ws:
         snapshot = _hello(ws, "app")
         assert snapshot["type"] == "state_snapshot"
-        assert snapshot["state"]["version"] == 1
-        assert snapshot["state"]["presets"] == {}
+        assert snapshot["state"]["version"] == 2
+        assert snapshot["state"]["rigs"] == []
 
 
-def test_app_create_and_select_preset_broadcasts_to_display(client: TestClient):
+def test_app_create_rig_and_select_preset_broadcasts_to_display(client: TestClient):
     with client.websocket_connect("/ws") as app_ws, client.websocket_connect(
         "/ws"
     ) as display_ws:
@@ -45,29 +45,52 @@ def test_app_create_and_select_preset_broadcasts_to_display(client: TestClient):
         _hello(display_ws, "display")
 
         app_ws.send_json(
-            {"type": "create_preset", "name": "Ambient Swell", "blocks": []}
+            {
+                "type": "create_rig",
+                "name": "Ampeg SVT",
+                "chain": [
+                    {"id": "amp", "type": "nam", "pinned": True},
+                    {"id": "dist", "type": "distortion", "enabled": False},
+                ],
+            }
         )
         create_ack = app_ws.receive_json()
         assert create_ack["type"] == "command_ok"
-        assert create_ack["command"] == "create_preset"
-        preset_id = create_ack["result"]["preset"]["id"]
+        assert create_ack["command"] == "create_rig"
+        rig_id = create_ack["result"]["rig"]["id"]
 
         # Broadcasts go to ALL connected clients, including the sender
         # itself -- the direct command_ok above is always followed by the
         # same state_changed broadcast every other client gets.
         app_self_broadcast = app_ws.receive_json()
         assert app_self_broadcast["type"] == "state_changed"
-        assert app_self_broadcast["reason"] == "create_preset"
+        assert app_self_broadcast["reason"] == "create_rig"
 
         display_broadcast = display_ws.receive_json()
         assert display_broadcast["type"] == "state_changed"
-        assert display_broadcast["reason"] == "create_preset"
-        assert preset_id in display_broadcast["state"]["presets"]
+        assert display_broadcast["reason"] == "create_rig"
+        assert display_broadcast["state"]["rigs"][0]["id"] == rig_id
 
-        app_ws.send_json({"type": "select_preset", "preset_id": preset_id})
+        app_ws.send_json(
+            {
+                "type": "create_preset",
+                "rig_id": rig_id,
+                "name": "Drive",
+                "block_states": {"dist": {"enabled": True}},
+            }
+        )
+        preset_ack = app_ws.receive_json()
+        preset_id = preset_ack["result"]["preset"]["id"]
+        app_ws.receive_json()  # self broadcast
+        display_ws.receive_json()
+
+        app_ws.send_json(
+            {"type": "select_preset", "rig_index": 0, "preset_index": 0}
+        )
         select_ack = app_ws.receive_json()
         assert select_ack["type"] == "command_ok"
         assert select_ack["result"]["active_preset_id"] == preset_id
+        assert select_ack["result"]["active_rig_id"] == rig_id
         app_ws.receive_json()  # self broadcast for select_preset
 
         display_broadcast_2 = display_ws.receive_json()
@@ -119,32 +142,28 @@ def test_footswitch_press_triggers_mapped_action_and_broadcasts(client: TestClie
         _hello(app_ws, "app")
         _hello(footswitch_ws, "footswitch")
 
-        app_ws.send_json({"type": "create_preset", "name": "P1"})
-        create_ack = app_ws.receive_json()
-        preset_id = create_ack["result"]["preset"]["id"]
+        app_ws.send_json({"type": "create_rig", "name": "Rig A", "chain": []})
+        rig_ack = app_ws.receive_json()
+        rig_id = rig_ack["result"]["rig"]["id"]
         app_ws.receive_json()  # self broadcast
 
         app_ws.send_json(
-            {
-                "type": "create_bank",
-                "name": "Bank A",
-                "num_slots": 2,
-            }
+            {"type": "create_preset", "rig_id": rig_id, "name": "Clean"}
         )
-        bank_ack = app_ws.receive_json()
-        bank_id = bank_ack["result"]["bank"]["id"]
+        app_ws.receive_json()  # command_ok
         app_ws.receive_json()  # self broadcast
 
         app_ws.send_json(
-            {"type": "update_bank", "bank_id": bank_id, "slots": [preset_id, None]}
+            {"type": "create_preset", "rig_id": rig_id, "name": "Drive"}
         )
-        app_ws.receive_json()  # command_ok for update_bank
+        second_ack = app_ws.receive_json()
+        second_preset_id = second_ack["result"]["preset"]["id"]
         app_ws.receive_json()  # self broadcast
 
         app_ws.send_json(
             {
                 "type": "set_footswitch_mapping",
-                "mapping": {"0": {"type": "select_slot", "slot": 0}},
+                "mapping": {"0": {"type": "next_preset"}},
             }
         )
         app_ws.receive_json()  # command_ok for set_footswitch_mapping
@@ -154,7 +173,8 @@ def test_footswitch_press_triggers_mapped_action_and_broadcasts(client: TestClie
 
         broadcast = app_ws.receive_json()
         assert broadcast["type"] == "state_changed"
-        assert broadcast["state"]["active_preset_id"] == preset_id
+        assert broadcast["reason"] == "footswitch_next_preset"
+        assert broadcast["state"]["active_preset_id"] == second_preset_id
 
 
 def test_asset_upload_then_register(client: TestClient):
@@ -185,3 +205,47 @@ def test_asset_upload_then_register(client: TestClient):
         assert ack["type"] == "command_ok"
         assert ack["result"]["asset"]["filename"] == "my_amp.nam"
         assert ack["result"]["asset"]["sha256"] == body["sha256"]
+
+
+def test_duplicate_upload_is_refused_and_leaves_no_orphan_file(client: TestClient):
+    payload = b"fake ir bytes"
+
+    first = client.post("/assets/upload?kind=ir&filename=cab.wav", content=payload)
+    assert first.status_code == 200
+    stored_path = Path(first.json()["stored_path"])
+
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+        ws.send_json({"type": "register_asset", **{
+            k: first.json()[k]
+            for k in ("kind", "filename", "stored_path", "size_bytes", "sha256")
+        }})
+        assert ws.receive_json()["type"] == "command_ok"
+
+    # Same bytes under a different name -- refused on content, and the
+    # second file must not be left behind on disk.
+    before = sorted(p.name for p in stored_path.parent.iterdir())
+    second = client.post("/assets/upload?kind=ir&filename=other.wav", content=payload)
+    assert second.status_code == 409
+    assert second.json()["error"] == "duplicate_asset"
+    assert sorted(p.name for p in stored_path.parent.iterdir()) == before
+    assert stored_path.exists()
+
+
+def test_register_asset_duplicate_is_refused_over_ws(client: TestClient):
+    payload = b"some nam bytes"
+    body = client.post("/assets/upload?kind=nam&filename=amp.nam", content=payload).json()
+
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+        register = {"type": "register_asset", **{
+            k: body[k] for k in ("kind", "filename", "stored_path", "size_bytes", "sha256")
+        }}
+        ws.send_json(register)
+        assert ws.receive_json()["type"] == "command_ok"
+        assert ws.receive_json()["type"] == "state_changed"
+
+        ws.send_json({**register, "filename": "amp_copy.nam"})
+        err = ws.receive_json()
+        assert err["type"] == "error"
+        assert err["code"] == "duplicate_asset"

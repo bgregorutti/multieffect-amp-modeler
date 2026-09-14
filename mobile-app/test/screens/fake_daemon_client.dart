@@ -106,16 +106,20 @@ class FakeDaemonClient extends DaemonClientBase {
       _record('select_preset', cmd);
 
   @override
-  Future<Map<String, dynamic>> createBank(CreateBankCommand cmd) =>
-      _record('create_bank', cmd);
+  Future<Map<String, dynamic>> createRig(CreateRigCommand cmd) =>
+      _record('create_rig', cmd);
 
   @override
-  Future<Map<String, dynamic>> updateBank(UpdateBankCommand cmd) =>
-      _record('update_bank', cmd);
+  Future<Map<String, dynamic>> updateRig(UpdateRigCommand cmd) =>
+      _record('update_rig', cmd);
 
   @override
-  Future<Map<String, dynamic>> reorderBanks(ReorderBanksCommand cmd) =>
-      _record('reorder_banks', cmd);
+  Future<Map<String, dynamic>> deleteRig(DeleteRigCommand cmd) =>
+      _record('delete_rig', cmd);
+
+  @override
+  Future<Map<String, dynamic>> reorderRigs(ReorderRigsCommand cmd) =>
+      _record('reorder_rigs', cmd);
 
   @override
   Future<Map<String, dynamic>> setBypass(SetBypassCommand cmd) =>

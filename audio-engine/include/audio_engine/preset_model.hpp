@@ -4,14 +4,35 @@
 // see control_socket.hpp) can be deserialized here with no translation
 // layer. Field names, optionality and defaults intentionally match:
 //
-//   EffectBlock: type, enabled, params (opaque string->(double|string|bool))
-//   AssetKind:   "nam" | "ir"
-//   Asset:       id, kind, filename, stored_path, size_bytes, sha256, uploaded_at
-//   Preset:      id, name, blocks, nam_asset_id, ir_asset_id, created_at, updated_at
+//   ResolvedBlock:  id, type, asset_id (nullable), enabled, params
+//                   (params opaque: string -> (double|string|bool))
+//   AssetKind:      "nam" | "ir"
+//   Asset:          id, kind, filename, stored_path, size_bytes, sha256, uploaded_at
+//   ResolvedPreset: id, name, rig_id, rig_name, blocks
+//
+// The daemon models a *Rig* (an amp + cab + effects, where the amp/cab
+// blocks are "pinned" = always on) containing several *Presets* (which
+// only say which of that rig's non-pinned blocks are enabled). The engine
+// is deliberately kept ignorant of all of that: the daemon flattens
+// rig+preset into a `ResolvedPreset` and sends that, so what arrives here
+// is simply "the exact ordered chain to play". Hence `Preset` below maps
+// to the daemon's ResolvedPreset and `EffectBlockSpec` to its
+// ResolvedBlock -- there are no rigs, no overrides and no timestamps on
+// the wire.
+//
+// Two consequences worth spelling out:
+//   * Asset references live on each *block* (`asset_id`), not on the
+//     preset. There is no longer a preset-level nam_asset_id/ir_asset_id;
+//     the amp is just a block of type "nam" and the cab a block of type
+//     "ir", each carrying its own asset_id.
+//   * `blocks` order is meaningful and explicit -- it is the signal chain
+//     order, amp and cab included -- so it must be preserved exactly.
 //
 // Only the fields the audio engine actually needs to consume are modeled
-// here (the daemon owns Bank/footswitch-mapping/DaemonState -- the engine
-// only ever receives one Preset at a time over the control socket).
+// here (the daemon owns Rig/Bank/footswitch-mapping/DaemonState -- the
+// engine only ever receives one ResolvedPreset at a time over the control
+// socket). `Asset` is unchanged by the rig refactor and still mirrors the
+// daemon's Asset model verbatim.
 #pragma once
 
 #include <map>
@@ -35,7 +56,15 @@ using ParamValue = std::variant<double, std::string, bool>;
 using ParamMap = std::map<std::string, ParamValue>;
 
 struct EffectBlockSpec {
+    // Stable per-rig block id ("amp", "cab", "dist", ...). Required on the
+    // wire: the daemon addresses blocks by it, and the engine echoes it
+    // back in diagnostics.
+    std::string id;
     std::string type;
+    // The binary asset this block plays through, if it needs one (a "nam"
+    // block's model, an "ir" block's cabinet). Null/absent for blocks that
+    // are pure DSP (gain, eq, delay, ...).
+    std::optional<std::string> asset_id;
     bool enabled = true;
     ParamMap params;
 
@@ -57,14 +86,15 @@ struct Asset {
     double uploaded_at = 0.0;
 };
 
+// Mirrors the daemon's ResolvedPreset: the flattened chain to play.
+// `rig_id`/`rig_name` are carried for diagnostics/logging only -- the
+// engine never resolves anything through them.
 struct Preset {
     std::string id;
     std::string name;
-    std::vector<EffectBlockSpec> blocks;
-    std::optional<std::string> nam_asset_id;
-    std::optional<std::string> ir_asset_id;
-    double created_at = 0.0;
-    double updated_at = 0.0;
+    std::string rig_id;
+    std::string rig_name;
+    std::vector<EffectBlockSpec> blocks;  // signal chain order, amp/cab included
 };
 
 // nlohmann::json ADL hooks (to_json/from_json) -- these throw

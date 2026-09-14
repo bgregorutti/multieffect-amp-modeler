@@ -21,15 +21,20 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Union
 
-from .models import Asset, Preset
+from .models import Asset, ResolvedPreset
 
 logger = logging.getLogger("control_daemon.audio_engine")
 
 
 class AudioEngineClient(ABC):
     @abstractmethod
-    def load_preset(self, preset: Preset) -> None:
-        """Load and apply the given preset's full signal chain."""
+    def load_preset(self, preset: ResolvedPreset) -> None:
+        """Load and apply the given resolved chain.
+
+        The engine is handed an already-flattened ``ResolvedPreset`` (rig
+        chain + the active preset's overrides applied), so it never needs to
+        know about rigs, presets or pinned blocks -- see models.py.
+        """
 
     @abstractmethod
     def set_bypass(self, bypass: bool) -> None:
@@ -52,7 +57,7 @@ class NullAudioEngineClient(AudioEngineClient):
     in tests without requiring an actual engine process.
     """
 
-    def load_preset(self, preset: Preset) -> None:
+    def load_preset(self, preset: ResolvedPreset) -> None:
         logger.info("load_preset(id=%s, name=%r)", preset.id, preset.name)
 
     def set_bypass(self, bypass: bool) -> None:
@@ -94,7 +99,7 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
 
-    def load_preset(self, preset: Preset) -> None:
+    def load_preset(self, preset: ResolvedPreset) -> None:
         self._send({"cmd": "load_preset", "preset": preset.model_dump(mode="json")})
 
     def set_bypass(self, bypass: bool) -> None:

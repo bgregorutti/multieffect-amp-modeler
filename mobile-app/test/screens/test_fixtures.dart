@@ -1,30 +1,52 @@
 import 'package:mobile_app/models/asset.dart';
-import 'package:mobile_app/models/bank.dart';
 import 'package:mobile_app/models/daemon_state.dart';
 import 'package:mobile_app/models/effect_block.dart';
 import 'package:mobile_app/models/footswitch_action.dart';
 import 'package:mobile_app/models/preset.dart';
+import 'package:mobile_app/models/rig.dart';
 
-const presetA = Preset(
+/// A representative bass rig: pinned amp + cab that every preset shares,
+/// plus two switchable effects.
+const svtChain = [
+  EffectBlock(id: 'amp', type: 'nam', assetId: 'nam-1', pinned: true),
+  EffectBlock(id: 'cab', type: 'ir', assetId: 'ir-1', pinned: true),
+  EffectBlock(id: 'dist', type: 'distortion', enabled: false),
+  EffectBlock(id: 'reverb', type: 'reverb', enabled: false, params: {'decay': 4.2}),
+];
+
+const presetClean = Preset(
   id: 'preset-a',
-  name: 'Ambient Swell',
-  blocks: [
-    EffectBlock(type: 'reverb', enabled: true, params: {'decay': 4.2}),
-  ],
-  namAssetId: 'nam-1',
+  name: 'Clean',
   createdAt: 0,
   updatedAt: 0,
 );
 
-const presetB = Preset(
+const presetDrive = Preset(
   id: 'preset-b',
-  name: 'Crunch Rhythm',
-  blocks: [],
+  name: 'Drive',
+  blockStates: {'dist': PresetBlockState(enabled: true)},
   createdAt: 0,
   updatedAt: 0,
 );
 
-const bankOne = Bank(id: 'bank-1', name: 'Live Set 1', slots: ['preset-a', null]);
+const rigSvt = Rig(
+  id: 'rig-1',
+  name: 'Ampeg SVT',
+  chain: svtChain,
+  presets: [presetClean, presetDrive],
+);
+
+const rigOrange = Rig(
+  id: 'rig-2',
+  name: 'Orange Terror',
+  chain: [
+    EffectBlock(id: 'amp2', type: 'nam', pinned: true),
+    EffectBlock(id: 'fuzz', type: 'fuzz', enabled: false),
+  ],
+  presets: [
+    Preset(id: 'preset-c', name: 'Fuzz Out', createdAt: 0, updatedAt: 0),
+  ],
+);
 
 const namAsset = Asset(
   id: 'nam-1',
@@ -45,13 +67,17 @@ const irAsset = Asset(
 );
 
 final sampleState = DaemonState(
-  presets: const {'preset-a': presetA, 'preset-b': presetB},
-  banks: const [bankOne],
+  rigs: const [rigSvt, rigOrange],
   assets: const {'nam-1': namAsset, 'ir-1': irAsset},
   footswitchMapping: const {
-    0: SelectSlotAction(slot: 0),
-    1: NextBankAction(),
+    0: NextPresetAction(),
+    1: PrevPresetAction(),
+    2: NextRigAction(),
+    3: PrevRigAction(),
   },
+  activeRigIndex: 0,
+  activePresetIndex: 0,
+  activeRigId: 'rig-1',
   activePresetId: 'preset-a',
   bypass: false,
   tempoBpm: 120.0,

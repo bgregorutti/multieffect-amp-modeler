@@ -30,6 +30,7 @@ import contextlib
 import os
 import resource
 import socket
+import sys
 import threading
 import time
 from pathlib import Path
@@ -102,7 +103,7 @@ def test_large_upload_does_not_buffer_whole_file_in_memory(tmp_path: Path):
             content=b"x" * 1024,
         )
 
-        baseline_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        baseline_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
         with big_file.open("rb") as f:
             response = client.post(
@@ -111,20 +112,23 @@ def test_large_upload_does_not_buffer_whole_file_in_memory(tmp_path: Path):
                 content=_stream_open_file(f),
             )
 
-        after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        after_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
     assert response.status_code == 200
     body = response.json()
     assert body["size_bytes"] == FILE_SIZE_BYTES
     assert len(body["sha256"]) == 64
 
-    growth_mb = (after_kb - baseline_kb) / 1024
+    # ru_maxrss is bytes on macOS but kilobytes on Linux; without this the
+    # measurement is off by 1024x on one platform or the other.
+    rss_bytes_per_unit = 1 if sys.platform == "darwin" else 1024
+    growth_mb = (after_rss - baseline_rss) * rss_bytes_per_unit / (1024 * 1024)
     file_mb = FILE_SIZE_BYTES / (1024 * 1024)
 
     print(
         f"\n[memory benchmark] uploaded {file_mb:.1f} MB over a real HTTP "
         f"connection; peak RSS growth = {growth_mb:.1f} MB (baseline "
-        f"ru_maxrss={baseline_kb} KB, after={after_kb} KB)"
+        f"ru_maxrss={baseline_rss}, after={after_rss})"
     )
 
     assert growth_mb < file_mb * 0.5, (

@@ -7,6 +7,7 @@ library;
 
 import 'effect_block.dart';
 import 'footswitch_action.dart';
+import 'preset.dart';
 
 // ---------------------------------------------------------------------------
 // Client -> server
@@ -34,29 +35,91 @@ abstract class DaemonCommand {
   Map<String, dynamic> toJson();
 }
 
-class CreatePresetCommand implements DaemonCommand {
+class CreateRigCommand implements DaemonCommand {
   @override
-  String get type => 'create_preset';
+  String get type => 'create_rig';
 
   final String name;
-  final List<EffectBlock> blocks;
-  final String? namAssetId;
-  final String? irAssetId;
+  final List<EffectBlock> chain;
 
-  const CreatePresetCommand({
-    required this.name,
-    this.blocks = const [],
-    this.namAssetId,
-    this.irAssetId,
-  });
+  const CreateRigCommand({required this.name, this.chain = const []});
 
   @override
   Map<String, dynamic> toJson() => {
         'type': type,
         'name': name,
-        'blocks': blocks.map((b) => b.toJson()).toList(),
-        'nam_asset_id': namAssetId,
-        'ir_asset_id': irAssetId,
+        'chain': chain.map((b) => b.toJson()).toList(),
+      };
+}
+
+/// Any field left `null` (the default) is left unchanged by the daemon.
+/// Sending `chain` replaces the whole chain, so send the full desired order.
+class UpdateRigCommand implements DaemonCommand {
+  @override
+  String get type => 'update_rig';
+
+  final String rigId;
+  final String? name;
+  final List<EffectBlock>? chain;
+
+  const UpdateRigCommand({required this.rigId, this.name, this.chain});
+
+  @override
+  Map<String, dynamic> toJson() {
+    final json = <String, dynamic>{'type': type, 'rig_id': rigId};
+    if (name != null) json['name'] = name;
+    if (chain != null) {
+      json['chain'] = chain!.map((b) => b.toJson()).toList();
+    }
+    return json;
+  }
+}
+
+class DeleteRigCommand implements DaemonCommand {
+  @override
+  String get type => 'delete_rig';
+
+  final String rigId;
+
+  const DeleteRigCommand({required this.rigId});
+
+  @override
+  Map<String, dynamic> toJson() => {'type': type, 'rig_id': rigId};
+}
+
+class ReorderRigsCommand implements DaemonCommand {
+  @override
+  String get type => 'reorder_rigs';
+
+  final List<String> rigIds;
+
+  const ReorderRigsCommand({required this.rigIds});
+
+  @override
+  Map<String, dynamic> toJson() => {'type': type, 'rig_ids': rigIds};
+}
+
+class CreatePresetCommand implements DaemonCommand {
+  @override
+  String get type => 'create_preset';
+
+  final String rigId;
+  final String name;
+  final Map<String, PresetBlockState> blockStates;
+
+  const CreatePresetCommand({
+    required this.rigId,
+    required this.name,
+    this.blockStates = const {},
+  });
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'type': type,
+        'rig_id': rigId,
+        'name': name,
+        'block_states':
+            blockStates.map((id, s) => MapEntry(id, s.toJson())),
       };
 }
 
@@ -65,29 +128,30 @@ class UpdatePresetCommand implements DaemonCommand {
   @override
   String get type => 'update_preset';
 
+  final String rigId;
   final String presetId;
   final String? name;
-  final List<EffectBlock>? blocks;
-  final String? Function()? namAssetId;
-  final String? Function()? irAssetId;
+  final Map<String, PresetBlockState>? blockStates;
 
   const UpdatePresetCommand({
+    required this.rigId,
     required this.presetId,
     this.name,
-    this.blocks,
-    this.namAssetId,
-    this.irAssetId,
+    this.blockStates,
   });
 
   @override
   Map<String, dynamic> toJson() {
-    final json = <String, dynamic>{'type': type, 'preset_id': presetId};
+    final json = <String, dynamic>{
+      'type': type,
+      'rig_id': rigId,
+      'preset_id': presetId,
+    };
     if (name != null) json['name'] = name;
-    if (blocks != null) {
-      json['blocks'] = blocks!.map((b) => b.toJson()).toList();
+    if (blockStates != null) {
+      json['block_states'] =
+          blockStates!.map((id, s) => MapEntry(id, s.toJson()));
     }
-    if (namAssetId != null) json['nam_asset_id'] = namAssetId!();
-    if (irAssetId != null) json['ir_asset_id'] = irAssetId!();
     return json;
   }
 }
@@ -96,82 +160,33 @@ class DeletePresetCommand implements DaemonCommand {
   @override
   String get type => 'delete_preset';
 
+  final String rigId;
   final String presetId;
 
-  const DeletePresetCommand({required this.presetId});
+  const DeletePresetCommand({required this.rigId, required this.presetId});
 
   @override
-  Map<String, dynamic> toJson() => {'type': type, 'preset_id': presetId};
+  Map<String, dynamic> toJson() =>
+      {'type': type, 'rig_id': rigId, 'preset_id': presetId};
 }
 
-/// Select by `presetId` OR by `(bankIndex, slot)` -- not both.
+/// Moves the active position. Either index may be sent alone; omitting
+/// `rigIndex` selects within the current rig.
 class SelectPresetCommand implements DaemonCommand {
   @override
   String get type => 'select_preset';
 
-  final String? presetId;
-  final int? bankIndex;
-  final int? slot;
+  final int? rigIndex;
+  final int? presetIndex;
 
-  const SelectPresetCommand.byId(this.presetId)
-      : bankIndex = null,
-        slot = null;
-
-  const SelectPresetCommand.bySlot({required this.bankIndex, required this.slot})
-      : presetId = null;
+  const SelectPresetCommand({this.rigIndex, this.presetIndex});
 
   @override
   Map<String, dynamic> toJson() => {
         'type': type,
-        if (presetId != null) 'preset_id': presetId,
-        if (bankIndex != null) 'bank_index': bankIndex,
-        if (slot != null) 'slot': slot,
+        if (rigIndex != null) 'rig_index': rigIndex,
+        if (presetIndex != null) 'preset_index': presetIndex,
       };
-}
-
-class CreateBankCommand implements DaemonCommand {
-  @override
-  String get type => 'create_bank';
-
-  final String name;
-  final int numSlots;
-
-  const CreateBankCommand({required this.name, this.numSlots = 4});
-
-  @override
-  Map<String, dynamic> toJson() =>
-      {'type': type, 'name': name, 'num_slots': numSlots};
-}
-
-class UpdateBankCommand implements DaemonCommand {
-  @override
-  String get type => 'update_bank';
-
-  final String bankId;
-  final String? name;
-  final List<String?>? slots;
-
-  const UpdateBankCommand({required this.bankId, this.name, this.slots});
-
-  @override
-  Map<String, dynamic> toJson() {
-    final json = <String, dynamic>{'type': type, 'bank_id': bankId};
-    if (name != null) json['name'] = name;
-    if (slots != null) json['slots'] = slots;
-    return json;
-  }
-}
-
-class ReorderBanksCommand implements DaemonCommand {
-  @override
-  String get type => 'reorder_banks';
-
-  final List<String> bankIds;
-
-  const ReorderBanksCommand({required this.bankIds});
-
-  @override
-  Map<String, dynamic> toJson() => {'type': type, 'bank_ids': bankIds};
 }
 
 class SetBypassCommand implements DaemonCommand {

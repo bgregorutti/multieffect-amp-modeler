@@ -8,9 +8,10 @@ payloads. In short:
   ``"app"`` (mobile app -- full read/write), ``"footswitch"`` (sends only
   ``footswitch_press`` events), or ``"display"`` (read-only, sends nothing
   but receives broadcasts).
-* App-only *commands* mutate state (create/update/delete preset, banks,
-  bypass, footswitch mapping, asset registration). Sending one from a
-  non-"app" role gets a typed ``error`` with code ``"role_forbidden"``.
+* App-only *commands* mutate state (create/update/delete rigs and the
+  presets inside them, bypass, footswitch mapping, asset registration).
+  Sending one from a non-"app" role gets a typed ``error`` with code
+  ``"role_forbidden"``.
 * ``footswitch_press`` is footswitch-only.
 * Every successful command gets a direct ``command_ok`` reply to the sender,
   and every state mutation is separately broadcast to *all* connected
@@ -24,7 +25,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from .models import EffectBlock, FootswitchAction
+from .models import EffectBlock, FootswitchAction, PresetBlockState
 
 ClientRole = Literal["app", "footswitch", "display"]
 
@@ -42,53 +43,60 @@ class HelloMessage(BaseModel):
     client_name: Optional[str] = None
 
 
+class CreateRigMessage(BaseModel):
+    type: Literal["create_rig"] = "create_rig"
+    name: str
+    chain: List[EffectBlock] = Field(default_factory=list)
+
+
+class UpdateRigMessage(BaseModel):
+    """Any field left unset is left unchanged. Sending ``chain`` replaces the
+    whole chain, so the app is expected to send the full desired order."""
+
+    type: Literal["update_rig"] = "update_rig"
+    rig_id: str
+    name: Optional[str] = None
+    chain: Optional[List[EffectBlock]] = None
+
+
+class DeleteRigMessage(BaseModel):
+    type: Literal["delete_rig"] = "delete_rig"
+    rig_id: str
+
+
+class ReorderRigsMessage(BaseModel):
+    type: Literal["reorder_rigs"] = "reorder_rigs"
+    rig_ids: List[str]
+
+
 class CreatePresetMessage(BaseModel):
     type: Literal["create_preset"] = "create_preset"
+    rig_id: str
     name: str
-    blocks: List[EffectBlock] = Field(default_factory=list)
-    nam_asset_id: Optional[str] = None
-    ir_asset_id: Optional[str] = None
+    block_states: Dict[str, PresetBlockState] = Field(default_factory=dict)
 
 
 class UpdatePresetMessage(BaseModel):
     type: Literal["update_preset"] = "update_preset"
+    rig_id: str
     preset_id: str
     name: Optional[str] = None
-    blocks: Optional[List[EffectBlock]] = None
-    nam_asset_id: Optional[str] = None
-    ir_asset_id: Optional[str] = None
+    block_states: Optional[Dict[str, PresetBlockState]] = None
 
 
 class DeletePresetMessage(BaseModel):
     type: Literal["delete_preset"] = "delete_preset"
+    rig_id: str
     preset_id: str
 
 
 class SelectPresetMessage(BaseModel):
-    """Select by ``preset_id`` OR by ``(bank_index, slot)`` -- not both."""
+    """Move the active position. Either index may be sent alone; omitting
+    ``rig_index`` selects within the current rig."""
 
     type: Literal["select_preset"] = "select_preset"
-    preset_id: Optional[str] = None
-    bank_index: Optional[int] = None
-    slot: Optional[int] = None
-
-
-class CreateBankMessage(BaseModel):
-    type: Literal["create_bank"] = "create_bank"
-    name: str
-    num_slots: int = 4
-
-
-class UpdateBankMessage(BaseModel):
-    type: Literal["update_bank"] = "update_bank"
-    bank_id: str
-    name: Optional[str] = None
-    slots: Optional[List[Optional[str]]] = None
-
-
-class ReorderBanksMessage(BaseModel):
-    type: Literal["reorder_banks"] = "reorder_banks"
-    bank_ids: List[str]
+    rig_index: Optional[int] = None
+    preset_index: Optional[int] = None
 
 
 class SetBypassMessage(BaseModel):
@@ -127,13 +135,14 @@ class FootswitchPressMessage(BaseModel):
 
 # type string -> pydantic model class, for parsing incoming messages.
 APP_ONLY_MESSAGES = {
+    "create_rig": CreateRigMessage,
+    "update_rig": UpdateRigMessage,
+    "delete_rig": DeleteRigMessage,
+    "reorder_rigs": ReorderRigsMessage,
     "create_preset": CreatePresetMessage,
     "update_preset": UpdatePresetMessage,
     "delete_preset": DeletePresetMessage,
     "select_preset": SelectPresetMessage,
-    "create_bank": CreateBankMessage,
-    "update_bank": UpdateBankMessage,
-    "reorder_banks": ReorderBanksMessage,
     "set_bypass": SetBypassMessage,
     "set_footswitch_mapping": SetFootswitchMappingMessage,
     "register_asset": RegisterAssetMessage,

@@ -1,79 +1,75 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_app/models/footswitch_action.dart';
 
-import 'protocol_fixtures.dart';
-
 void main() {
-  group('FootswitchAction', () {
-    test('parses every action in the set_footswitch_mapping README fixture', () {
-      final mapping =
-          setFootswitchMappingFixture['mapping'] as Map<String, dynamic>;
+  test('parses every action type the daemon can send', () {
+    expect(
+      FootswitchAction.fromJson({'type': 'next_rig'}),
+      const NextRigAction(),
+    );
+    expect(
+      FootswitchAction.fromJson({'type': 'prev_rig'}),
+      const PrevRigAction(),
+    );
+    expect(
+      FootswitchAction.fromJson({'type': 'next_preset'}),
+      const NextPresetAction(),
+    );
+    expect(
+      FootswitchAction.fromJson({'type': 'prev_preset'}),
+      const PrevPresetAction(),
+    );
+    expect(
+      FootswitchAction.fromJson({'type': 'select_preset', 'index': 2}),
+      const SelectPresetAction(index: 2),
+    );
+    expect(
+      FootswitchAction.fromJson({'type': 'toggle_bypass'}),
+      const ToggleBypassAction(),
+    );
+    expect(
+      FootswitchAction.fromJson({'type': 'tap_tempo'}),
+      const TapTempoAction(),
+    );
+  });
 
-      final zero = FootswitchAction.fromJson(
-        mapping['0'] as Map<String, dynamic>,
-      );
-      expect(zero, isA<SelectSlotAction>());
-      expect((zero as SelectSlotAction).slot, 0);
+  test('round-trips each action back to its wire shape', () {
+    expect(const NextRigAction().toJson(), {'type': 'next_rig'});
+    expect(const PrevRigAction().toJson(), {'type': 'prev_rig'});
+    expect(const NextPresetAction().toJson(), {'type': 'next_preset'});
+    expect(const PrevPresetAction().toJson(), {'type': 'prev_preset'});
+    expect(const SelectPresetAction(index: 3).toJson(),
+        {'type': 'select_preset', 'index': 3});
+    expect(const ToggleBypassAction().toJson(), {'type': 'toggle_bypass'});
+    expect(const TapTempoAction().toJson(), {'type': 'tap_tempo'});
+  });
 
-      final one = FootswitchAction.fromJson(
-        mapping['1'] as Map<String, dynamic>,
-      );
-      expect((one as SelectSlotAction).slot, 1);
+  test('rig and preset stepping are distinct actions, not aliases', () {
+    // They look similar but mean very different things: rig stepping
+    // reloads the amp and cab, preset stepping does not.
+    expect(const NextRigAction() == const NextPresetAction(), isFalse);
+    expect(const PrevRigAction() == const PrevPresetAction(), isFalse);
+  });
 
-      expect(
-        FootswitchAction.fromJson(mapping['2'] as Map<String, dynamic>),
-        isA<NextBankAction>(),
-      );
-      expect(
-        FootswitchAction.fromJson(mapping['3'] as Map<String, dynamic>),
-        isA<ToggleBypassAction>(),
-      );
-      expect(
-        FootswitchAction.fromJson(mapping['4'] as Map<String, dynamic>),
-        isA<TapTempoAction>(),
-      );
-    });
+  test('select_preset compares by index', () {
+    expect(const SelectPresetAction(index: 1),
+        equals(const SelectPresetAction(index: 1)));
+    expect(const SelectPresetAction(index: 1),
+        isNot(equals(const SelectPresetAction(index: 2))));
+  });
 
-    test('parses prev_bank (from the full daemon state fixture)', () {
-      final mapping =
-          fullDaemonStateFixture['footswitch_mapping'] as Map<String, dynamic>;
-      final action = FootswitchAction.fromJson(
-        mapping['3'] as Map<String, dynamic>,
-      );
-      expect(action, isA<PrevBankAction>());
-    });
+  test('an unknown action type throws rather than being silently dropped', () {
+    expect(
+      () => FootswitchAction.fromJson({'type': 'not_a_real_action'}),
+      throwsArgumentError,
+    );
+  });
 
-    test('round-trips every action kind through toJson/fromJson', () {
-      const actions = <FootswitchAction>[
-        SelectSlotAction(slot: 7),
-        NextBankAction(),
-        PrevBankAction(),
-        ToggleBypassAction(),
-        TapTempoAction(),
-      ];
-
-      for (final action in actions) {
-        final roundTripped = FootswitchAction.fromJson(action.toJson());
-        expect(roundTripped, equals(action));
-        expect(roundTripped.wireType, action.wireType);
-      }
-    });
-
-    test('rejects an unknown action type', () {
-      expect(
-        () => FootswitchAction.fromJson({'type': 'levitate'}),
-        throwsArgumentError,
-      );
-    });
-
-    test('kFootswitchActionKinds lists exactly the five documented kinds', () {
-      expect(kFootswitchActionKinds, [
-        'select_slot',
-        'next_bank',
-        'prev_bank',
-        'toggle_bypass',
-        'tap_tempo',
-      ]);
-    });
+  test('kFootswitchActionKinds covers every parseable type', () {
+    for (final kind in kFootswitchActionKinds) {
+      final json = <String, dynamic>{'type': kind};
+      if (kind == 'select_preset') json['index'] = 0;
+      expect(FootswitchAction.fromJson(json).wireType, kind);
+    }
   });
 }

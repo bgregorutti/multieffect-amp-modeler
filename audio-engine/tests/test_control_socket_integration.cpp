@@ -143,15 +143,19 @@ TEST(ControlSocketIntegration, LoadPresetSetBypassCrossfadeAndGetState) {
         EXPECT_FALSE(reply["state"]["bypass"].get<bool>());
     }
 
-    // load_preset with a realistic preset shape (no nam/ir asset ids, so
-    // no filesystem access is needed for this test -- a preset with a
-    // gain block only).
+    // load_preset with a realistic resolved-preset shape (no block carries
+    // an asset_id, so no filesystem access is needed for this test -- a
+    // chain with a gain block only).
     {
         json preset = {{"id", "p1"},
                        {"name", "Test Preset"},
-                       {"blocks", json::array({json{{"type", "gain"}, {"enabled", true}, {"params", {{"gain_db", 3.0}}}}})},
-                       {"nam_asset_id", nullptr},
-                       {"ir_asset_id", nullptr}};
+                       {"rig_id", "r1"},
+                       {"rig_name", "Test Rig"},
+                       {"blocks", json::array({json{{"id", "boost"},
+                                                    {"type", "gain"},
+                                                    {"asset_id", nullptr},
+                                                    {"enabled", true},
+                                                    {"params", {{"gain_db", 3.0}}}}})}};
         json reply = client.sendCommand(json{{"cmd", "load_preset"}, {"preset", preset}});
         EXPECT_TRUE(reply.value("ok", false)) << reply.dump();
         EXPECT_EQ(reply["preset_id"], "p1");
@@ -207,8 +211,15 @@ TEST(ControlSocketIntegration, LoadPresetWithUnregisteredAssetGetsError) {
     SubprocessEngine engine(socketPath);
     SocketClient client(socketPath);
 
-    json preset = {{"id", "p2"}, {"name", "Needs Assets"}, {"blocks", json::array()},
-                   {"nam_asset_id", "does-not-exist"}, {"ir_asset_id", nullptr}};
+    json preset = {{"id", "p2"},
+                   {"name", "Needs Assets"},
+                   {"rig_id", "r2"},
+                   {"rig_name", "Needs Assets Rig"},
+                   {"blocks", json::array({json{{"id", "amp"},
+                                                {"type", "nam"},
+                                                {"asset_id", "does-not-exist"},
+                                                {"enabled", true},
+                                                {"params", json::object()}}})}};
     json reply = client.sendCommand(json{{"cmd", "load_preset"}, {"preset", preset}});
     EXPECT_FALSE(reply.value("ok", true));
     // Unknown asset id maps to internal_error today (a plain

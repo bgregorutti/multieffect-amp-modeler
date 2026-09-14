@@ -41,7 +41,7 @@ void main() {
       expect(client.status, ConnectionStatus.connected);
       expect(statusEvents, contains(ConnectionStatus.connecting));
       expect(statusEvents, contains(ConnectionStatus.connected));
-      expect(client.state.presets, isEmpty);
+      expect(client.state.rigs, isEmpty);
       expect(client.state.bypass, false);
     },
   );
@@ -53,13 +53,15 @@ void main() {
       await client.connect();
       await Future<void>.delayed(const Duration(milliseconds: 200));
 
-      final stateEvents = <int>[]; // number of presets seen at each update
-      client.stateStream.listen((s) => stateEvents.add(s.presets.length));
+      final stateEvents = <int>[]; // number of rigs seen at each update
+      client.stateStream.listen((s) => stateEvents.add(s.rigs.length));
 
-      final result = await client
-          .createPreset(const CreatePresetCommand(name: 'Ambient Swell'));
+      await client.createRig(const CreateRigCommand(name: 'Ampeg SVT'));
+      final result = await client.createPreset(
+        const CreatePresetCommand(rigId: 'rig-1', name: 'Drive'),
+      );
 
-      expect(result['preset']['name'], 'Ambient Swell');
+      expect(result['preset']['name'], 'Drive');
 
       // The client's exposed state is rebuilt from the state_changed
       // broadcast, which -- per protocol -- arrives on this same connection
@@ -67,8 +69,9 @@ void main() {
       // give the event loop a beat to deliver and process it.
       await Future<void>.delayed(const Duration(milliseconds: 100));
 
-      expect(client.state.presets, hasLength(1));
-      expect(client.state.presets.values.first.name, 'Ambient Swell');
+      expect(client.state.rigs, hasLength(1));
+      expect(client.state.rigs.single.presets, hasLength(1));
+      expect(client.state.rigs.single.presets.single.name, 'Drive');
       expect(stateEvents, isNotEmpty);
     },
   );
@@ -79,7 +82,9 @@ void main() {
     await Future<void>.delayed(const Duration(milliseconds: 200));
 
     await expectLater(
-      client.deletePreset(const DeletePresetCommand(presetId: 'no-such-id')),
+      client.deletePreset(
+        const DeletePresetCommand(rigId: 'rig-1', presetId: 'no-such-id'),
+      ),
       throwsA(
         isA<DaemonCommandError>().having((e) => e.code, 'code', 'not_found'),
       ),

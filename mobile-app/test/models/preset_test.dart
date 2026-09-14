@@ -1,63 +1,94 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_app/models/effect_block.dart';
 import 'package:mobile_app/models/preset.dart';
 
-import 'protocol_fixtures.dart';
-
 void main() {
+  group('PresetBlockState', () {
+    test('round-trips through JSON', () {
+      const json = {
+        'enabled': false,
+        'params': {'gain': 9.0},
+      };
+      final state = PresetBlockState.fromJson(Map<String, dynamic>.from(json));
+
+      expect(state.enabled, isFalse);
+      expect(state.params['gain'], 9.0);
+      expect(state.toJson(), json);
+    });
+
+    test('defaults to enabled with no param overrides', () {
+      final state = PresetBlockState.fromJson({});
+      expect(state.enabled, isTrue);
+      expect(state.params, isEmpty);
+    });
+  });
+
   group('Preset', () {
-    test('parses the preset embedded in the full daemon state fixture', () {
-      final presetsJson =
-          fullDaemonStateFixture['presets'] as Map<String, dynamic>;
-      final preset = Preset.fromJson(
-        presetsJson['abc123'] as Map<String, dynamic>,
-      );
+    test('round-trips block_states through JSON', () {
+      const json = {
+        'id': 'p1',
+        'name': 'Drive',
+        'block_states': {
+          'dist': {'enabled': true, 'params': {}},
+          'fuzz': {'enabled': false, 'params': {}},
+        },
+        'created_at': 1000.0,
+        'updated_at': 1001.5,
+      };
 
-      expect(preset.id, 'abc123');
-      expect(preset.name, 'Ambient Swell');
-      expect(preset.blocks, hasLength(1));
-      expect(preset.blocks.first.type, 'reverb');
-      expect(preset.namAssetId, 'nam1');
-      expect(preset.irAssetId, isNull);
-      expect(preset.createdAt, 1000.0);
-      expect(preset.updatedAt, 1001.5);
+      final preset = Preset.fromJson(Map<String, dynamic>.from(json));
+
+      expect(preset.id, 'p1');
+      expect(preset.name, 'Drive');
+      expect(preset.blockStates['dist']!.enabled, isTrue);
+      expect(preset.blockStates['fuzz']!.enabled, isFalse);
+      expect(preset.toJson(), json);
     });
 
-    test('round-trips through toJson/fromJson', () {
-      const original = Preset(
-        id: 'p1',
-        name: 'My Preset',
-        blocks: [],
-        namAssetId: null,
-        irAssetId: 'ir1',
-        createdAt: 10.0,
-        updatedAt: 20.0,
-      );
+    test('a preset with no overrides round-trips as an empty map', () {
+      final preset = Preset.fromJson({
+        'id': 'p1',
+        'name': 'Clean',
+        'created_at': 0.0,
+        'updated_at': 0.0,
+      });
 
-      final roundTripped = Preset.fromJson(original.toJson());
-
-      expect(roundTripped.id, original.id);
-      expect(roundTripped.name, original.name);
-      expect(roundTripped.blocks, isEmpty);
-      expect(roundTripped.namAssetId, isNull);
-      expect(roundTripped.irAssetId, 'ir1');
-      expect(roundTripped.createdAt, original.createdAt);
-      expect(roundTripped.updatedAt, original.updatedAt);
+      expect(preset.blockStates, isEmpty);
+      expect(preset.toJson()['block_states'], isEmpty);
     });
+  });
 
-    test('copyWith can explicitly clear an asset id', () {
-      const original = Preset(
-        id: 'p1',
-        name: 'x',
-        namAssetId: 'nam1',
+  group('isBlockEnabled mirrors the daemon resolve rules', () {
+    const pinnedAmp = EffectBlock(id: 'amp', type: 'nam', pinned: true);
+    const dist = EffectBlock(id: 'dist', type: 'distortion', enabled: false);
+    const reverb = EffectBlock(id: 'reverb', type: 'reverb', enabled: true);
+
+    test('pinned blocks are always on, even if a preset says otherwise', () {
+      const preset = Preset(
+        id: 'p',
+        name: 'Broken',
+        blockStates: {'amp': PresetBlockState(enabled: false)},
         createdAt: 0,
         updatedAt: 0,
       );
+      expect(preset.isBlockEnabled(pinnedAmp), isTrue);
+    });
 
-      final cleared = original.copyWith(namAssetId: () => null);
+    test('an override wins over the block default', () {
+      const preset = Preset(
+        id: 'p',
+        name: 'Drive',
+        blockStates: {'dist': PresetBlockState(enabled: true)},
+        createdAt: 0,
+        updatedAt: 0,
+      );
+      expect(preset.isBlockEnabled(dist), isTrue);
+    });
 
-      expect(cleared.namAssetId, isNull);
-      // irAssetId untouched since its updater wasn't passed.
-      expect(cleared.irAssetId, original.irAssetId);
+    test('with no override the block default applies', () {
+      const preset = Preset(id: 'p', name: 'Clean', createdAt: 0, updatedAt: 0);
+      expect(preset.isBlockEnabled(dist), isFalse);
+      expect(preset.isBlockEnabled(reverb), isTrue);
     });
   });
 }

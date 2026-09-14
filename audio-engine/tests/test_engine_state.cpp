@@ -20,7 +20,7 @@ using namespace audio_engine;
 namespace {
 
 // No filesystem access, no nam/ir assets -- a loader that's never actually
-// called (every preset in this file omits nam_asset_id/ir_asset_id).
+// called (no block in this file carries an asset_id).
 class UnusedAssetLoader : public IAssetLoader {
 public:
     std::shared_ptr<INamModel> loadNam(const std::string&) override {
@@ -37,7 +37,10 @@ Preset makeGainPreset(double gainDb) {
     Preset p;
     p.id = "p1";
     p.name = "test";
+    p.rig_id = "r1";
+    p.rig_name = "test rig";
     EffectBlockSpec gain;
+    gain.id = "boost";
     gain.type = "gain";
     gain.enabled = true;
     gain.params["gain_db"] = gainDb;
