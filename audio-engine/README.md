@@ -358,6 +358,19 @@ change). It does not re-verify the neural network's own numerical
 correctness -- that's NeuralAmpModelerCore's own test suite's job, not
 duplicated here.
 
+**Diagnostic tool.** `tools/nam_render.cpp` (built only with the flag on,
+as the `nam_render` target) runs a WAV file through a real `.nam` model
+using the exact production code path (`parseNamModelFile` + `get_dsp` +
+`RealNamModel`, same resample-to-48kHz, same default 64-sample block
+size) and writes out both the resampled-but-unprocessed ("dry") and
+NAM-processed ("wet") signal as separate 48kHz float32 WAV files, plus
+peak/RMS stats for each -- for directly listening to or diffing what the
+model actually did, rather than inferring it from aggregate numbers
+alone:
+```bash
+./audio-engine/build-nam/nam_render <input.wav> <model.nam> dry.wav wet.wav [block_size]
+```
+
 ### NAM output loudness normalization
 
 A real bug, found the same way the IR gain problem was (see "IR gain

@@ -141,6 +141,12 @@ if(AUDIO_ENGINE_WITH_REAL_NAM)
   # like this one.
   target_link_libraries(audio_engine_core PUBLIC $<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>)
   target_compile_definitions(audio_engine_core PUBLIC AUDIO_ENGINE_WITH_REAL_NAM)
+
+  # Dev diagnostic: renders a WAV through a real .nam model (dry + wet WAV
+  # output for direct comparison) using the exact same code path production
+  # audio does -- see tools/nam_render.cpp.
+  add_executable(nam_render tools/nam_render.cpp)
+  target_link_libraries(nam_render PRIVATE audio_engine_core)
 endif()
 
 # --- Executable ----------------------------------------------------------
