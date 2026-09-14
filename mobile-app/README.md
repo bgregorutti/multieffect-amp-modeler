@@ -1,11 +1,12 @@
 # mobile-app
 
 The Flutter mobile app for the DIY AI guitar multi-effects pedal. This is
-where all editing complexity lives: creating/editing presets, building
-effects chains, organizing banks, configuring the footswitch mapping, and
-uploading `.nam`/IR files. The physical footswitch and any onboard display
-are read-only/trigger-only -- the control daemon (`control-daemon/` in this
-repo) is the single source of truth, and this app is simply its editing and
+where all editing complexity lives: creating/editing rigs (amp + cab +
+effects chains), building presets within a rig, configuring the footswitch
+mapping, and uploading `.nam`/IR files. The physical footswitch and any
+onboard display are read-only/trigger-only -- the control daemon
+(`control-daemon/` in this repo) is the single source of truth, and this
+app is simply its editing and
 monitoring surface, reflecting live state in real time (including changes
 triggered by someone stomping the footswitch while the app is open).
 
@@ -213,11 +214,11 @@ without a banner or badge, kept as subtle as the rest of this screen.
   the model round-trip and daemon-client tests.
 - Command JSON is built by hand (`lib/models/ws_messages.dart`) to match the
   daemon's pydantic models field-for-field, including **omitting** unset
-  optional fields on `update_preset`/`update_bank` (the daemon treats a
+  optional fields on `update_rig`/`update_preset` (the daemon treats a
   present-but-null field differently from an absent one only in the sense
   that "any field omitted is left unchanged" -- see the README) versus
-  **always sending** `nam_asset_id`/`ir_asset_id` (possibly `null`) on
-  `create_preset`, matching the README's example byte-for-byte.
+  **always sending** `block_states` (possibly `{}`) on `create_preset` and
+  `chain` on `create_rig`, matching the README's examples byte-for-byte.
 
 ## Why manual JSON instead of `json_serializable`/`build_runner`
 

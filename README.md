@@ -17,7 +17,7 @@ resolved as the project progresses.
 ## Repository layout
 
 ```
-control-daemon/   Python service: source of truth for preset/bank state,
+control-daemon/   Python service: source of truth for rig/preset state,
                   WebSocket API for the app/footswitch/display, JSON
                   persistence. See control-daemon/README.md.
 
@@ -59,15 +59,19 @@ scripts/          Dev-machine testing tools that don't belong to any one
 
 ## Status
 
-- `control-daemon`: **V1 built and tested** (47 passing tests) — see its own
+- `control-daemon`: **V1 built and tested** (73 passing tests as of this
+  writing; re-run `.venv/bin/pytest -q` for the current count) — see its own
   README for how to run it and the WebSocket protocol reference.
   `AudioEngineClient` now has a real implementation
   (`UnixSocketAudioEngineClient`) wired to audio-engine's control socket
   (`CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`) — see "Audio engine wiring" in
   control-daemon/README.md.
-- `audio-engine`: **V1 built and tested** (88 passing tests, 93 with real
-  NAM inference on) — real DSP, WAV/IR loading, and preset-switching
-  logic. Real NAM (WaveNet/LSTM) inference now works, opt-in via
+- `audio-engine`: **V1 built and tested** (95 passing tests by default;
+  re-run `ctest --test-dir audio-engine/build` for the current count) —
+  real DSP, WAV/IR loading, and preset-switching logic. The engine only
+  ever receives an already-flattened, rig-agnostic chain from the daemon —
+  see "Shared data model" in audio-engine/README.md. Real NAM (WaveNet/LSTM)
+  inference now works, opt-in via
   `-DAUDIO_ENGINE_WITH_REAL_NAM=ON` (vendors NeuralAmpModelerCore via
   CMake FetchContent, off by default) — see "Real NAM inference" in
   audio-engine/README.md, including measured real-time cost (4-6% of
@@ -79,12 +83,22 @@ scripts/          Dev-machine testing tools that don't belong to any one
   means that's a new backend behind an existing interface, not a rewrite.
   Crossfade-on-switch is not yet wired into the real-time path (known gap,
   documented in audio-engine/README.md).
-- `mobile-app`: **V1 built and tested** (77 passing tests via `flutter test`,
-  `flutter analyze` clean) — full preset/bank/footswitch-mapping editing and
-  asset upload against control-daemon's protocol. OS file-picker integration
-  is stubbed pending on-device testing (needs a real phone/emulator).
+- `mobile-app`: **V1 built and tested** (passing via `flutter test`,
+  `flutter analyze` clean as of this writing — this environment has no
+  Flutter SDK to re-run the count against, so treat any specific number as
+  unverified rather than trusting a hardcoded one) — full rig/preset/
+  footswitch-mapping editing and asset upload against control-daemon's
+  protocol, including the rig/preset split (`RigListScreen`,
+  `RigChainEditorScreen`, `PresetListScreen`, `PresetEditorScreen`). OS
+  file-picker integration is stubbed pending on-device testing (needs a
+  real phone/emulator).
 - `footswitch`, `display`: not yet started — real GPIO/I2C hardware is
-  needed to build and validate these properly.
+  needed to build and validate these properly. `next_rig`/`prev_rig`
+  (swap the whole backline) and `next_preset`/`prev_preset` (step within
+  the current rig, never crossing into another one) footswitch actions are
+  already supported by control-daemon, and exercised today by
+  `scripts/keyboard_footswitch.py`'s four-switch (plus bypass) keyboard
+  mapping, for whenever a real pedal is the first one wired up.
 - `deploy`: **script + guide written**, shellchecked and validated piece by
   piece in this dev environment (unit-file verification, production build
   paths) — but **not yet run end to end on real Raspberry Pi hardware**. See

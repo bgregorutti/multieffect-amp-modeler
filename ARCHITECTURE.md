@@ -19,8 +19,8 @@
 └─────────────────┘
 ```
 
-The **control daemon** is the single source of truth for "which preset is
-active" and for all preset/bank/footswitch-mapping configuration. It
+The **control daemon** is the single source of truth for "which rig/preset
+is active" and for all rig/preset/footswitch-mapping configuration. It
 notifies every connected client (footswitch relay, mobile app, display) on
 every state change, so all interfaces stay consistent — including changes
 triggered by the footswitch itself. This is why it's built and tested first:
@@ -39,6 +39,22 @@ client of its API, so the API contract is the thing worth stabilizing early.
 | Deployment | Bash + systemd + NetworkManager | Script + guide written (`deploy/`); not yet run on real hardware |
 
 ## Design decisions
+
+- **Presets are scoped to a rig, not standalone.** A rig owns one ordered
+  chain whose amp and cab blocks are `pinned` (always on); a preset only
+  records which of that rig's other blocks are enabled. This replaced an
+  earlier design where each preset carried its own amp/cab reference
+  directly, which left chain order undefined, allowed only one IR, and gave
+  no way to bypass the cab alone. The split is a real-time property, not
+  just modelling: stepping presets within a rig only flips enable flags
+  (fast, click-free), while stepping rigs reloads the NAM model and
+  re-partitions the IR (the expensive, between-songs path) — the
+  footswitch mapping follows this exactly (`next_rig`/`prev_rig` vs.
+  `next_preset`/`prev_preset`, the latter never crossing a rig boundary).
+  The audio engine is kept ignorant of the split: the daemon flattens
+  rig + preset into a `ResolvedPreset` and sends the exact chain to play.
+  See "Rigs and presets" in `control-daemon/README.md` and "Shared data
+  model" in `audio-engine/README.md`.
 
 - **Preset serialization format: JSON.** Versioned schema (top-level
   `"version"` field) so the on-disk format can evolve. Atomic writes

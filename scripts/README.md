@@ -12,8 +12,18 @@ stubbed.
   running control-daemon, without the mobile app. Stands in for the app's
   "create preset" + "upload asset" screens, whose editing logic is real
   but whose OS file-picker is currently stubbed.
-- `keyboard_footswitch.py` -- stands in for a physical footswitch relay.
-  Right arrow = next preset, left arrow = previous preset.
+- `keyboard_footswitch.py` -- stands in for a physical footswitch relay,
+  mirroring the planned four-switch pedal layout: up/down arrow = next/prev
+  **rig** (swaps the whole backline -- amp + cab -- the expensive,
+  between-songs path), right/left arrow = next/prev **preset** (flips
+  effects under an unchanged amp/cab, staying within the current rig), `b`
+  = toggle bypass.
+- `init-presets.sh` -- a personal convenience script (hardcoded local
+  `.nam`/IR file paths) that calls `load_test_preset.py` repeatedly to
+  build out a couple of real rigs (amp + cab as separate `--rig`-scoped
+  calls, so they accumulate into one backline each rather than becoming
+  unrelated presets). Not portable as-is -- copy and edit the paths for
+  your own asset library rather than running it directly.
 - `upload_assets.py` -- bulk-uploads/registers `.nam`/IR `.wav`/`.vst3`
   files (or a whole folder of them) against a running control-daemon, then
   stops -- no preset created, just makes the assets available to the app's
