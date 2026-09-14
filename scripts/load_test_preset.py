@@ -13,11 +13,14 @@ Real vs. stubbed, so you know what you're actually testing:
   - --ir (a cabinet impulse response .wav): REAL time-domain convolution
     (see audio-engine/README.md "Deviations" #3) -- you WILL hear this
     change the tone.
-  - --nam (a .nam model file): metadata parsing is real, but inference is
-    stubbed to a fixed identity pass-through with no makeup gain applied
-    via this upload path -- loading one exercises the upload/register/load
-    plumbing end to end, not real amp tone (see audio-engine/README.md
-    "NAM inference stubbed").
+  - --nam (a .nam model file): metadata parsing is always real. Actual
+    WaveNet/LSTM inference is real too, IF the audio-engine process you're
+    talking to was built with -DAUDIO_ENGINE_WITH_REAL_NAM=ON (see
+    audio-engine/README.md "Real NAM inference") -- otherwise it falls
+    back to a fixed identity pass-through, and this only exercises the
+    upload/register/load plumbing, not real amp tone. Either way this
+    script can't tell which engine build it's talking to, so it can't warn
+    you if you forgot the flag.
 
 Defaults to +6dB gain and a short slapback delay so a first run with no
 extra flags already proves audio is flowing through the engine.

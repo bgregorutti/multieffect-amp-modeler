@@ -56,16 +56,20 @@ scripts/          Dev-machine testing tools that don't belong to any one
   (`UnixSocketAudioEngineClient`) wired to audio-engine's control socket
   (`CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`) — see "Audio engine wiring" in
   control-daemon/README.md.
-- `audio-engine`: **V1 built and tested** (72 passing tests) — real DSP,
-  WAV/IR loading, and preset-switching logic. Real NAM (WaveNet) inference
-  is still stubbed (needs `NeuralAmpModelerCore`, GitHub-hosted). Real-time
-  audio device I/O now exists for dev-machine testing via PortAudio
-  (`audio_engine --audio`, opt-in build flag, off by default) — see
-  "Real-time audio I/O" in audio-engine/README.md; what the Raspberry Pi
-  build itself uses (PortAudio again, ALSA, or JUCE) is still open, but
-  `IAudioIoBackend` means that's a new backend behind an existing
-  interface, not a rewrite. Crossfade-on-switch is not yet wired into the
-  real-time path (known gap, documented in audio-engine/README.md).
+- `audio-engine`: **V1 built and tested** (88 passing tests, 93 with real
+  NAM inference on) — real DSP, WAV/IR loading, and preset-switching
+  logic. Real NAM (WaveNet/LSTM) inference now works, opt-in via
+  `-DAUDIO_ENGINE_WITH_REAL_NAM=ON` (vendors NeuralAmpModelerCore via
+  CMake FetchContent, off by default) — see "Real NAM inference" in
+  audio-engine/README.md, including measured real-time cost (4-6% of
+  budget) against two real commercial `.nam` files. Real-time audio device
+  I/O exists for dev-machine testing via PortAudio (`audio_engine --audio`,
+  opt-in build flag, off by default) — see "Real-time audio I/O" in
+  audio-engine/README.md; what the Raspberry Pi build itself uses
+  (PortAudio again, ALSA, or JUCE) is still open, but `IAudioIoBackend`
+  means that's a new backend behind an existing interface, not a rewrite.
+  Crossfade-on-switch is not yet wired into the real-time path (known gap,
+  documented in audio-engine/README.md).
 - `mobile-app`: **V1 built and tested** (77 passing tests via `flutter test`,
   `flutter analyze` clean) — full preset/bank/footswitch-mapping editing and
   asset upload against control-daemon's protocol. OS file-picker integration

@@ -7,10 +7,11 @@ finished mobile-app file-picker exists. See the root `README.md`'s
 stubbed.
 
 - `load_test_preset.py` -- builds a preset (optionally referencing an
-  uploaded `.nam`/IR asset) against a running control-daemon, without the
-  mobile app. Stands in for the app's "create preset" + "upload asset"
-  screens, whose editing logic is real but whose OS file-picker is
-  currently stubbed.
+  uploaded `.nam`/IR asset -- real WaveNet/LSTM amp modeling if the engine
+  was built with `AUDIO_ENGINE_WITH_REAL_NAM`, see below) against a
+  running control-daemon, without the mobile app. Stands in for the app's
+  "create preset" + "upload asset" screens, whose editing logic is real
+  but whose OS file-picker is currently stubbed.
 - `keyboard_footswitch.py` -- stands in for a physical footswitch relay.
   Right arrow = next preset, left arrow = previous preset.
 
@@ -30,6 +31,12 @@ First run only: this opens your input device, which can trigger (or, if
 run non-interactively, silently hang on) a one-time macOS microphone
 permission prompt -- run this from an actual terminal window and approve
 it. See audio-engine/README.md "Real-time audio I/O".
+
+Add `-DAUDIO_ENGINE_WITH_REAL_NAM=ON` to the `cmake -S` line above if you
+want real amp modeling (not just cab-IR convolution) for `--nam` -- see
+"Using your own .nam/IR files" below and audio-engine/README.md "Real NAM
+inference". Skip it for now if you just want to hear the built-in
+gain/delay/EQ blocks.
 
 Watch terminal 1's startup output for the negotiated round-trip latency
 (`audio-engine: negotiated latency: input ... ms, output ... ms`) -- pass
@@ -78,30 +85,39 @@ Quote each path (these packs routinely have spaces/dashes in folder and
 file names) -- `$HOME/...` rather than `~/...` inside the quotes, since
 `~` isn't expanded inside double quotes by the shell.
 
-**`--nam` compatibility is narrower than `--ir`.** The metadata parser
-(`nam_model.hpp`) expects the single-model NeuralAmpModelerCore export
-shape: a flat, non-empty top-level `weights` array. Files exported by some
-commercial plugins (verified against a real Darkglass B7K Ultra `.nam`
-export) instead use a `"SlimmableContainer"` architecture whose top-level
-`weights` is `[]` -- the real weight data lives nested under
-`config.submodels[...]`, a different shape the parser doesn't understand
-yet. That file gets rejected with `missing or invalid required field
-'weights'`, and the whole `load_preset` fails as a result (so the preset
-stays created in the daemon, just not loaded into the engine) -- test
-`--nam` against a single-model `.nam` export if you have one; otherwise
-leave `--nam` off for now (NAM inference is stubbed to identity
-pass-through regardless, so a rejected upload costs you nothing audible
-today) and use `--ir` alone, which is real convolution and does not have
-this limitation.
+**`--nam` now does real WaveNet/LSTM amp modeling** -- but only if the
+`audio_engine` process you're talking to was built with
+`-DAUDIO_ENGINE_WITH_REAL_NAM=ON` (see audio-engine/README.md "Real NAM
+inference"):
 
-**What you will *not* hear yet, even with a `.nam` file that does parse:**
-actual neural amp modeling -- inference is stubbed to a fixed identity
-pass-through no matter the architecture (see audio-engine/README.md "NAM
-inference stubbed"). A cabinet IR *is* real convolution and will audibly
-change the tone -- the Ampeg IR above is 44.1kHz, and the engine now
-resamples it to its own 48kHz internal rate at load time (see
-audio-engine/README.md "Sample rate policy"), so it plays back at the
-correct pitch/timing rather than time-compressed.
+```bash
+cmake -S audio-engine -B audio-engine/build-nam \
+  -DAUDIO_ENGINE_WITH_PORTAUDIO=ON -DAUDIO_ENGINE_WITH_REAL_NAM=ON
+cmake --build audio-engine/build-nam -j
+./audio-engine/build-nam/audio_engine /tmp/audio_engine.sock --audio
+
+control-daemon/.venv/bin/python3 scripts/load_test_preset.py \
+  --name "Real amp" --gain-db 0 --no-delay \
+  --nam "$HOME/Documents/Musique/VST-NAM/AMPEG SVT CL (GAIN STAGES)/AmpegSVT - B7K.nam"
+```
+
+Without that flag, `--nam` still uploads/registers/loads successfully
+(this doesn't require the flag), but the engine falls back to
+`StubNamModel` -- a fixed identity pass-through, no real amp tone.
+`load_test_preset.py` can't tell which build it's talking to, so it can't
+warn you if you forgot the flag; if a `.nam` file "loads fine" but sounds
+completely dry, check terminal 1 was built with `AUDIO_ENGINE_WITH_REAL_NAM`.
+
+Multi-gain-stage exports (`"SlimmableContainer"` architecture -- both real
+files used during development, from two different commercial packs, used
+this) are fully supported; you do not need to hunt for a "simpler" `.nam`
+file first.
+
+A cabinet IR is still separately real convolution and will audibly change
+the tone regardless of the `--nam` flag situation -- the Ampeg IR above is
+44.1kHz, and the engine resamples it to its own 48kHz internal rate at
+load time (see audio-engine/README.md "Sample rate policy"), so it plays
+back at the correct pitch/timing rather than time-compressed.
 
 **Jerky/glitchy/choppy audio through `--audio`?** This was a real bug,
 not a hypothetical: a long cabinet IR (this Ampeg one included -- it's an

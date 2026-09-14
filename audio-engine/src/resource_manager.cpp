@@ -9,6 +9,14 @@
 #include "audio_engine/passthrough_block.hpp"
 #include "audio_engine/wav_file.hpp"
 
+#ifdef AUDIO_ENGINE_WITH_REAL_NAM
+#include <filesystem>
+
+#include <NAM/get_dsp.h>
+
+#include "audio_engine/real_nam_model.hpp"
+#endif
+
 namespace audio_engine {
 
 void EngineChain::process(float* buffer, std::size_t numSamples) {
@@ -46,7 +54,21 @@ std::unique_ptr<EffectBlock> createEffectBlock(const EffectBlockSpec& spec) {
 
 std::shared_ptr<INamModel> FileAssetLoader::loadNam(const std::string& storedPath) {
     NamModelMetadata meta = parseNamModelFile(storedPath);
+#ifdef AUDIO_ENGINE_WITH_REAL_NAM
+    // nam::get_dsp throws nam::NamFileValidationError (a std::runtime_error)
+    // on a file its own, more thorough validation rejects -- deliberately
+    // not caught/translated here, same as parseNamModelFile's NamParseError
+    // above: both propagate to ResourceManager::loadPreset's caller
+    // (EngineState::handleLoadPreset), which already turns any exception
+    // into a typed control-socket error reply.
+    // Explicit std::filesystem::path: a bare std::string is ambiguous
+    // between get_dsp's path overload and its nlohmann::json overload
+    // (json has an implicit string constructor).
+    auto dsp = nam::get_dsp(std::filesystem::path(storedPath));
+    return std::make_shared<RealNamModel>(std::move(meta), std::move(dsp));
+#else
     return std::make_shared<StubNamModel>(std::move(meta));
+#endif
 }
 
 std::shared_ptr<IrHandle> FileAssetLoader::loadIr(const std::string& storedPath, double targetSampleRate) {

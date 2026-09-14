@@ -58,6 +58,91 @@ if(AUDIO_ENGINE_WITH_PORTAUDIO)
   target_compile_definitions(audio_engine_core PUBLIC AUDIO_ENGINE_WITH_PORTAUDIO)
 endif()
 
+# --- Real NAM inference (optional, requires network access to vendor) ---
+# Off by default: this is the dependency README.md's "Deviations" section
+# always said would be a drop-in once GitHub access was available (this
+# machine, unlike the original sandbox this project was mostly built in,
+# has it) -- see README.md "Real NAM inference". Vendors
+# NeuralAmpModelerCore (MIT-licensed, github.com/sdatkinson/
+# NeuralAmpModelerCore) and Eigen (MPL2-licensed, needed for its matrix
+# math) via CMake FetchContent, pinned to specific commits/tags for
+# reproducibility. A production/Pi build (or this sandbox's original CI)
+# need not fetch either if it's fine with StubNamModel's identity/gain
+# pass-through -- same "narrow interface + swappable backend" pattern as
+# every other hardware/external dependency in this project.
+option(AUDIO_ENGINE_WITH_REAL_NAM
+  "Vendor NeuralAmpModelerCore for real WaveNet/LSTM NAM inference (requires network access)" OFF)
+if(AUDIO_ENGINE_WITH_REAL_NAM)
+  include(FetchContent)
+
+  # SOURCE_SUBDIR points at a directory that doesn't exist in either repo,
+  # so FetchContent_MakeAvailable populates *_SOURCE_DIR (a plain git
+  # clone) without running that repo's own CMakeLists.txt -- we only want
+  # NeuralAmpModelerCore's NAM/ sources and Eigen's headers, not their own
+  # build systems (NeuralAmpModelerCore's top-level CMakeLists.txt builds
+  # a tools/ subdirectory that needs a second submodule, AudioDSPTools,
+  # we have no use for here).
+  FetchContent_Declare(
+    neural_amp_modeler_core
+    GIT_REPOSITORY https://github.com/sdatkinson/NeuralAmpModelerCore.git
+    GIT_TAG 2563c0fd4cb1f9ce457d89a761738ea15097e1f3
+    SOURCE_SUBDIR not-used
+  )
+  FetchContent_Declare(
+    eigen_for_nam
+    GIT_REPOSITORY https://gitlab.com/libeigen/eigen.git
+    GIT_TAG 3.4.0
+    SOURCE_SUBDIR not-used
+  )
+  FetchContent_MakeAvailable(neural_amp_modeler_core eigen_for_nam)
+
+  file(GLOB NAM_CORE_SOURCES
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM/*.cpp"
+    "${neural_amp_modeler_core_SOURCE_DIR}/NAM/*/*.cpp"
+  )
+  if(NOT NAM_CORE_SOURCES)
+    message(FATAL_ERROR "No NAM/*.cpp sources found under ${neural_amp_modeler_core_SOURCE_DIR} -- fetch failed?")
+  endif()
+
+  # NeuralAmpModelerCore's sources #include "json.hpp" unqualified,
+  # expecting their own vendored nlohmann/json copy on the include path.
+  # Point that at our own already-required nlohmann_json instead of
+  # fetching a second copy.
+  set(NAM_JSON_SHIM_DIR "${CMAKE_BINARY_DIR}/nam_json_shim")
+  file(WRITE "${NAM_JSON_SHIM_DIR}/json.hpp" "#include <nlohmann/json.hpp>\n")
+
+  add_library(nam_core STATIC ${NAM_CORE_SOURCES})
+  target_include_directories(nam_core SYSTEM PUBLIC
+    "${neural_amp_modeler_core_SOURCE_DIR}"
+    "${eigen_for_nam_SOURCE_DIR}"
+    "${NAM_JSON_SHIM_DIR}"
+  )
+  target_link_libraries(nam_core PUBLIC nlohmann_json::nlohmann_json)
+  target_compile_features(nam_core PUBLIC cxx_std_20)
+  # NeuralAmpModelerCore's own CMakeLists.txt forces libc++ on macOS; we
+  # don't run that file (see SOURCE_SUBDIR above), so match it explicitly
+  # -- AppleClang's default standard library already is libc++, but this
+  # keeps the flag visible/intentional rather than relying on the default.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
+    target_compile_options(nam_core PUBLIC -stdlib=libc++)
+  endif()
+
+  target_sources(audio_engine_core PRIVATE src/real_nam_model.cpp)
+  # WHOLE_ARCHIVE, not a plain link: nam::get_dsp() dispatches to a
+  # per-architecture parser (WaveNet, LSTM, container, ...) that each
+  # self-registers via a static initializer in its own .cpp file. Nothing
+  # in our code calls a symbol from e.g. wavenet/model.cpp directly, so a
+  # normal static-library link only pulls in .o members that resolve an
+  # outstanding undefined symbol -- the linker silently drops those
+  # registration-only translation units, and get_dsp() then throws "No
+  # config parser registered for architecture: WaveNet" at runtime for
+  # every real file. WHOLE_ARCHIVE forces every object file in nam_core to
+  # link regardless, which is exactly what's needed for a registry pattern
+  # like this one.
+  target_link_libraries(audio_engine_core PUBLIC $<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>)
+  target_compile_definitions(audio_engine_core PUBLIC AUDIO_ENGINE_WITH_REAL_NAM)
+endif()
+
 # --- Executable ----------------------------------------------------------
 add_executable(audio_engine src/main.cpp)
 target_link_libraries(audio_engine PRIVATE audio_engine_core)
@@ -86,6 +171,15 @@ if(AUDIO_ENGINE_BUILD_TESTS)
   target_compile_definitions(audio_engine_tests PRIVATE
     AUDIO_ENGINE_EXECUTABLE_PATH="$<TARGET_FILE:audio_engine>")
   add_dependencies(audio_engine_tests audio_engine)
+
+  if(AUDIO_ENGINE_WITH_REAL_NAM)
+    target_sources(audio_engine_tests PRIVATE tests/test_real_nam_model.cpp)
+    # Reuse NeuralAmpModelerCore's own example .nam fixtures (already
+    # fetched above) rather than hand-rolling test files that might not
+    # match real export shapes -- see test_real_nam_model.cpp.
+    target_compile_definitions(audio_engine_tests PRIVATE
+      NAM_EXAMPLE_MODELS_DIR="${neural_amp_modeler_core_SOURCE_DIR}/example_models")
+  endif()
 
   include(GoogleTest)
   gtest_discover_tests(audio_engine_tests)

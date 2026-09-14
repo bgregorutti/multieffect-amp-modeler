@@ -31,16 +31,24 @@ NamModelMetadata parseNamModelMetadata(const std::string& jsonText) {
     }
     meta.config = *configIt;
 
+    // "weights" is informational only, not required to be present or
+    // non-empty: container architectures (e.g. "SlimmableContainer") nest
+    // their real weights under config.submodels[...] instead -- see the
+    // file comment in nam_model.hpp. Still reject a clearly malformed
+    // "weights" (present but not an array of numbers), since that's a
+    // real structural problem regardless of architecture.
     auto weightsIt = j.find("weights");
-    if (weightsIt == j.end() || !weightsIt->is_array() || weightsIt->empty()) {
-        throw NamParseError("missing or invalid required field 'weights' (expected a non-empty array)");
-    }
-    for (const auto& w : *weightsIt) {
-        if (!w.is_number()) {
-            throw NamParseError("'weights' array must contain only numbers");
+    if (weightsIt != j.end()) {
+        if (!weightsIt->is_array()) {
+            throw NamParseError("'weights' field, if present, must be an array");
         }
+        for (const auto& w : *weightsIt) {
+            if (!w.is_number()) {
+                throw NamParseError("'weights' array must contain only numbers");
+            }
+        }
+        meta.numWeights = weightsIt->size();
     }
-    meta.numWeights = weightsIt->size();
 
     auto versionIt = j.find("version");
     if (versionIt != j.end() && versionIt->is_string()) meta.version = versionIt->get<std::string>();

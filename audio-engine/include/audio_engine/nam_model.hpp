@@ -1,24 +1,28 @@
 // Neural Amp Modeler (.nam) file support.
 //
-// METADATA PARSING IS REAL. A `.nam` file is plain JSON with (per the
-// format used by github.com/sdatkinson/NeuralAmpModelerCore, the reference
-// C++ implementation): a top-level "architecture" name (e.g. "WaveNet",
-// "LSTM"), an architecture-specific "config" object, a flat "weights"
-// array, and usually "sample_rate"/"metadata". parseNamModelMetadata below
-// really parses and validates that structure and rejects malformed files.
+// METADATA PARSING IS REAL, and deliberately lightweight/architecture-
+// agnostic. A `.nam` file is plain JSON with a top-level "architecture"
+// name (e.g. "WaveNet", "LSTM", "SlimmableContainer" -- see below), an
+// architecture-specific "config" object, usually a "weights" array, and
+// usually "sample_rate"/"metadata". parseNamModelMetadata validates just
+// the generic shape (architecture + config present) for display/bookkeeping
+// purposes; it does NOT validate architecture-specific structure (e.g. it
+// does not require "weights" to be non-empty, or look inside "config" at
+// all) -- that's real inference's job now (see RealNamModel below), not a
+// second, competing implementation of the same validation here. This
+// matters concretely: newer NAM exports (e.g. "SlimmableContainer", used
+// by multi-gain-stage models) put the real per-submodel weights nested
+// under config.submodels[...], leaving the top-level "weights" array
+// empty -- a real, valid file shape this parser must not reject.
 //
-// ACTUAL INFERENCE IS STUBBED -- documented deviation, see
-// audio-engine/README.md "NAM inference stub" section. Running the real
-// WaveNet/LSTM forward pass encoded by "weights" requires vendoring
-// NeuralAmpModelerCore (MIT-licensed, github.com/sdatkinson/NeuralAmpModelerCore).
-// That repository can only be fetched via `git clone`/GitHub archive
-// download, both of which this sandbox's network proxy blocks (plain
-// `https://raw.githubusercontent.com` GETs work, but `codeload.github.com`
-// -- which git clone and tarball downloads both resolve to -- returns 403;
-// see the README for the confirmed test). `INamModel` is the seam: the
-// stub can be swapped for a real implementation backed by that library
-// with no change to any caller, once it can be vendored (e.g. as a git
-// submodule from a machine with full GitHub access).
+// REAL INFERENCE: see real_nam_model.hpp. Built only when the CMake option
+// AUDIO_ENGINE_WITH_REAL_NAM is on (default OFF), which vendors
+// NeuralAmpModelerCore (MIT-licensed,
+// github.com/sdatkinson/NeuralAmpModelerCore) via CMake FetchContent --
+// see audio-engine/README.md "Real NAM inference". `StubNamModel` below
+// remains the default when that flag is off: a fixed identity/gain
+// pass-through, same "narrow interface + swappable backend" pattern used
+// everywhere else in this project.
 #pragma once
 
 #include <stdexcept>
@@ -36,18 +40,21 @@ struct NamParseError : std::runtime_error {
 
 struct NamModelMetadata {
     std::string version;       // e.g. "0.5.3"; optional in some exports
-    std::string architecture;  // e.g. "WaveNet", "LSTM" -- required
+    std::string architecture;  // e.g. "WaveNet", "LSTM", "SlimmableContainer" -- required
     nlohmann::json config;     // architecture-specific config -- required, must be an object
-    std::size_t numWeights = 0;  // length of the "weights" array -- required, must be non-empty
+    std::size_t numWeights = 0;  // length of the top-level "weights" array, if any -- informational
+                                  // only; 0 for container architectures whose real weights are
+                                  // nested (see the file comment above)
     double sampleRate = 48000.0;  // "sample_rate" if present, else a documented default
     std::string name;           // "metadata.name" if present
     std::string modeledBy;      // "metadata.modeled_by" if present
 };
 
-// Parses and validates .nam file JSON. Throws NamParseError with a
-// human-readable message for any of: invalid JSON, missing/wrong-typed
-// "architecture", missing/non-object "config", missing/empty/non-numeric
-// "weights".
+// Parses and validates the generic .nam file shape. Throws NamParseError
+// with a human-readable message for: invalid JSON, missing/wrong-typed
+// "architecture", missing/non-object "config", or a "weights" field that's
+// present but not an array of numbers (an empty "weights" array is valid
+// -- see the file comment above).
 NamModelMetadata parseNamModelMetadata(const std::string& jsonText);
 NamModelMetadata parseNamModelFile(const std::string& path);
 
@@ -61,9 +68,11 @@ public:
 
 // Stub inference: does NOT run the WaveNet/LSTM described by `metadata`.
 // It applies a fixed identity pass-through (optionally scaled by a
-// caller-supplied makeup gain, default unity) so the rest of the signal
-// chain / preset-switching / IPC plumbing can be built and tested end to
-// end before real inference exists. See the class comment above for why.
+// caller-supplied makeup gain, default unity). Default when
+// AUDIO_ENGINE_WITH_REAL_NAM is off -- keeps the signal chain / preset-
+// switching / IPC plumbing buildable and testable with no external
+// dependency, and remains the intentional fallback for a build that
+// doesn't want to vendor NeuralAmpModelerCore at all (see real_nam_model.hpp).
 class StubNamModel : public INamModel {
 public:
     using EffectBlock::process;  // bring the std::vector<float>& convenience overload back into scope

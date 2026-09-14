@@ -52,14 +52,43 @@ TEST(NamModel, ConfigNotAnObjectThrows) {
     EXPECT_THROW(parseNamModelMetadata(json), NamParseError);
 }
 
-TEST(NamModel, MissingWeightsThrows) {
+TEST(NamModel, MissingWeightsIsAccepted) {
+    // "weights" is informational, not required -- see nam_model.hpp.
     constexpr const char* json = R"JSON({"architecture": "LSTM", "config": {}})JSON";
-    EXPECT_THROW(parseNamModelMetadata(json), NamParseError);
+    NamModelMetadata meta = parseNamModelMetadata(json);
+    EXPECT_EQ(meta.numWeights, 0u);
 }
 
-TEST(NamModel, EmptyWeightsArrayThrows) {
+TEST(NamModel, EmptyWeightsArrayIsAccepted) {
+    // A real, valid shape: container architectures (e.g.
+    // "SlimmableContainer") leave the top-level "weights" empty and nest
+    // the real per-submodel weights under config.submodels[...] instead.
     constexpr const char* json = R"JSON({"architecture": "LSTM", "config": {}, "weights": []})JSON";
-    EXPECT_THROW(parseNamModelMetadata(json), NamParseError);
+    NamModelMetadata meta = parseNamModelMetadata(json);
+    EXPECT_EQ(meta.numWeights, 0u);
+}
+
+TEST(NamModel, ParsesSlimmableContainerShapeWithNestedWeights) {
+    // Shaped like a real multi-gain-stage export (e.g. TONE3000-trained
+    // models) -- top-level weights empty, real weights nested per submodel.
+    constexpr const char* json = R"JSON(
+    {
+      "architecture": "SlimmableContainer",
+      "config": {
+        "submodels": [
+          {"max_value": 0.5, "model": {"architecture": "WaveNet", "config": {}, "weights": [0.1, 0.2]}},
+          {"max_value": 1.0, "model": {"architecture": "WaveNet", "config": {}, "weights": [0.3, 0.4, 0.5]}}
+        ]
+      },
+      "weights": [],
+      "sample_rate": 48000
+    }
+    )JSON";
+    NamModelMetadata meta = parseNamModelMetadata(json);
+    EXPECT_EQ(meta.architecture, "SlimmableContainer");
+    EXPECT_EQ(meta.numWeights, 0u);
+    ASSERT_TRUE(meta.config.contains("submodels"));
+    EXPECT_EQ(meta.config["submodels"].size(), 2u);
 }
 
 TEST(NamModel, NonNumericWeightsThrows) {

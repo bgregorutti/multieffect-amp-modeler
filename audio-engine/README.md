@@ -29,9 +29,13 @@ ctest --test-dir audio-engine/build            # or: ./audio-engine/build/audio_
 Requires: CMake >= 3.16, a C++20 compiler, and two packages
 (`nlohmann-json`, `gtest`+`gmock`) -- from the normal Ubuntu package mirror
 (`nlohmann-json3-dev`, `libgtest-dev`+`libgmock-dev`) or Homebrew
-(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **72/72
+(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **88/88
 tests passed** (`ctest --test-dir audio-engine/build`), covering every
-module below plus a real-subprocess control-socket integration test.
+module below plus a real-subprocess control-socket integration test. This
+default build needs no network access and no GitHub-hosted dependency --
+see "Real-time audio I/O" and "Real NAM inference" below for the two
+optional, network-fetching build flags (**93/93 tests** with real NAM
+inference on).
 
 Run the engine standalone (mostly useful for manual testing against the
 control socket -- see below):
@@ -258,6 +262,111 @@ hard attacks with outlier IRs is preferable to universally reduced
 headroom. A per-IR adaptive threshold is a plausible middle ground but
 wasn't pursued with only two real files to calibrate against.
 
+## Real NAM inference
+
+Real WaveNet/LSTM amp-model inference, not the identity/gain-passthrough
+stub described in deviation #2 below. Opt-in, same pattern as
+`AUDIO_ENGINE_WITH_PORTAUDIO`:
+
+```bash
+cmake -S audio-engine -B audio-engine/build-nam -DAUDIO_ENGINE_WITH_REAL_NAM=ON
+cmake --build audio-engine/build-nam -j
+```
+
+(Combine with `-DAUDIO_ENGINE_WITH_PORTAUDIO=ON` in the same build to get
+both real inference and real audio I/O -- both flags are independent.)
+
+**What this vendors, and why FetchContent, not a submodule.** CMake
+`FetchContent` pulls two repos at configure time, each pinned to a fixed
+commit/tag for reproducibility:
+* `NeuralAmpModelerCore` (MIT, github.com/sdatkinson/NeuralAmpModelerCore)
+  -- pinned to a specific commit, not `main`, so a rebuild months from now
+  vendors the exact same code.
+* `Eigen` (MPL2, gitlab.com/libeigen/eigen) -- pinned to `3.4.0`, the
+  matrix-math library NeuralAmpModelerCore's WaveNet/LSTM implementations
+  are built on.
+
+Both are fetched with `SOURCE_SUBDIR` pointed at a directory that doesn't
+exist, which populates the source tree without running either repo's own
+CMakeLists.txt -- we only want NeuralAmpModelerCore's `NAM/` sources and
+Eigen's headers, not NeuralAmpModelerCore's own `tools/` build (which
+needs a second submodule, `AudioDSPTools`, that we have no use for). A
+tiny generated `json.hpp` shim (`#include <nlohmann/json.hpp>`) satisfies
+NeuralAmpModelerCore's `#include "json.hpp"` using our own
+already-required nlohmann_json, rather than fetching a second copy of the
+same library.
+
+**Real gotcha, not a hypothetical one, worth documenting:**
+`nam::get_dsp()` dispatches to a per-architecture parser (WaveNet, LSTM,
+container/multi-submodel, ...), each self-registered via a static
+initializer in its own translation unit. A plain
+`target_link_libraries(... nam_core)` against the static library only
+pulls in `.o` members that resolve an outstanding undefined symbol --
+since nothing calls a symbol from e.g. `wavenet/model.cpp` directly, the
+linker silently drops that whole file, registration side-effect included,
+and `get_dsp()` then throws `No config parser registered for
+architecture: WaveNet` at runtime for every real file. Fixed with CMake's
+`$<LINK_LIBRARY:WHOLE_ARCHIVE,nam_core>` generator expression (forces
+every object file in the archive to link, portable across ld64/GNU ld) --
+see `CMakeLists.txt`.
+
+**Architecture support is NeuralAmpModelerCore's, not reimplemented
+here.** `RealNamModel` (`real_nam_model.hpp`/`.cpp`) is a thin adapter:
+converts our mono in-place `float*` buffer to/from the vendored library's
+`NAM_SAMPLE**` channel-indexed convention and calls straight through to
+`nam::DSP::process`. Whatever architecture `nam::get_dsp()` understands,
+this engine understands -- including `"SlimmableContainer"` (multi-
+submodel, gain-stage-switching exports, e.g. from TONE3000's newer
+trainer), which is exactly the format that turned out to matter: **every
+real `.nam` file tried against this** (two different commercial packs)
+used that container format, not the simpler flat single-model shape this
+project's own metadata parser originally assumed. That parser
+(`nam_model.hpp`) was relaxed accordingly -- `weights` is no longer
+required to be non-empty at the top level, only to be an array of numbers
+*if present* -- since container architectures legitimately nest their real
+weights under `config.submodels[...]` instead. The parser deliberately
+does not validate architecture-specific structure beyond that; real
+structural validation is `nam::get_dsp()`'s job now, not a second,
+competing implementation of an evolving format here.
+
+**Measured, not assumed, real-time cost.** Benchmarked against both real
+`.nam` files available during development (both `"SlimmableContainer"`
+WaveNet exports, 48kHz native): **~0.06-0.08ms per 64-sample/48kHz block
+(4-6% of the 1.33ms budget)** -- comfortable headroom, real neural
+inference is not the bottleneck on this hardware (cabinet-IR convolution
+uses far more of the budget -- see "Real-time-safe IR length cap" above).
+`prepare()` (which calls `nam::DSP::Reset`, including prewarm -- settling
+dilated-conv/recurrent history so the first real block isn't a "cold"
+transient) took ~10-15ms in the same test -- fine, since it runs once per
+preset *load* (`ResourceManager::loadPreset`), never in the real-time
+audio callback.
+
+**Testing.** `tests/test_real_nam_model.cpp` (built only with the flag on)
+reuses NeuralAmpModelerCore's own bundled `example_models/*.nam` fixtures
+(already fetched, no extra cost) rather than hand-rolled fixtures that
+might not match real export shapes -- including
+`example_models/slimmable_container.nam` for the container-format case
+specifically. Verifies: loads without throwing (both flat and container
+architectures), output is bounded/finite and demonstrably not a no-op,
+`prepare()` is safe to call repeatedly (preset reload / sample-rate
+change). It does not re-verify the neural network's own numerical
+correctness -- that's NeuralAmpModelerCore's own test suite's job, not
+duplicated here.
+
+**Known gaps, not attempted here:**
+* No resampling if a model's own `expected_sample_rate` differs from the
+  engine's 48kHz (see "Sample rate policy" above) -- both real files
+  tried were natively 48kHz, so this hasn't bitten yet, but a model
+  trained at e.g. 44.1kHz would currently run at the wrong rate.
+* No use of a model's reported loudness/gain metadata (`GetLoudness()`,
+  visible in `nam::DSP`) to level-match different NAM models against each
+  other -- output level is whatever the model itself produces.
+* `nam::NamFileValidationError` (thrown by `get_dsp()` on a file its
+  fuller validation rejects) isn't specifically caught in
+  `engine_state.cpp`'s command dispatch -- it falls through to the
+  generic `std::exception` handler and reports as `internal_error` rather
+  than `validation_error`. Not wrong, just less precise than it could be.
+
 ## Module map
 
 | Module (`include/audio_engine/` + `src/`) | Responsibility |
@@ -271,7 +380,8 @@ wasn't pursued with only two real files to calibrate against.
 | `wav_file`               | Hand-rolled RIFF/WAVE parser (reads PCM16/PCM24/PCM32/float32, mono or downmixed) + writer (PCM16/float32) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
 | `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate and truncates to a real-time-safe length (see "Real-time-safe IR length cap") |
-| `nam_model`                  | Real `.nam` JSON metadata parser/validator (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- inference is stubbed, see below) |
+| `nam_model`                  | Real `.nam` JSON metadata parser (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- default when `AUDIO_ENGINE_WITH_REAL_NAM` is off) |
+| `real_nam_model`               | `RealNamModel`: real WaveNet/LSTM inference via vendored NeuralAmpModelerCore, built only when `AUDIO_ENGINE_WITH_REAL_NAM` is on -- see "Real NAM inference" above |
 | `preset_switcher`              | Glitch-free crossfade between an "old" and "next" already-prepared processing chain |
 | `resource_manager`                | Owns the one currently-loaded `EngineChain` (NAM + IR + effects); loading a new preset releases the previous one's resources |
 | `engine_state`                      | Dispatches one parsed control-socket command against a `ResourceManager` + bypass/crossfade/active-preset state; `processAudioBlock` runs the current chain over one real-time audio block |
@@ -411,47 +521,17 @@ that wiring, plus the JUCE (or ALSA) dependency it needs, is the
 documented next step once this sandbox (or a real dev machine) has full
 GitHub access or a vendored JUCE copy.
 
-### 2. NAM inference stubbed -- same network constraint, different dependency
+### 2. NAM inference: was stubbed, now real (see "Real NAM inference" below)
 
-**What's real:** `.nam` file **metadata parsing** (`nam_model.hpp`'s
-`parseNamModelMetadata`/`parseNamModelFile`). A `.nam` file is plain JSON
-(the format used by the reference implementation,
-github.com/sdatkinson/NeuralAmpModelerCore): a top-level `architecture`
-name, an architecture-specific `config` object, a flat `weights` array,
-and usually `sample_rate`/`metadata`. The parser validates all of this for
-real and rejects malformed/incomplete files with a clear error
-(`NamParseError`) -- see `tests/test_nam_model.cpp` for the full set of
-rejected-input cases (missing architecture, non-object config, empty/
-non-numeric weights, etc.).
-
-**What's stubbed:** actually *running* the WaveNet/LSTM forward pass
-described by `weights` (`StubNamModel` is a fixed identity/gain
-passthrough, not real inference). Real inference requires vendoring
-`NeuralAmpModelerCore` itself (MIT-licensed,
-github.com/sdatkinson/NeuralAmpModelerCore) -- again only obtainable via
-`git clone`/GitHub archive download, both blocked here (see deviation #1).
-
-**The seam:** `INamModel` is the interface (`prepare`/`process`, plus
-`metadata()`); `StubNamModel` is the only implementation today.
-Swapping in a real implementation backed by `NeuralAmpModelerCore` (e.g.
-as a git submodule, added from a machine with full GitHub access) is a
-drop-in replacement behind this interface -- nothing else in the engine
-(resource manager, preset switcher, control socket) needs to change.
-
-**Known parser gap: only the flat single-model export shape is
-understood.** `parseNamModelMetadata` requires a non-empty top-level
-`weights` array. Verified against a real commercial `.nam` export
-(Darkglass B7K Ultra) that this rejects: some plugins export a
-`"SlimmableContainer"` architecture whose top-level `weights` is `[]`,
-with the actual per-submodel weight data nested under
-`config.submodels[...]` instead -- a materially different shape this
-parser was never written against (it targets the reference
-NeuralAmpModelerCore single-model format). Such a file fails
-`load_preset` with `missing or invalid required field 'weights'`; since
-inference is stubbed regardless (see above), this only blocks the
-upload/register/load *plumbing* today, not any audible capability.
-Supporting nested-submodel exports is unstarted follow-up work, not
-attempted here.
+This deviation is historical -- kept for the record of *why* it was
+stubbed for most of this project's development. The network constraint
+that caused it (this sandbox's proxy blocking `codeload.github.com`, the
+host both `git clone` of a GitHub repo and a release/archive tarball
+download resolve through) doesn't apply to every environment this code
+runs in; once it was built on a machine with full GitHub access, real
+inference became a same-day drop-in behind the `INamModel` interface this
+section always said it would be. See "Real NAM inference" below for what
+actually shipped, including real measured performance numbers.
 
 ### 3. Naive (not partitioned/FFT) convolution for cabinet IRs
 
@@ -536,7 +616,6 @@ passing.**
   under "Real-time audio I/O" above; `PresetSwitcher` itself is built and
   tested, just not wired into `EngineState` yet.
 - **Loading actual third-party LV2/VST3 plugin binaries.**
-- **Real WaveNet/LSTM NAM inference** -- see deviation #2 above.
 - **FFT-based/partitioned convolution performance optimization** -- see
   deviation #3 above; naive convolution is correct but not real-time-fast
   at production IR lengths.
