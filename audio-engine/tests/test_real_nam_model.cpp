@@ -99,3 +99,57 @@ TEST(RealNamModel, ReportsMetadataFromTheOriginalParse) {
     EXPECT_EQ(model->metadata().name, "Test Model");
     EXPECT_EQ(model->metadata().modeledBy, "Steve");
 }
+
+// nam::DSP's default process() is the null operation (copies input straight
+// to output -- see NeuralAmpModelerCore's dsp.cpp), so a plain nam::DSP
+// with a known SetLoudness() is a precise, deterministic fixture for
+// verifying the loudness-normalization gain itself, independent of any
+// real network's own numerics -- see real_nam_model.cpp's
+// loudnessNormalizationGain and README.md "NAM output loudness
+// normalization" for why this exists (a real bug: one commercial "gain
+// stage" export measured ~6dB hotter than its siblings and clipped with
+// no compensation).
+TEST(RealNamModel, NoGainAppliedWhenModelLoudnessMatchesTarget) {
+    auto dsp = std::make_unique<nam::DSP>(1, 1, 48000.0);
+    dsp->SetLoudness(kNamTargetLoudnessDb);
+    NamModelMetadata meta;
+    meta.architecture = "Test";
+    RealNamModel model(meta, std::move(dsp));
+    model.prepare(48000.0);
+
+    std::vector<float> buf = {0.1f, 0.2f, -0.3f};
+    model.process(buf.data(), buf.size());
+    EXPECT_NEAR(buf[0], 0.1f, 1e-5f);
+    EXPECT_NEAR(buf[1], 0.2f, 1e-5f);
+    EXPECT_NEAR(buf[2], -0.3f, 1e-5f);
+}
+
+TEST(RealNamModel, AttenuatesAModelReportedAsLouderThanTarget) {
+    // 6dB hotter than target -> should come out at ~half amplitude
+    // (matching the real Ampeg "Gain 1" file's measured ~6dB excess).
+    auto dsp = std::make_unique<nam::DSP>(1, 1, 48000.0);
+    dsp->SetLoudness(kNamTargetLoudnessDb + 6.0);
+    NamModelMetadata meta;
+    meta.architecture = "Test";
+    RealNamModel model(meta, std::move(dsp));
+    model.prepare(48000.0);
+
+    std::vector<float> buf = {0.8f};
+    model.process(buf.data(), buf.size());
+    const float expectedGain = static_cast<float>(std::pow(10.0, -6.0 / 20.0));  // ~0.501
+    EXPECT_NEAR(buf[0], 0.8f * expectedGain, 1e-4f);
+}
+
+TEST(RealNamModel, NoGainAppliedWhenModelReportsNoLoudness) {
+    // dsp.HasLoudness() defaults to false until SetLoudness() is called --
+    // a model with no loudness metadata at all must not be guessed at.
+    auto dsp = std::make_unique<nam::DSP>(1, 1, 48000.0);
+    NamModelMetadata meta;
+    meta.architecture = "Test";
+    RealNamModel model(meta, std::move(dsp));
+    model.prepare(48000.0);
+
+    std::vector<float> buf = {0.5f};
+    model.process(buf.data(), buf.size());
+    EXPECT_NEAR(buf[0], 0.5f, 1e-5f);
+}

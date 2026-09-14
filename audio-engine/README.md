@@ -329,17 +329,22 @@ does not validate architecture-specific structure beyond that; real
 structural validation is `nam::get_dsp()`'s job now, not a second,
 competing implementation of an evolving format here.
 
-**Measured, not assumed, real-time cost.** Benchmarked against both real
-`.nam` files available during development (both `"SlimmableContainer"`
-WaveNet exports, 48kHz native): **~0.06-0.08ms per 64-sample/48kHz block
-(4-6% of the 1.33ms budget)** -- comfortable headroom, real neural
-inference is not the bottleneck on this hardware (cabinet-IR convolution
-uses far more of the budget -- see "Real-time-safe IR length cap" above).
-`prepare()` (which calls `nam::DSP::Reset`, including prewarm -- settling
-dilated-conv/recurrent history so the first real block isn't a "cold"
-transient) took ~10-15ms in the same test -- fine, since it runs once per
-preset *load* (`ResourceManager::loadPreset`), never in the real-time
-audio callback.
+**Measured, not assumed, real-time cost.** Benchmarked against all 14 real
+`.nam` files available during development (two commercial packs, all
+`"SlimmableContainer"` WaveNet exports, 48kHz native), including
+worst-case (not just average) per-block time -- a real concern for a
+level-dependent multi-submodel container architecture, since a heavier
+submodel could in principle get selected right when the player is
+digging in hardest: **worst case across all 14 files was 0.17ms per
+64-sample/48kHz block, 13% of the 1.33ms budget** -- comfortable margin,
+zero over-budget blocks in a 2-second/1500-block stress test per file.
+Real neural inference is not the bottleneck on this hardware (cabinet-IR
+convolution uses far more of the budget -- see "Real-time-safe IR length
+cap" above). `prepare()` (which calls `nam::DSP::Reset`, including
+prewarm -- settling dilated-conv/recurrent history so the first real
+block isn't a "cold" transient) took ~10-15ms in the same test -- fine,
+since it runs once per preset *load* (`ResourceManager::loadPreset`),
+never in the real-time audio callback.
 
 **Testing.** `tests/test_real_nam_model.cpp` (built only with the flag on)
 reuses NeuralAmpModelerCore's own bundled `example_models/*.nam` fixtures
@@ -353,14 +358,43 @@ change). It does not re-verify the neural network's own numerical
 correctness -- that's NeuralAmpModelerCore's own test suite's job, not
 duplicated here.
 
+### NAM output loudness normalization
+
+A real bug, found the same way the IR gain problem was (see "IR gain
+normalization" above): `.nam` files are not gain-consistent with each
+other any more than cabinet IRs are. Surveyed all 14 real `.nam` files
+available during development (two commercial packs, one with 9 "gain
+stage" variants of the same amp) -- one measured **~6dB hotter** than its
+siblings (`GetLoudness()` -17.18dB vs. a -19 to -23dB range for the rest)
+and clipped audibly (measured peak 1.29, i.e. 1.29x over range) on an
+otherwise-unremarkable test signal with zero compensation. Every other
+file stayed safely under 0.5 peak on the same signal -- this wasn't a
+timing/xrun problem (worst-case block time measured at 13% of budget
+across all 14 files, comfortable margin) or an architecture problem, just
+uncorrected gain.
+
+Fix: `RealNamModel` now reads the model's own `nam::DSP::GetLoudness()` (a
+standard field NAM models carry specifically for this purpose -- "how loud
+is this model's output for a typical input") and applies a linear gain
+scaling every model to a common target, `kNamTargetLoudnessDb = -22.0` dB
+(`real_nam_model.hpp`). That number wasn't guessed: chosen empirically by
+testing candidate targets (-20 to -26dB) against all 14 real files under
+both moderate-level and aggressive-pick-attack synthetic signals, picking
+the highest (loudest, least unnecessarily-quiet) target that still kept
+every file's worst-case measured peak comfortably under 1.0 (worst case at
+-22dB: 0.54 peak under an aggressive-attack stress test, ~5.4dB of
+headroom). A model with no loudness metadata at all gets no correction
+(gain 1.0, not a guess) -- see `tests/test_real_nam_model.cpp`'s
+`NoGainAppliedWhenModelReportsNoLoudness`. This is the same "correct the
+input, keep the defensive clamp as backup, don't just clamp harder"
+layered approach as the IR fix, and the existing chain-level clamp in
+`EngineChain::process` remains the final safety net regardless.
+
 **Known gaps, not attempted here:**
 * No resampling if a model's own `expected_sample_rate` differs from the
-  engine's 48kHz (see "Sample rate policy" above) -- both real files
-  tried were natively 48kHz, so this hasn't bitten yet, but a model
-  trained at e.g. 44.1kHz would currently run at the wrong rate.
-* No use of a model's reported loudness/gain metadata (`GetLoudness()`,
-  visible in `nam::DSP`) to level-match different NAM models against each
-  other -- output level is whatever the model itself produces.
+  engine's 48kHz (see "Sample rate policy" above) -- all real files tried
+  were natively 48kHz, so this hasn't bitten yet, but a model trained at
+  e.g. 44.1kHz would currently run at the wrong rate.
 * `nam::NamFileValidationError` (thrown by `get_dsp()` on a file its
   fuller validation rejects) isn't specifically caught in
   `engine_state.cpp`'s command dispatch -- it falls through to the

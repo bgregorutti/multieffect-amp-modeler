@@ -21,6 +21,17 @@
 
 namespace audio_engine {
 
+// Target loudness (dB, same scale as nam::DSP::GetLoudness()) every real
+// NAM model's output is normalized to when the model reports one -- see
+// real_nam_model.cpp's applyLoudnessNormalization and the "NAM output
+// loudness normalization" section of README.md for how this number was
+// chosen. Different .nam files are not gain-consistent with each other
+// any more than cabinet IRs are (see convolution.hpp's normalizeIrEnergy
+// for the same problem on the IR side) -- confirmed with a real file: one
+// commercial "gain stage" export measured ~6dB hotter than its siblings
+// and clipped audibly with zero compensation.
+inline constexpr double kNamTargetLoudnessDb = -22.0;
+
 class RealNamModel : public INamModel {
 public:
     using EffectBlock::process;  // bring the std::vector<float>& convenience overload back into scope
@@ -51,6 +62,10 @@ private:
     std::unique_ptr<nam::DSP> dsp_;
     std::vector<NAM_SAMPLE> scratchIn_;
     std::vector<NAM_SAMPLE> scratchOut_;
+    // Computed once in the constructor from dsp_->GetLoudness() (1.0f, a
+    // no-op multiply, if the model doesn't report one). See
+    // kNamTargetLoudnessDb above.
+    float outputGain_ = 1.0f;
 };
 
 }  // namespace audio_engine
