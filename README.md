@@ -39,20 +39,38 @@ display/          (planned) Minimal read-only display client (I2C
                   LCD/OLED), driven by control-daemon broadcasts.
 
 docs/             Cross-cutting design notes and open questions.
+
+scripts/          Dev-machine testing tools that don't belong to any one
+                  component, e.g. keyboard_footswitch.py (a stand-in
+                  footswitch relay: right/left arrow = next/previous
+                  preset, for testing before real hardware exists).
 ```
 
 ## Status
 
-- `control-daemon`: **V1 built and tested** (40 passing tests) — see its own
+- `control-daemon`: **V1 built and tested** (47 passing tests) — see its own
   README for how to run it and the WebSocket protocol reference.
-- `audio-engine`: **V1 built and tested** (68 passing tests) — real DSP,
-  WAV/IR loading, and preset-switching logic; JUCE audio I/O and real NAM
-  inference are deferred (both require GitHub-hosted dependencies this
-  sandbox's network can't fetch — see audio-engine/README.md). Not yet wired
-  to control-daemon's `AudioEngineClient`.
+  `AudioEngineClient` now has a real implementation
+  (`UnixSocketAudioEngineClient`) wired to audio-engine's control socket
+  (`CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`) — see "Audio engine wiring" in
+  control-daemon/README.md.
+- `audio-engine`: **V1 built and tested** (72 passing tests) — real DSP,
+  WAV/IR loading, and preset-switching logic. Real NAM (WaveNet) inference
+  is still stubbed (needs `NeuralAmpModelerCore`, GitHub-hosted). Real-time
+  audio device I/O now exists for dev-machine testing via PortAudio
+  (`audio_engine --audio`, opt-in build flag, off by default) — see
+  "Real-time audio I/O" in audio-engine/README.md; what the Raspberry Pi
+  build itself uses (PortAudio again, ALSA, or JUCE) is still open, but
+  `IAudioIoBackend` means that's a new backend behind an existing
+  interface, not a rewrite. Crossfade-on-switch is not yet wired into the
+  real-time path (known gap, documented in audio-engine/README.md).
 - `mobile-app`: **V1 built and tested** (77 passing tests via `flutter test`,
   `flutter analyze` clean) — full preset/bank/footswitch-mapping editing and
   asset upload against control-daemon's protocol. OS file-picker integration
   is stubbed pending on-device testing (needs a real phone/emulator).
 - `footswitch`, `display`: not yet started — real GPIO/I2C hardware is
-  needed to build and validate these properly.
+  needed to build and validate these properly. `next_preset`/`prev_preset`
+  footswitch actions (a minimal two-switch "browse all presets" mapping)
+  are already supported by control-daemon, and exercised today by
+  `scripts/keyboard_footswitch.py`, for whenever a 2-switch pedal is the
+  first one wired up.

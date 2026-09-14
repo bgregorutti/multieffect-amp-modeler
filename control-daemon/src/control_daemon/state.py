@@ -26,8 +26,10 @@ from .models import (
     EffectBlock,
     FootswitchAction,
     NextBankAction,
+    NextPresetAction,
     Preset,
     PrevBankAction,
+    PrevPresetAction,
     SelectSlotAction,
     TapTempoAction,
     ToggleBypassAction,
@@ -253,6 +255,13 @@ class DaemonStateManager:
             sha256=sha256,
         )
         self.state.assets[asset.id] = asset
+        # The engine resolves nam_asset_id/ir_asset_id off its own copy of
+        # this registry (it never reads the daemon's state directly), so a
+        # newly-registered asset must be pushed there before any preset
+        # referencing it is loaded -- otherwise a real AudioEngineClient's
+        # load_preset() fails with "unknown asset id" for every fresh
+        # upload. See audio_engine_client.py.
+        self.audio_engine.register_asset(asset)
         self._notify("register_asset")
         return asset
 
@@ -276,6 +285,10 @@ class DaemonStateManager:
             self._change_bank(-1)
         elif isinstance(action, ToggleBypassAction):
             self.set_bypass(not self.state.bypass)
+        elif isinstance(action, NextPresetAction):
+            self._change_preset(+1)
+        elif isinstance(action, PrevPresetAction):
+            self._change_preset(-1)
         elif isinstance(action, TapTempoAction):
             self._tap_tempo()
 
@@ -291,6 +304,43 @@ class DaemonStateManager:
         if preset_id is not None:
             self.audio_engine.load_preset(self.state.presets[preset_id])
         reason = "footswitch_next_bank" if delta > 0 else "footswitch_prev_bank"
+        self._notify(reason)
+
+    def _change_preset(self, delta: int) -> None:
+        """Steps to the next/previous assigned slot, scanning across banks
+        in (bank order, slot order), wrapping around. A no-op if no bank
+        has any preset assigned."""
+        assigned = [
+            (bank_index, slot_index, preset_id)
+            for bank_index, bank in enumerate(self.state.banks)
+            for slot_index, preset_id in enumerate(bank.slots)
+            if preset_id is not None
+        ]
+        if not assigned:
+            return
+
+        # Keyed on active_preset_id rather than (active_bank_index,
+        # active_slot): those coordinates default to (0, 0) even when
+        # nothing is actually selected (active_preset_id is None), which
+        # would otherwise collide with a real assigned slot at (0, 0) and
+        # make the very first "next" press skip over it.
+        current = next(
+            (i for i, (_, _, pid) in enumerate(assigned) if pid == self.state.active_preset_id),
+            None,
+        )
+        if current is None:
+            # Nothing currently active in the assigned list -- "next" from
+            # here should land on the first entry, "prev" on the last.
+            current = -1 if delta > 0 else 0
+
+        new_bank_index, new_slot, preset_id = assigned[(current + delta) % len(assigned)]
+
+        self.state.active_bank_index = new_bank_index
+        self.state.active_slot = new_slot
+        self.state.active_preset_id = preset_id
+        self.audio_engine.load_preset(self.state.presets[preset_id])
+
+        reason = "footswitch_next_preset" if delta > 0 else "footswitch_prev_preset"
         self._notify(reason)
 
     def _tap_tempo(self) -> None:

@@ -8,8 +8,11 @@ import pytest
 
 from control_daemon.audio_engine_client import AudioEngineClient
 from control_daemon.models import (
+    Asset,
     NextBankAction,
+    NextPresetAction,
     PrevBankAction,
+    PrevPresetAction,
     SelectSlotAction,
     TapTempoAction,
     ToggleBypassAction,
@@ -22,6 +25,7 @@ class RecordingAudioEngine(AudioEngineClient):
         self.loaded_presets: List[str] = []
         self.bypass_calls: List[bool] = []
         self.tempo_calls: List[float] = []
+        self.registered_assets: List[str] = []
 
     def load_preset(self, preset) -> None:
         self.loaded_presets.append(preset.id)
@@ -31,6 +35,9 @@ class RecordingAudioEngine(AudioEngineClient):
 
     def set_tempo(self, bpm: float) -> None:
         self.tempo_calls.append(bpm)
+
+    def register_asset(self, asset: Asset) -> None:
+        self.registered_assets.append(asset.id)
 
 
 class FakeClock:
@@ -156,6 +163,19 @@ def test_set_bypass_calls_engine_and_persists(manager):
     assert manager.engine.bypass_calls == [True]
 
 
+# -- assets -------------------------------------------------------------------
+
+
+def test_register_asset_forwards_to_engine(manager):
+    from control_daemon.models import AssetKind
+
+    asset = manager.register_asset(
+        kind=AssetKind.NAM, filename="amp.nam", stored_path="/data/assets/amp.nam"
+    )
+    assert asset.id in manager.state.assets
+    assert manager.engine.registered_assets == [asset.id]
+
+
 # -- footswitch mapping -> state change --------------------------------------
 
 
@@ -202,6 +222,46 @@ def test_footswitch_unmapped_switch_is_a_silent_noop(manager):
     changes_before = list(manager.changes)
     manager.apply_footswitch_press(99)
     assert manager.changes == changes_before
+
+
+def test_footswitch_next_and_prev_preset_scans_across_banks_and_wraps(manager):
+    p1 = manager.create_preset(name="P1")
+    p2 = manager.create_preset(name="P2")
+    p3 = manager.create_preset(name="P3")
+    bank1 = manager.create_bank(name="A", num_slots=2)
+    bank2 = manager.create_bank(name="B", num_slots=2)
+    manager.update_bank(bank1.id, slots=[p1.id, None])  # slot 1 empty -- skipped
+    manager.update_bank(bank2.id, slots=[p2.id, p3.id])
+    manager.set_footswitch_mapping({0: NextPresetAction(), 1: PrevPresetAction()})
+
+    manager.apply_footswitch_press(0)  # nothing active yet -- lands on the first assigned slot
+    assert manager.state.active_preset_id == p1.id
+
+    manager.apply_footswitch_press(0)  # skips bank1 slot 1 (empty), lands on p2
+    assert manager.state.active_preset_id == p2.id
+
+    manager.apply_footswitch_press(0)
+    assert manager.state.active_preset_id == p3.id
+
+    manager.apply_footswitch_press(0)  # wraps back to p1
+    assert manager.state.active_preset_id == p1.id
+    assert manager.changes[-1] == "footswitch_next_preset"
+
+    manager.apply_footswitch_press(1)  # prev wraps back to p3
+    assert manager.state.active_preset_id == p3.id
+    assert manager.changes[-1] == "footswitch_prev_preset"
+    assert manager.engine.loaded_presets == [p1.id, p2.id, p3.id, p1.id, p3.id]
+
+
+def test_footswitch_next_preset_is_a_noop_with_no_assigned_slots(manager):
+    manager.create_bank(name="Empty", num_slots=2)
+    manager.set_footswitch_mapping({0: NextPresetAction()})
+    changes_before = list(manager.changes)
+
+    manager.apply_footswitch_press(0)
+
+    assert manager.changes == changes_before
+    assert manager.state.active_preset_id is None
 
 
 def test_footswitch_tap_tempo_computes_bpm(manager):

@@ -5,9 +5,9 @@ loads a NAM (Neural Amp Modeler) model + a cabinet impulse response (IR) +
 an effects chain per preset and processes the guitar signal. The
 (already-built) `control-daemon/` is the single source of truth for which
 preset is active and drives this engine over a local control socket (see
-"Control socket protocol" below) -- this package only builds the engine
-side; wiring `control-daemon`'s `AudioEngineClient` to actually connect
-here is a follow-up, not part of this task.
+"Control socket protocol" below) -- `control-daemon`'s
+`UnixSocketAudioEngineClient` (see `control-daemon/README.md` "Audio engine
+wiring") is the client side of that connection.
 
 ```
 Mobile app / footswitch <--WebSocket/GPIO--> control-daemon <--Unix socket--> audio-engine (this package)
@@ -26,12 +26,12 @@ cmake --build audio-engine/build -j
 ctest --test-dir audio-engine/build            # or: ./audio-engine/build/audio_engine_tests
 ```
 
-Requires: CMake >= 3.16, a C++20 compiler, and two apt packages
-(`nlohmann-json3-dev`, `libgtest-dev` + `libgmock-dev`) -- all fetched from
-the normal Ubuntu package mirror, not from GitHub. Last run in this
-container: **68/68 tests passed** (`ctest --test-dir audio-engine/build`),
-covering every module below plus a real-subprocess control-socket
-integration test.
+Requires: CMake >= 3.16, a C++20 compiler, and two packages
+(`nlohmann-json`, `gtest`+`gmock`) -- from the normal Ubuntu package mirror
+(`nlohmann-json3-dev`, `libgtest-dev`+`libgmock-dev`) or Homebrew
+(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **72/72
+tests passed** (`ctest --test-dir audio-engine/build`), covering every
+module below plus a real-subprocess control-socket integration test.
 
 Run the engine standalone (mostly useful for manual testing against the
 control socket -- see below):
@@ -39,6 +39,59 @@ control socket -- see below):
 ```bash
 ./audio-engine/build/audio_engine /tmp/audio_engine.sock
 ```
+
+## Real-time audio I/O (dev-machine testing, e.g. before a Pi exists)
+
+By default `audio_engine` only runs the control socket -- no audio device
+is ever opened, which is deliberate (see `IAudioIoBackend` below) and is
+what the gtest suite uses. To actually hear audio through a real interface
+while developing/testing on a normal machine (no Raspberry Pi, no GPIO
+footswitch yet -- see the root README and `scripts/keyboard_footswitch.py`
+for the rest of that story), build with the PortAudio backend and pass
+`--audio`:
+
+```bash
+brew install portaudio pkg-config          # macOS; apt: portaudio19-dev pkg-config
+cmake -S audio-engine -B audio-engine/build-audio -DAUDIO_ENGINE_WITH_PORTAUDIO=ON
+cmake --build audio-engine/build-audio -j
+./audio-engine/build-audio/audio_engine /tmp/audio_engine.sock --audio
+```
+
+Set your external interface as the system default input/output device
+first (macOS: Audio MIDI Setup) -- device selection is deliberately just
+"the OS default" for now, not a name/index flag (see
+`portaudio_backend.hpp`).
+
+**Seam, not a hard dependency.** `IAudioIoBackend` (`audio_io_backend.hpp`)
+is the interface; `PortAudioBackend` is one implementation of it, built
+only when `-DAUDIO_ENGINE_WITH_PORTAUDIO=ON` is passed (default `OFF`).
+This is the same "narrow interface + swappable backend" pattern as
+control-daemon's `FootswitchInputBackend`/`AudioEngineClient` and this
+package's own `INamModel`/`IAssetLoader`: a production/Pi build doesn't
+need to link PortAudio at all if it ends up using a different backend, and
+nothing in `EngineChain`/`EngineState`/the control socket cares which
+backend (if any) is driving it. `EngineState::processAudioBlock` is the
+one new entry point the real-time callback calls once per block; it takes
+the same mutex `handleCommand` does, so a `load_preset` command can never
+race a concurrent audio block -- see `tests/test_engine_state.cpp`.
+
+**Known gap: no crossfade in the real-time path yet.** `PresetSwitcher`
+(equal-power crossfade, see "Deviation #4" below) is fully built and
+tested standalone, but `EngineState::handleLoadPreset` still swaps
+`ResourceManager`'s chain synchronously rather than handing old+new to a
+`PresetSwitcher` -- so a preset switch while `--audio` is running is
+thread-safe (same mutex) but not glitch-free; expect an audible click.
+Wiring `PresetSwitcher` into the real-time path is the natural next step
+once you're validating audio through real hardware, not attempted here to
+keep this change scoped to "get real signal flowing."
+
+**macOS microphone permission.** The very first time you run `--audio`,
+opening the input device can trigger (or silently block on, if run
+non-interactively/headless) a one-time TCC microphone-permission prompt
+for whatever app launched the process (Terminal, iTerm, etc). Run it from
+an actual interactive terminal window at least once and approve the
+prompt; a headless/CI invocation of `--audio` will hang at that point
+until permission has already been granted.
 
 ## Module map
 
@@ -55,9 +108,11 @@ control socket -- see below):
 | `nam_model`                  | Real `.nam` JSON metadata parser/validator (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- inference is stubbed, see below) |
 | `preset_switcher`              | Glitch-free crossfade between an "old" and "next" already-prepared processing chain |
 | `resource_manager`                | Owns the one currently-loaded `EngineChain` (NAM + IR + effects); loading a new preset releases the previous one's resources |
-| `engine_state`                      | Dispatches one parsed control-socket command against a `ResourceManager` + bypass/crossfade/active-preset state |
+| `engine_state`                      | Dispatches one parsed control-socket command against a `ResourceManager` + bypass/crossfade/active-preset state; `processAudioBlock` runs the current chain over one real-time audio block |
 | `control_socket`                      | Unix domain socket server: newline-delimited JSON in, newline-delimited JSON reply out |
-| `main.cpp`                              | Process entry point: `audio_engine <control-socket-path>` |
+| `audio_io_backend`                      | `IAudioIoBackend` interface + `AudioCallback`/`AudioIoConfig` -- the real-time-audio-device seam (see "Real-time audio I/O" below) |
+| `portaudio_backend`                        | `PortAudioBackend`: `IAudioIoBackend` over PortAudio, built only when `AUDIO_ENGINE_WITH_PORTAUDIO` is on |
+| `main.cpp`                              | Process entry point: `audio_engine <control-socket-path> [--audio]` |
 
 ### Shared data model
 
@@ -286,17 +341,21 @@ live IR, at every point in that test, confirmed by
 `ResourceManager.LoadingSequentialPresetsReleasesPreviousResources`
 passing.**
 
-## Explicitly out of scope for this task
+## Explicitly out of scope
 
-- **Real-time audio device I/O** (ALSA/JACK/PortAudio) -- no audio
-  hardware exists in this sandbox to develop or test against.
+- **A real-time audio backend for the Raspberry Pi specifically.**
+  `--audio`/`PortAudioBackend` (see "Real-time audio I/O" above) covers
+  dev-machine testing; what actually ships on the Pi (PortAudio-over-ALSA
+  again, bare ALSA, or JUCE) is still an open call -- `IAudioIoBackend` is
+  built so that's a new implementation behind the same interface, not a
+  rewrite, whichever way it goes.
+- **Crossfading a preset switch in the real-time path** -- see "Known gap"
+  under "Real-time audio I/O" above; `PresetSwitcher` itself is built and
+  tested, just not wired into `EngineState` yet.
 - **Loading actual third-party LV2/VST3 plugin binaries.**
 - **Real WaveNet/LSTM NAM inference** -- see deviation #2 above.
 - **FFT-based/partitioned convolution performance optimization** -- see
   deviation #3 above; naive convolution is correct but not real-time-fast
   at production IR lengths.
-- **JUCE integration** -- see deviation #1 above.
-- Wiring control-daemon's `AudioEngineClient` to actually connect to this
-  engine's control socket (control-daemon is a sibling component, already
-  built and committed, and out of scope to modify for this task) --
-  purely a client-side follow-up once both halves exist.
+- **JUCE integration** -- see deviation #1 above; PortAudio covers the
+  "get real audio flowing on a dev machine" need without it.

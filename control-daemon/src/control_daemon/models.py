@@ -128,6 +128,21 @@ class ToggleBypassAction(BaseModel):
     type: Literal["toggle_bypass"] = "toggle_bypass"
 
 
+class NextPresetAction(BaseModel):
+    """Steps to the next non-empty slot, scanning across banks in order
+    (bank order, then slot order within a bank) and wrapping around. Unlike
+    ``NextBankAction`` (which keeps the same slot index and can land on an
+    empty slot), this always lands on an assigned preset if one exists
+    anywhere -- useful for a minimal two-switch footswitch that just wants
+    to browse the whole preset list without per-slot buttons."""
+
+    type: Literal["next_preset"] = "next_preset"
+
+
+class PrevPresetAction(BaseModel):
+    type: Literal["prev_preset"] = "prev_preset"
+
+
 class TapTempoAction(BaseModel):
     """Placeholder action: the spec calls for tap-tempo support, but tempo
     is not yet wired to any real effect. The daemon still tracks tap
@@ -143,6 +158,8 @@ FootswitchAction = Annotated[
         NextBankAction,
         PrevBankAction,
         ToggleBypassAction,
+        NextPresetAction,
+        PrevPresetAction,
         TapTempoAction,
     ],
     Field(discriminator="type"),

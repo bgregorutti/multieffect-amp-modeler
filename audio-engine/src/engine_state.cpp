@@ -119,6 +119,18 @@ json EngineState::handleRegisterAsset(const json& command) {
     return json{{"ok", true}, {"cmd", "register_asset"}, {"asset_id", asset.id}};
 }
 
+void EngineState::processAudioBlock(float* buffer, std::size_t numSamples) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (bypass_) {
+        return;
+    }
+    EngineChain* chain = resourceManager_.currentChain();
+    if (chain == nullptr) {
+        return;
+    }
+    chain->process(buffer, numSamples);
+}
+
 json EngineState::handleGetState() const {
     json state = {
         {"bypass", bypass_},

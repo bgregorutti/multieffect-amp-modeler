@@ -38,6 +38,25 @@ add_library(audio_engine_core
 target_include_directories(audio_engine_core PUBLIC include)
 target_link_libraries(audio_engine_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
 
+# --- Real-time audio I/O (optional, dev-machine testing) -----------------
+# Off by default: a production/Pi build need not link PortAudio at all if
+# it ends up using a different backend once real hardware exists. This is
+# NOT the JUCE dependency described in README.md "Deviations" -- PortAudio
+# is a small, separately-packaged C library (e.g. `brew install portaudio`
+# on macOS, `apt install portaudio19-dev` on Linux), reachable through a
+# normal package manager rather than a GitHub clone/archive, so it isn't
+# subject to the same network-sandbox constraint.
+option(AUDIO_ENGINE_WITH_PORTAUDIO
+  "Build the PortAudio-based real-time audio I/O backend (audio_engine --audio)" OFF)
+if(AUDIO_ENGINE_WITH_PORTAUDIO)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(PORTAUDIO REQUIRED IMPORTED_TARGET portaudio-2.0)
+
+  target_sources(audio_engine_core PRIVATE src/portaudio_backend.cpp)
+  target_link_libraries(audio_engine_core PUBLIC PkgConfig::PORTAUDIO)
+  target_compile_definitions(audio_engine_core PUBLIC AUDIO_ENGINE_WITH_PORTAUDIO)
+endif()
+
 # --- Executable ----------------------------------------------------------
 add_executable(audio_engine src/main.cpp)
 target_link_libraries(audio_engine PRIVATE audio_engine_core)
@@ -58,6 +77,7 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     tests/test_nam_model.cpp
     tests/test_preset_switcher.cpp
     tests/test_resource_manager.cpp
+    tests/test_engine_state.cpp
     tests/test_control_socket_integration.cpp
   )
   target_link_libraries(audio_engine_tests PRIVATE audio_engine_core GTest::gtest GTest::gtest_main)

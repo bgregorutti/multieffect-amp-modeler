@@ -1,10 +1,9 @@
-// Unix domain socket server: the local IPC channel the (already-built)
-// control daemon could drive this engine over, once wired up on that
-// side (control-daemon's AudioEngineClient -- see
-// control-daemon/src/control_daemon/audio_engine_client.py -- would grow a
-// real implementation that connects here instead of using
-// NullAudioEngineClient; that wiring is not part of this task, which only
-// builds the engine side).
+// Unix domain socket server: the local IPC channel the control daemon
+// drives this engine over. control-daemon's
+// UnixSocketAudioEngineClient (see
+// control-daemon/src/control_daemon/audio_engine_client.py) is the real
+// client of this server; NullAudioEngineClient remains the daemon's
+// default when no engine socket is configured (e.g. its own test suite).
 //
 // Wire protocol: newline-delimited JSON, one command per line in, one
 // reply per line out. See engine_state.hpp for the exact command/reply

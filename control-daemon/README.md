@@ -37,8 +37,33 @@ Configuration is via environment variables (see `src/control_daemon/main.py`):
 | `CONTROL_DAEMON_HOST`         | `0.0.0.0`             | Bind host                     |
 | `CONTROL_DAEMON_PORT`         | `8765`                | Bind port                     |
 | `CONTROL_DAEMON_LOG_LEVEL`    | `info`                | uvicorn log level             |
+| `CONTROL_DAEMON_AUDIO_ENGINE_SOCKET` | unset (uses `NullAudioEngineClient`) | Path to `audio-engine`'s control socket -- see "Audio engine wiring" below |
 
 Uploaded `.nam`/IR binaries are written under `<store dir>/assets/`.
+
+## Audio engine wiring
+
+By default the daemon runs with `NullAudioEngineClient` (every engine call
+is just logged) -- no `audio-engine` process required, which is how the
+daemon's own test suite runs. To drive a real `audio-engine` process, set
+`CONTROL_DAEMON_AUDIO_ENGINE_SOCKET` to the same control-socket path you
+started it with (see `audio-engine/README.md`):
+
+```bash
+# terminal 1
+./audio-engine/build/audio_engine /tmp/audio_engine.sock
+
+# terminal 2
+CONTROL_DAEMON_AUDIO_ENGINE_SOCKET=/tmp/audio_engine.sock .venv/bin/control-daemon
+```
+
+`UnixSocketAudioEngineClient` (`src/control_daemon/audio_engine_client.py`)
+is the real implementation -- see its docstring for the resilience
+posture (a missing/restarting engine process logs a warning and is
+otherwise a no-op, rather than taking down the WS API) and for why
+`set_tempo` is still a no-op there too (the engine's control-socket
+protocol has no `set_tempo` command yet -- tempo isn't wired to any real
+effect on either side).
 
 ## Resource footprint (Raspberry Pi constraint)
 
@@ -148,7 +173,8 @@ before the resulting broadcast copy on that same connection.
 `reason` is one of: `create_preset`, `update_preset`, `delete_preset`,
 `select_preset`, `create_bank`, `update_bank`, `reorder_banks`,
 `set_bypass`, `set_footswitch_mapping`, `register_asset`,
-`footswitch_next_bank`, `footswitch_prev_bank`, `tap_tempo`.
+`footswitch_next_bank`, `footswitch_prev_bank`, `footswitch_next_preset`,
+`footswitch_prev_preset`, `tap_tempo`.
 
 **`command_ok`** -- direct reply to the sender of a successful command:
 ```json
@@ -198,7 +224,9 @@ before the resulting broadcast copy on that same connection.
     "1": {"type": "select_slot", "slot": 1},
     "2": {"type": "next_bank"},
     "3": {"type": "toggle_bypass"},
-    "4": {"type": "tap_tempo"}
+    "4": {"type": "tap_tempo"},
+    "5": {"type": "next_preset"},
+    "6": {"type": "prev_preset"}
   }
 }
 
@@ -214,9 +242,18 @@ before the resulting broadcast copy on that same connection.
 
 The daemon looks up `switch_index` in the current footswitch mapping and
 applies the mapped action (`select_slot`, `next_bank`, `prev_bank`,
-`toggle_bypass`, or `tap_tempo`). A press on an unmapped switch is a silent
-no-op. This is intentionally the *only* thing a footswitch-role connection
-can send -- all editing happens in the app.
+`toggle_bypass`, `next_preset`, `prev_preset`, or `tap_tempo`). A press on
+an unmapped switch is a silent no-op. This is intentionally the *only*
+thing a footswitch-role connection can send -- all editing happens in the
+app.
+
+`next_preset`/`prev_preset` step through every *assigned* slot across all
+banks, in bank order then slot order, skipping empty slots and wrapping
+around -- unlike `next_bank`/`prev_bank` (which keep the same slot index
+and can land on an empty one), this always lands on a real preset if one
+exists anywhere. Meant for a minimal footswitch (or `scripts/
+keyboard_footswitch.py`, see its docstring) that wants to browse the whole
+preset list with just two switches instead of one per slot.
 
 ### HTTP: uploading a `.nam`/IR binary
 

@@ -5,6 +5,7 @@
 // handling can be unit tested without opening any socket at all.
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -31,6 +32,19 @@ public:
     // Never throws: any exception from preset parsing / resource loading
     // is caught and turned into an "ok": false reply.
     nlohmann::json handleCommand(const nlohmann::json& command);
+
+    // Runs the currently loaded chain over `buffer` in place (`numSamples`
+    // valid samples), or leaves it untouched (passthrough) if bypassed or
+    // if no preset has been loaded yet. Meant to be called once per block
+    // from a real-time audio callback (see IAudioIoBackend/main.cpp) --
+    // takes the same mutex as handleCommand so a control-socket command
+    // (e.g. load_preset) can never race a concurrent audio block. Real-time
+    // caveat: EngineChain::process performs no allocation/I/O, but this
+    // mutex lock is not itself real-time-safe (a command could in theory
+    // hold it briefly); acceptable for dev/test use on a normal OS
+    // scheduler, flagged here rather than hidden -- see README.md "Known
+    // limitations" for the production follow-up (a lock-free handoff).
+    void processAudioBlock(float* buffer, std::size_t numSamples);
 
     // --- introspection, used by get_state and directly by tests ---
     bool bypass() const;
