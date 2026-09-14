@@ -114,6 +114,15 @@ for the exact before/after numbers. If you still hear glitching after
 pulling the latest code, rebuild `build-audio` (a stale binary won't have
 the fix) and check you're not also loading a second long asset.
 
+**Sound is loud/distorted/"horrible" (not jerky -- that's the bug
+above)?** A separate real bug: cabinet IR files aren't gain-consistent,
+and convolving with an ungained one can multiply a normal playing-level
+signal well past 0dBFS -- measured 3.6x over range on this Ampeg IR at a
+moderate playing level, before the fix. `loadImpulseResponseFile` now
+energy-normalizes every loaded IR, and the full chain's output is also
+defensively clamped to `[-1, 1]` -- see audio-engine/README.md "IR gain
+normalization". Rebuild `build-audio` to pick this up too.
+
 ### Resetting state between test runs
 
 control-daemon persists everything (presets, banks, footswitch mapping,

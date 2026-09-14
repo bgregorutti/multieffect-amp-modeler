@@ -99,9 +99,18 @@ TEST(Convolution, LoadsImpulseResponseFromWavFile) {
     writeWavFile(path, irSamples, 48000.0, WavSampleFormat::Float32);
 
     // Target rate matches the file's own rate -- no resampling should occur.
+    // loadImpulseResponseFile also energy-normalizes (see
+    // normalizeIrEnergy), so the loaded shape is proportional to the
+    // source file, not identical to it -- check relative proportions and
+    // that the result actually landed at unit L2 energy.
     std::vector<float> loaded = loadImpulseResponseFile(path, 48000.0);
     ASSERT_EQ(loaded.size(), irSamples.size());
-    for (size_t i = 0; i < irSamples.size(); ++i) EXPECT_NEAR(loaded[i], irSamples[i], 1e-6f);
+    EXPECT_NEAR(loaded[1] / loaded[0], irSamples[1] / irSamples[0], 1e-5f);
+    EXPECT_NEAR(loaded[2] / loaded[0], irSamples[2] / irSamples[0], 1e-5f);
+
+    double sumSquares = 0.0;
+    for (float s : loaded) sumSquares += static_cast<double>(s) * s;
+    EXPECT_NEAR(std::sqrt(sumSquares), 1.0, 1e-5);
 }
 
 TEST(Convolution, LoadsImpulseResponseFromWavFileResamplingToTargetRate) {
@@ -147,4 +156,46 @@ TEST(Convolution, TruncateIrWithFadeOutCutsToLengthAndEndsInSilence) {
     for (std::size_t i = 300 - 256 + 1; i < 300; ++i) {
         EXPECT_LT(result[i], result[i - 1]);
     }
+}
+
+TEST(Convolution, NormalizeIrEnergyProducesUnitL2Norm) {
+    // A deliberately "hot" IR (mirrors a real un-gain-staged room-capture
+    // IR pack found during manual testing -- see README.md).
+    std::vector<float> ir(500, 0.2f);
+    std::vector<float> normalized = normalizeIrEnergy(ir);
+
+    ASSERT_EQ(normalized.size(), ir.size());
+    double sumSquares = 0.0;
+    for (float s : normalized) sumSquares += static_cast<double>(s) * s;
+    EXPECT_NEAR(std::sqrt(sumSquares), 1.0, 1e-5);
+
+    // Shape (relative proportions) must be preserved -- normalization is a
+    // uniform scale, not a reshape.
+    EXPECT_NEAR(normalized[0], normalized[1], 1e-6f);
+}
+
+TEST(Convolution, NormalizeIrEnergyPreventsClippingOnHotIr) {
+    // Reproduces the real bug: a hot IR (taps summing to a large L1 norm,
+    // as measured against an actual "definitive speaker capture" pack)
+    // convolved with a normal playing-level signal must not exceed
+    // [-1, 1] once normalized -- see the header comment on
+    // normalizeIrEnergy for the RMS-tracking property this relies on.
+    std::vector<float> hotIr(2000, 0.05f);  // L1 norm = 100, deliberately hot
+    std::vector<float> normalized = normalizeIrEnergy(hotIr);
+
+    ConvolutionEngine eng(normalized);
+    eng.prepare(48000.0);
+    std::vector<float> signal(4000);
+    for (std::size_t i = 0; i < signal.size(); ++i) {
+        signal[i] = 0.3f * std::sin(static_cast<float>(i) * 0.05f);  // moderate playing level
+    }
+    eng.process(signal.data(), signal.size());
+
+    for (float s : signal) EXPECT_LE(std::fabs(s), 1.0f);
+}
+
+TEST(Convolution, NormalizeIrEnergyIsANoOpForSilentIr) {
+    std::vector<float> silence(10, 0.0f);
+    std::vector<float> result = normalizeIrEnergy(silence);
+    EXPECT_EQ(result, silence);  // must not divide by ~0
 }

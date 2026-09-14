@@ -68,14 +68,34 @@ inline constexpr std::size_t kMaxRealtimeIrSamples = 8192;
 // `maxSamples`.
 std::vector<float> truncateIrWithFadeOut(std::vector<float> ir, std::size_t maxSamples);
 
+// Scales `ir` so its L2 (energy) norm -- sqrt(sum(ir[k]^2)) -- is 1.
+// Real cabinet IR files are not gain-consistent: some are recorded/
+// exported "hot" (a raw room-mic capture rather than a level-matched
+// commercial IR), and convolving with an ungained IR can multiply a
+// normal playing-level signal well past 0dBFS -- confirmed during manual
+// testing against two different real IR packs (one clipped a moderate
+// playing level to 3.6x over range, the other -- a "known good" file --
+// still clipped at 1.1x). Unit-L2 normalization is the standard approach
+// for this in convolution-reverb/cab-sim tools: for a broadband (roughly
+// white) input, filter output RMS tracks input RMS almost exactly at this
+// normalization (a standard DSP identity, verified empirically here), so
+// perceived loudness stays comparable across differently-recorded IR
+// files instead of depending on how hot the original capture was. Not a
+// hard clipping guarantee by itself (a resonant IR can still produce
+// transient peaks above unity on loud input) -- see
+// EngineChain::process's defensive output clamp for the second half of
+// that story. A no-op if `ir`'s energy is already ~0 (silent/degenerate
+// IR -- nothing to normalize against, and dividing by ~0 would blow up).
+std::vector<float> normalizeIrEnergy(std::vector<float> ir);
+
 // Loads a mono WAV file as a cabinet IR (thin wrapper over wav_file.hpp
 // that returns just the sample data, since that's all ConvolutionEngine
 // needs), resampled to `targetSampleRate` if the file's own sample rate
 // differs (see resample.hpp -- the engine standardizes on one internal
 // rate, and a mismatched IR would otherwise play back time-compressed/
-// detuned), then truncated to `kMaxRealtimeIrSamples` (see above) if still
-// longer than that. Throws WavParseError -- see wav_file.hpp -- on a
-// malformed file.
+// detuned), truncated to `kMaxRealtimeIrSamples` (see above) if still
+// longer than that, then energy-normalized (see normalizeIrEnergy above).
+// Throws WavParseError -- see wav_file.hpp -- on a malformed file.
 std::vector<float> loadImpulseResponseFile(const std::string& path, double targetSampleRate);
 
 // Pure function form, useful for tests and for one-shot (non-streaming)

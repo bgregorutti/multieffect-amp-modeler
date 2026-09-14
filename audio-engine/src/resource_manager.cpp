@@ -1,5 +1,6 @@
 #include "audio_engine/resource_manager.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 
 #include "audio_engine/delay_block.hpp"
@@ -14,6 +15,19 @@ void EngineChain::process(float* buffer, std::size_t numSamples) {
     if (namModel) namModel->process(buffer, numSamples);
     for (auto& block : effects) block->process(buffer, numSamples);
     if (cabinet) cabinet->process(buffer, numSamples);
+
+    // Defensive final clamp, not a design assumption that anything above
+    // is broken: cabinet-IR energy normalization (convolution.hpp) makes
+    // clipping rare rather than impossible (a resonant IR can still peak
+    // above unity on a loud transient -- see that header's comment), and
+    // nothing stops a user-authored preset from stacking enough gain/EQ
+    // boost to do the same. Scoped to the whole chain's final output, not
+    // to individual EffectBlocks -- each block stays free to produce
+    // whatever an isolated unit test expects; only what would actually
+    // reach the audio device gets bounded.
+    for (std::size_t i = 0; i < numSamples; ++i) {
+        buffer[i] = std::clamp(buffer[i], -1.0f, 1.0f);
+    }
 }
 
 void EngineChain::prepare(double sampleRate) {

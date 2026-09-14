@@ -1,6 +1,7 @@
 #include "audio_engine/convolution.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 #include "audio_engine/resample.hpp"
 #include "audio_engine/wav_file.hpp"
@@ -72,10 +73,27 @@ std::vector<float> truncateIrWithFadeOut(std::vector<float> ir, std::size_t maxS
     return ir;
 }
 
+std::vector<float> normalizeIrEnergy(std::vector<float> ir) {
+    double sumSquares = 0.0;
+    for (float s : ir) {
+        sumSquares += static_cast<double>(s) * static_cast<double>(s);
+    }
+    const double l2 = std::sqrt(sumSquares);
+    if (l2 < 1e-9) {
+        return ir;  // silent/degenerate IR -- nothing to normalize against
+    }
+    const float scale = static_cast<float>(1.0 / l2);
+    for (float& s : ir) {
+        s *= scale;
+    }
+    return ir;
+}
+
 std::vector<float> loadImpulseResponseFile(const std::string& path, double targetSampleRate) {
     WavData wav = parseWavFile(path);
     std::vector<float> resampled = resampleLinear(wav.samples, wav.sampleRate, targetSampleRate);
-    return truncateIrWithFadeOut(std::move(resampled), kMaxRealtimeIrSamples);
+    std::vector<float> capped = truncateIrWithFadeOut(std::move(resampled), kMaxRealtimeIrSamples);
+    return normalizeIrEnergy(std::move(capped));
 }
 
 std::vector<float> convolveFull(const std::vector<float>& input, const std::vector<float>& ir) {

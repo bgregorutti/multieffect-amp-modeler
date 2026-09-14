@@ -1,6 +1,7 @@
 #include "audio_engine/resource_manager.hpp"
 
 #include <atomic>
+#include <cmath>
 #include <memory>
 
 #include <gtest/gtest.h>
@@ -198,6 +199,33 @@ TEST(ResourceManager, ChainProcessRunsNamThenEffectsThenCabinet) {
     EXPECT_FLOAT_EQ(buf[0], 1.0f);
     EXPECT_FLOAT_EQ(buf[1], 0.0f);
     EXPECT_FLOAT_EQ(buf[2], 0.0f);
+}
+
+TEST(ResourceManager, ChainProcessClampsFinalOutputToUnitRange) {
+    // Defensive safety net (see resource_manager.cpp's comment on
+    // EngineChain::process): nothing here relies on any single block
+    // misbehaving -- a preset can simply stack enough gain on its own to
+    // exceed [-1, 1], and the chain's actual output to hardware must never
+    // do that regardless of what a preset asks for.
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+
+    Preset p;
+    p.id = "loud";
+    p.name = "loud";
+    EffectBlockSpec bigGain;
+    bigGain.type = "gain";
+    bigGain.enabled = true;
+    bigGain.params["gain_db"] = 40.0;  // ~100x linear gain
+    p.blocks = {bigGain};
+    manager.loadPreset(p);
+
+    std::vector<float> buf = {0.5f, -0.5f, 0.01f};
+    manager.currentChain()->process(buf.data(), buf.size());
+
+    for (float s : buf) EXPECT_LE(std::fabs(s), 1.0f);
+    EXPECT_FLOAT_EQ(buf[0], 1.0f);   // 0.5 * ~100 clamps to the ceiling
+    EXPECT_FLOAT_EQ(buf[1], -1.0f);  // -0.5 * ~100 clamps to the floor
 }
 
 TEST(ResourceManager, CreateEffectBlockFallsBackToPassthroughForUnknownType) {

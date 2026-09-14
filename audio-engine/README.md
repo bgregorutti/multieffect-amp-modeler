@@ -204,6 +204,43 @@ long IR's *full* length in real time instead of cutting it short. That
 remains the real follow-up; capping IR length is what makes real hardware
 testing usable today without waiting on it.
 
+## IR gain normalization
+
+A separate real bug, also only surfaced by testing against real IR files
+(not the same one as the length cap above -- fixing that first just
+exposed this one): cabinet IR files have no standardized gain convention.
+Convolving with an ungained one can multiply a normal playing-level signal
+well past 0dBFS -- measured against two different real IR packs: one (a
+raw "room capture" style file) clipped a moderate playing level to **3.6x
+over range**; a second, unrelated pack that had seemed to "just work"
+clipped to **1.1x over range** at the same level once actually measured.
+This is a property of convolving with *any* ungained real-world IR, not a
+defect specific to one file.
+
+Fix, in `convolution.cpp`: `loadImpulseResponseFile` now also calls
+`normalizeIrEnergy`, which scales the loaded IR to unit L2 (energy) norm
+(`sqrt(sum(ir[k]^2)) == 1`). This is the standard normalization used in
+convolution-reverb/cab-sim tools for exactly this problem: for a broadband
+input (real guitar signal, not a pure tone), output RMS tracks input RMS
+almost exactly at this normalization (a standard DSP identity, confirmed
+empirically against both real files during manual testing) -- so
+perceived loudness becomes comparable across differently-recorded IR
+files instead of depending on how hot the original capture happened to
+be, without changing an IR's tonal *shape* (a uniform scale preserves
+relative proportions between taps).
+
+Energy normalization controls average level, not worst-case peaks -- a
+resonant IR can still produce a transient above unity on a loud input.
+`EngineChain::process` (`resource_manager.cpp`) adds a defensive final
+clamp to `[-1, 1]` as the second half of this fix: scoped to the whole
+chain's combined output only (not into individual `EffectBlock`s, which
+stay free to produce whatever their own isolated unit tests expect), so
+it also catches any preset that simply stacks enough gain/EQ boost on its
+own to do the same thing an ungained IR did. See
+`tests/test_convolution.cpp` (`NormalizeIrEnergy*`) and
+`tests/test_resource_manager.cpp`
+(`ChainProcessClampsFinalOutputToUnitRange`).
+
 ## Module map
 
 | Module (`include/audio_engine/` + `src/`) | Responsibility |
