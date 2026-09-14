@@ -241,6 +241,23 @@ own to do the same thing an ungained IR did. See
 `tests/test_resource_manager.cpp`
 (`ChainProcessClampsFinalOutputToUnitRange`).
 
+**Known remaining gap: unusually peaky (high crest-factor) IRs can still
+hit the clamp on transients.** Energy normalization matches *average*
+loudness across IRs; it does nothing to bound *peak* loudness, which
+depends on how peaky both the IR and the input signal are. Measured
+against two real files: the Ampeg IR referenced above has a crest factor
+(peak/RMS) of **37** raw, vs. **9** for a Shift Line Orange cab IR that
+works cleanly -- a hard-pick-attack test signal pushed 86 of 48000 samples
+into the Ampeg IR's clamp ceiling, and 0 for the Orange one. A
+geometric-mean-of-L1-and-L2 normalization eliminates this (verified), but
+was deliberately not adopted: it would also quiet down every
+*already-correct* IR by roughly -10dB (including the Orange one), trading
+a rare, bounded artifact on one unusually peaky file for a guaranteed
+level change on files that don't need it. Left as-is: rare clamping on
+hard attacks with outlier IRs is preferable to universally reduced
+headroom. A per-IR adaptive threshold is a plausible middle ground but
+wasn't pursued with only two real files to calibrate against.
+
 ## Module map
 
 | Module (`include/audio_engine/` + `src/`) | Responsibility |

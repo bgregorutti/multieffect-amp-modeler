@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import termios
 import tty
@@ -97,7 +98,22 @@ async def run(uri: str) -> None:
 
         loop = asyncio.get_running_loop()
         key_queue: asyncio.Queue[str] = asyncio.Queue()
-        loop.add_reader(sys.stdin.fileno(), lambda: key_queue.put_nowait(sys.stdin.read(1)))
+        stdin_fd = sys.stdin.fileno()
+        # os.read, not sys.stdin.read: the latter is a buffered
+        # TextIOWrapper that can silently read ahead past the 1 byte we
+        # asked for whenever multiple bytes are already waiting (e.g. a
+        # fast burst of keypresses, or a full 3-byte arrow-key escape
+        # sequence arriving in one chunk). Those extra bytes then sit in
+        # Python's own buffer, invisible to the kernel -- so add_reader's
+        # callback (which only fires on the fd's kernel-level readiness)
+        # stops firing even though unread bytes remain, until the next
+        # physical keypress arrives and "unsticks" a stale buffered byte
+        # instead of the new one. That desyncs which action a keypress
+        # maps to under fast presses. os.read() is a raw, unbuffered
+        # syscall wrapper -- it takes only what's asked for from the
+        # kernel, so there's never a hidden backlog for add_reader to lose
+        # track of.
+        loop.add_reader(stdin_fd, lambda: key_queue.put_nowait(os.read(stdin_fd, 1).decode(errors="replace")))
 
         print(
             "[keyboard-footswitch] ready -- right arrow = next preset, left arrow = prev preset, "
