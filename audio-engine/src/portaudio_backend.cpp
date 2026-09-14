@@ -1,5 +1,7 @@
 #include "audio_engine/portaudio_backend.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -17,7 +19,7 @@ PortAudioBackend::PortAudioBackend() = default;
 PortAudioBackend::~PortAudioBackend() { stop(); }
 
 int PortAudioBackend::paCallback(const void* input, void* output, unsigned long frameCount,
-                                  const PaStreamCallbackTimeInfo*, PaStreamCallbackFlags,
+                                  const PaStreamCallbackTimeInfo*, PaStreamCallbackFlags statusFlags,
                                   void* userData) {
     auto* self = static_cast<PortAudioBackend*>(userData);
     auto* out = static_cast<float*>(output);
@@ -35,7 +37,33 @@ int PortAudioBackend::paCallback(const void* input, void* output, unsigned long 
         std::memset(out, 0, sizeof(float) * frameCount);
     }
 
+    // Ground truth from PortAudio/the driver itself: was this callback
+    // preceded by an actual input or output underflow/overflow? Previously
+    // discarded entirely -- see README.md "Real-time callback health
+    // monitoring" for why this matters (distinguishing a real device-level
+    // xrun from our own code being slow).
+    if (statusFlags & (paInputUnderflow | paInputOverflow | paOutputUnderflow | paOutputOverflow)) {
+        self->xrunCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
     self->callback_(out, static_cast<std::size_t>(frameCount));
+    const auto t1 = std::chrono::steady_clock::now();
+
+    // Atomics + a monotonic clock read only -- no locks, no I/O, real-time
+    // safe. main.cpp polls these from a normal (non-real-time) thread.
+    const auto micros = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
+    self->totalCallbackCount_.fetch_add(1, std::memory_order_relaxed);
+    std::uint64_t prevMax = self->maxCallbackMicros_.load(std::memory_order_relaxed);
+    while (micros > prevMax &&
+           !self->maxCallbackMicros_.compare_exchange_weak(prevMax, micros, std::memory_order_relaxed)) {
+    }
+    const double budgetMicros = static_cast<double>(frameCount) / self->sampleRate_ * 1'000'000.0;
+    if (static_cast<double>(micros) > budgetMicros) {
+        self->overBudgetCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+
     return paContinue;
 }
 
@@ -44,6 +72,11 @@ void PortAudioBackend::start(const AudioIoConfig& config, AudioCallback callback
         throw std::runtime_error("PortAudioBackend::start called while already running");
     }
     callback_ = std::move(callback);
+    sampleRate_ = config.sampleRate;
+    xrunCount_.store(0, std::memory_order_relaxed);
+    overBudgetCount_.store(0, std::memory_order_relaxed);
+    totalCallbackCount_.store(0, std::memory_order_relaxed);
+    maxCallbackMicros_.store(0, std::memory_order_relaxed);
 
     PaError err = Pa_Initialize();
     if (err != paNoError) {

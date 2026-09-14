@@ -141,6 +141,36 @@ since the driver/OS can add its own buffering on top. True round-trip
 latency is roughly that input+output sum, plus USB/driver overhead
 PortAudio itself can't see.
 
+## Real-time callback health monitoring
+
+`PortAudioBackend::paCallback` previously discarded PortAudio's own
+`PaStreamCallbackFlags` parameter entirely -- a real gap, found while
+chasing a live-only "jerky/saturated" audio report that every offline
+reproduction (including `nam_render`, and a direct `EngineChain::process`
+run against the reporter's own real recorded signal) came back completely
+clean on: zero clamp engagement, comfortable timing margins, no NAM
+computation issue. That pointed squarely at the real-time device path
+itself, which nothing had ever actually instrumented.
+
+Now tracked, via atomics updated inside the callback (no locks, no I/O
+there -- real-time safe) and polled every ~2s from the main thread:
+* **`xrunCount`** -- PortAudio/the driver's own `paInputUnderflow` /
+  `paInputOverflow` / `paOutputUnderflow` / `paOutputOverflow` flags,
+  ground truth for "did the device itself glitch," previously invisible.
+* **`overBudgetCount`** -- callbacks where wall-clock time around just the
+  `EngineState::processAudioBlock` call (not the memcpy/bookkeeping
+  around it) exceeded that block's real-time budget -- our own code being
+  the bottleneck, distinct from a device-level xrun.
+* **`maxCallbackMicros`** -- worst single callback observed, for the life
+  of the stream.
+
+`--audio` prints a delta line to stderr whenever either counter moves,
+plus a final summary on shutdown. Distinguishes two previously-conflated
+possibilities: the device/driver actually underrunning (`xrunCount`) vs.
+our own processing occasionally running long (`overBudgetCount`) -- prior
+to this, "jerky" audio gave no signal on which of those (or neither) was
+actually happening.
+
 ## Sample rate policy
 
 The engine standardizes on a single fixed internal operating rate --

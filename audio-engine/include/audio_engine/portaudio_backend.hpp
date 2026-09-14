@@ -20,6 +20,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 
 #include <portaudio.h>
 
@@ -48,6 +49,24 @@ public:
     double inputLatencySeconds() const;
     double outputLatencySeconds() const;
 
+    // Real-time health counters, updated from inside the audio callback
+    // (atomics only -- no I/O there, see paCallback's comment) and safe to
+    // read from any thread. main.cpp polls these periodically to report
+    // real xrun/timing data from the actual live callback, not an offline
+    // stand-in -- see README.md "Real-time callback health monitoring".
+    // xrunCount: how many callbacks PortAudio itself flagged with an
+    // input/output underflow or overflow (PaStreamCallbackFlags) -- a
+    // ground-truth signal this backend never surfaced before.
+    std::uint64_t xrunCount() const { return xrunCount_.load(std::memory_order_relaxed); }
+    // overBudgetCount: how many callbacks took longer (wall-clock, around
+    // the engine callback_ call only) than the block's real-time budget
+    // (blockSize / sampleRate) -- our own code being the bottleneck,
+    // distinct from a device-level xrun.
+    std::uint64_t overBudgetCount() const { return overBudgetCount_.load(std::memory_order_relaxed); }
+    std::uint64_t totalCallbackCount() const { return totalCallbackCount_.load(std::memory_order_relaxed); }
+    // Microseconds; 0 if no callback has run yet.
+    std::uint64_t maxCallbackMicros() const { return maxCallbackMicros_.load(std::memory_order_relaxed); }
+
 private:
     static int paCallback(const void* input, void* output, unsigned long frameCount,
                            const PaStreamCallbackTimeInfo* timeInfo,
@@ -57,6 +76,12 @@ private:
     bool initialized_ = false;
     std::atomic<bool> running_{false};
     AudioCallback callback_;
+    double sampleRate_ = 48000.0;
+
+    std::atomic<std::uint64_t> xrunCount_{0};
+    std::atomic<std::uint64_t> overBudgetCount_{0};
+    std::atomic<std::uint64_t> totalCallbackCount_{0};
+    std::atomic<std::uint64_t> maxCallbackMicros_{0};
 };
 
 }  // namespace audio_engine

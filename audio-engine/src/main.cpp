@@ -21,6 +21,7 @@
 // machine has headroom and you want even less latency.
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <csignal>
 #include <iostream>
@@ -110,11 +111,36 @@ int main(int argc, char** argv) {
     }
 #endif
 
+#ifdef AUDIO_ENGINE_WITH_PORTAUDIO
+    std::uint64_t lastXruns = 0, lastOverBudget = 0, lastTotal = 0;
+#endif
     while (!g_stopRequested.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+#ifdef AUDIO_ENGINE_WITH_PORTAUDIO
+        if (wantAudio) {
+            const std::uint64_t xruns = audioBackend.xrunCount();
+            const std::uint64_t overBudget = audioBackend.overBudgetCount();
+            const std::uint64_t total = audioBackend.totalCallbackCount();
+            if (xruns != lastXruns || overBudget != lastOverBudget) {
+                std::cerr << "audio-engine: [health] +" << (xruns - lastXruns) << " device xrun(s), +"
+                          << (overBudget - lastOverBudget) << " over-budget block(s) in the last ~2s ("
+                          << (total - lastTotal) << " blocks processed, max block time so far: "
+                          << (audioBackend.maxCallbackMicros() / 1000.0) << " ms)\n";
+            }
+            lastXruns = xruns;
+            lastOverBudget = overBudget;
+            lastTotal = total;
+        }
+#endif
     }
 
 #ifdef AUDIO_ENGINE_WITH_PORTAUDIO
+    if (wantAudio) {
+        std::cerr << "audio-engine: [health] final totals: " << audioBackend.xrunCount()
+                  << " device xrun(s), " << audioBackend.overBudgetCount() << " over-budget block(s) of "
+                  << audioBackend.totalCallbackCount() << " processed, max block time "
+                  << (audioBackend.maxCallbackMicros() / 1000.0) << " ms\n";
+    }
     audioBackend.stop();
 #endif
     server.stop();
