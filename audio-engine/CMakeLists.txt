@@ -26,6 +26,7 @@ add_library(audio_engine_core
   src/preset_model.cpp
   src/gain_block.cpp
   src/eq_block.cpp
+  src/tone_stack_block.cpp
   src/delay_block.cpp
   src/wav_file.cpp
   src/resample.cpp
@@ -163,6 +164,7 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     tests/test_preset_model.cpp
     tests/test_gain_block.cpp
     tests/test_eq_block.cpp
+    tests/test_tone_stack_block.cpp
     tests/test_delay_block.cpp
     tests/test_wav_file.cpp
     tests/test_resample.cpp

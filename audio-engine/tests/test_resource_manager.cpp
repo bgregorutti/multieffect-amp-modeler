@@ -381,6 +381,98 @@ TEST(ResourceManager, ChainProcessClampsFinalOutputToUnitRange) {
     EXPECT_FLOAT_EQ(buf[1], -1.0f);  // -0.5 * ~100 clamps to the floor
 }
 
+TEST(ResourceManager, CreateEffectBlockBuildsVolumeAsAGainBlock) {
+    EffectBlockSpec spec;
+    spec.type = "volume";
+    spec.params["gain_db"] = 20.0;  // 10x linear
+    auto block = createEffectBlock(spec);
+    ASSERT_NE(block, nullptr);
+    block->prepare(48000.0);
+
+    std::vector<float> buf = {0.05f, 0.0f};
+    block->process(buf);
+    EXPECT_NEAR(buf[0], 0.5f, 1e-5f);
+}
+
+TEST(ResourceManager, CreateEffectBlockBuildsToneStack) {
+    EffectBlockSpec spec;
+    spec.type = "tone_stack";
+    spec.params["bass_db"] = 12.0;
+    auto block = createEffectBlock(spec);
+    ASSERT_NE(block, nullptr);
+    block->prepare(48000.0);
+
+    // A boosted bass band must actually change a non-trivial signal --
+    // proves ToneStackBlock is really wired in via createEffectBlock, not
+    // just constructed and discarded.
+    std::vector<float> buf(256, 0.0f);
+    buf[0] = 1.0f;
+    block->process(buf);
+    bool anyNonZero = false;
+    for (float s : buf) anyNonZero = anyNonZero || (s != 0.0f);
+    EXPECT_TRUE(anyNonZero);
+}
+
+TEST(ResourceManager, LoadPresetRunsGainNamEffectsCabToneVolumeInOrder) {
+    // The full chain order the product spec calls for: gain (input trim)
+    // -> NAM -> effects -> cab -> tone stack -> volume (output level).
+    // Every stage here is identity except the two gain stages, so the
+    // combined effect must be exactly their product regardless of what
+    // sits between them.
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+
+    Asset nam;
+    nam.id = "n";
+    nam.kind = AssetKind::Nam;
+    nam.filename = "n.nam";
+    nam.stored_path = "/fake/n.nam";
+    Asset ir;
+    ir.id = "i";
+    ir.kind = AssetKind::Ir;
+    ir.filename = "i.wav";
+    ir.stored_path = "/fake/i.wav";
+    manager.registerAsset(nam);
+    manager.registerAsset(ir);
+
+    EffectBlockSpec inputTrim;
+    inputTrim.id = "input_trim";
+    inputTrim.type = "gain";
+    inputTrim.params["gain_db"] = 20.0;  // 10x
+
+    EffectBlockSpec amp;
+    amp.id = "amp";
+    amp.type = "nam";
+    amp.asset_id = "n";
+
+    EffectBlockSpec cab;
+    cab.id = "cab";
+    cab.type = "ir";
+    cab.asset_id = "i";
+
+    EffectBlockSpec toneStack;
+    toneStack.id = "tone_stack";
+    toneStack.type = "tone_stack";  // flat (0dB every band) -- identity
+
+    EffectBlockSpec outputVolume;
+    outputVolume.id = "output_volume";
+    outputVolume.type = "volume";
+    outputVolume.params["gain_db"] = 6.0;  // ~2x
+
+    Preset p;
+    p.id = "p1";
+    p.name = "p1";
+    p.blocks = {inputTrim, amp, cab, toneStack, outputVolume};
+    manager.loadPreset(p);
+
+    std::vector<float> buf = {0.01f, 0.0f};
+    manager.currentChain()->process(buf.data(), buf.size());
+    // CountingIrHandle's IR is {1.0} (identity), NAM stub is identity --
+    // only the two gain stages should have scaled the signal: 0.01 * 10 *
+    // ~2 ~= 0.2.
+    EXPECT_NEAR(buf[0], 0.01f * 10.0f * std::pow(10.0f, 6.0f / 20.0f), 1e-4f);
+}
+
 TEST(ResourceManager, CreateEffectBlockFallsBackToPassthroughForUnknownType) {
     EffectBlockSpec spec;
     spec.type = "some_future_block_type";

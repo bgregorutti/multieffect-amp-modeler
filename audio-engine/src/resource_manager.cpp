@@ -7,6 +7,7 @@
 #include "audio_engine/eq_block.hpp"
 #include "audio_engine/gain_block.hpp"
 #include "audio_engine/passthrough_block.hpp"
+#include "audio_engine/tone_stack_block.hpp"
 #include "audio_engine/wav_file.hpp"
 
 #ifdef AUDIO_ENGINE_WITH_REAL_NAM
@@ -48,8 +49,15 @@ void EngineChain::prepare(double sampleRate) {
 }
 
 std::unique_ptr<EffectBlock> createEffectBlock(const EffectBlockSpec& spec) {
+    // "gain" and "volume" are the same GainBlock DSP under two distinct
+    // type names, so a rig chain (and its UI) can tell an input-trim-style
+    // gain stage apart from an output-level one at a glance, even though
+    // the underlying processing is identical. See tone_stack_block.hpp for
+    // "tone_stack".
     if (spec.type == "gain") return std::make_unique<GainBlock>(spec.params);
+    if (spec.type == "volume") return std::make_unique<GainBlock>(spec.params);
     if (spec.type == "eq") return std::make_unique<EqBlock>(spec.params);
+    if (spec.type == "tone_stack") return std::make_unique<ToneStackBlock>(spec.params);
     if (spec.type == "delay") return std::make_unique<DelayBlock>(spec.params);
     // "passthrough" and any unrecognized type: fail safe, not fail closed.
     return std::make_unique<PassthroughBlock>();

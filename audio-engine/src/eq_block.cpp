@@ -33,6 +33,11 @@ EqBlock::EqBlock(const ParamMap& params)
     : EqBlock(parseFilterType(params), paramAsDouble(params, "freq_hz", 1000.0),
               paramAsDouble(params, "gain_db", 0.0), paramAsDouble(params, "q", 0.70710678)) {}
 
+void EqBlock::setGainDb(double gainDb) {
+    gainDb_ = gainDb;
+    recomputeCoefficients();
+}
+
 void EqBlock::prepare(double sampleRate) {
     sampleRate_ = sampleRate;
     recomputeCoefficients();

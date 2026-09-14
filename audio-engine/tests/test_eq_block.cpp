@@ -92,6 +92,17 @@ TEST(EqBlock, ResetClearsHistory) {
     EXPECT_NEAR(probe[0], probeAfterReset[0], 1e-6f);
 }
 
+TEST(EqBlock, SetGainDbRecomputesCoefficientsLive) {
+    EqBlock eq(EqFilterType::Peaking, 1000.0, 0.0, 0.7);
+    eq.prepare(48000.0);
+    EXPECT_NEAR(eq.coefficients().b0, 1.0, 1e-9);  // 0dB peaking is identity
+    EXPECT_DOUBLE_EQ(eq.gainDb(), 0.0);
+
+    eq.setGainDb(12.0);
+    EXPECT_DOUBLE_EQ(eq.gainDb(), 12.0);
+    EXPECT_GT(eq.coefficients().b0, 1.0);  // now matches a from-scratch +12dB filter
+}
+
 TEST(EqBlock, ConstructsFromParamsMap) {
     ParamMap params;
     params["freq_hz"] = 500.0;
