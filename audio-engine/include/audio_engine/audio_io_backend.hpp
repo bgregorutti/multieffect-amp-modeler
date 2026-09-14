@@ -24,7 +24,18 @@ using AudioCallback = std::function<void(float* buffer, std::size_t numSamples)>
 
 struct AudioIoConfig {
     double sampleRate = 48000.0;
-    std::size_t blockSize = 256;
+    // 64 samples (~1.33ms @ 48kHz) -- lowered from an earlier 256-sample
+    // default after real hardware testing surfaced round-trip latency as
+    // a real, audible issue (see README.md "Latency"). Benchmarked safe:
+    // the real-time-capped convolution engine (see
+    // convolution.hpp/kMaxRealtimeIrSamples) uses ~38% of the per-block
+    // budget at 64 samples, essentially the same margin as at 256 (block
+    // work and budget both scale ~linearly with block size), so this
+    // isn't trading safety margin for latency. Override with
+    // `audio_engine ... --audio --block-size N` if your machine can't
+    // keep up (more OS scheduling jitter matters more at smaller blocks
+    // on a general-purpose, non-RTOS scheduler) or wants to go lower.
+    std::size_t blockSize = 64;
 };
 
 class IAudioIoBackend {

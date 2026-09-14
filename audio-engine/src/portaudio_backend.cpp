@@ -98,6 +98,18 @@ void PortAudioBackend::start(const AudioIoConfig& config, AudioCallback callback
     running_.store(true);
 }
 
+double PortAudioBackend::inputLatencySeconds() const {
+    if (!running_.load() || stream_ == nullptr) return 0.0;
+    const PaStreamInfo* info = Pa_GetStreamInfo(stream_);
+    return info != nullptr ? info->inputLatency : 0.0;
+}
+
+double PortAudioBackend::outputLatencySeconds() const {
+    if (!running_.load() || stream_ == nullptr) return 0.0;
+    const PaStreamInfo* info = Pa_GetStreamInfo(stream_);
+    return info != nullptr ? info->outputLatency : 0.0;
+}
+
 void PortAudioBackend::stop() {
     if (!running_.load()) {
         return;

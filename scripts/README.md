@@ -31,6 +31,20 @@ run non-interactively, silently hang on) a one-time macOS microphone
 permission prompt -- run this from an actual terminal window and approve
 it. See audio-engine/README.md "Real-time audio I/O".
 
+Watch terminal 1's startup output for the negotiated round-trip latency
+(`audio-engine: negotiated latency: input ... ms, output ... ms`) -- pass
+`--block-size N` (default 64, ~1.33ms) to trade off latency against xrun
+safety margin; see audio-engine/README.md "Latency" for the numbers behind
+that default and when to raise/lower it.
+
+If your interface has a **direct monitor** knob/switch, turn it off (or
+all the way to "playback") before testing -- otherwise you're hearing your
+dry signal summed straight from the hardware *underneath* whatever the
+engine outputs, which comb-filters into a "not quite flat" coloration no
+matter what the software does (this looks exactly like a bypass bug the
+first time you hit it; it isn't one -- see audio-engine/README.md "Real-time
+audio I/O").
+
 **Terminal 2 -- the control daemon, wired to that engine:**
 ```bash
 cd control-daemon
@@ -99,6 +113,31 @@ inaudible) -- see audio-engine/README.md "Real-time-safe IR length cap"
 for the exact before/after numbers. If you still hear glitching after
 pulling the latest code, rebuild `build-audio` (a stale binary won't have
 the fix) and check you're not also loading a second long asset.
+
+### Resetting state between test runs
+
+control-daemon persists everything (presets, banks, footswitch mapping,
+asset metadata) to a JSON file and reloads it on every startup -- that's
+the whole point of persistence, so restarting the daemon process alone
+will *not* clear anything you've built up across test sessions with
+`load_test_preset.py`.
+
+There's also no WS command to wipe state wholesale (only `delete_preset`
+exists for individual presets; there's no `delete_bank` at all yet) --
+deliberately: a "wipe everything" remote command is a real production
+feature decision for the actual pedal, not something to bolt on as a side
+effect of a test-tooling convenience. For a clean slate while testing,
+stop the daemon and delete its store instead:
+
+```bash
+# with the daemon stopped
+rm -rf control-daemon/data/state.json control-daemon/data/assets
+```
+(or whatever path `CONTROL_DAEMON_STORE_PATH` pointed at, if you set one).
+The next startup begins from empty state. Alternatively, point
+`CONTROL_DAEMON_STORE_PATH` at a fresh path per test session (this is what
+the diagnostic sessions in this repo's own development used) to keep
+old runs around instead of deleting them.
 
 **No sound at all?** Check, in order:
 - the interface is the OS default input *and* output;

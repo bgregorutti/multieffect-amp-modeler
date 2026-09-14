@@ -1,6 +1,6 @@
 // Audio engine process entry point.
 //
-// Usage: audio_engine <control-socket-path> [--audio]
+// Usage: audio_engine <control-socket-path> [--audio] [--block-size N]
 //
 // Starts the control socket server (see control_socket.hpp) bound to the
 // given Unix domain socket path and blocks forever, dispatching incoming
@@ -11,12 +11,17 @@
 //
 // --audio additionally opens the system's default audio input/output
 // device via a real-time IAudioIoBackend and streams it through
-// EngineState::processAudioBlock -- see README.md "Real-time audio I/O".
-// Only available when built with -DAUDIO_ENGINE_WITH_PORTAUDIO=ON (off by
-// default; see CMakeLists.txt and README.md "Deviations" for why JUCE
-// itself isn't used).
+// EngineState::processAudioBlock -- see README.md "Real-time audio I/O"
+// and "Latency". Only available when built with
+// -DAUDIO_ENGINE_WITH_PORTAUDIO=ON (off by default; see CMakeLists.txt
+// and README.md "Deviations" for why JUCE itself isn't used).
+//
+// --block-size N overrides AudioIoConfig's default (64 samples, ~1.33ms
+// @ 48kHz) -- go higher if you hear crackling/dropouts, lower if your
+// machine has headroom and you want even less latency.
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <csignal>
 #include <iostream>
 #include <thread>
@@ -41,9 +46,16 @@ int main(int argc, char** argv) {
     }
     const std::string socketPath = argv[1];
     bool wantAudio = false;
+    // Only consumed when built with AUDIO_ENGINE_WITH_PORTAUDIO; parsed
+    // unconditionally below so a plain build still accepts (and ignores)
+    // the flag rather than rejecting it as unrecognized.
+    [[maybe_unused]] std::size_t blockSizeOverride = 0;  // 0 == use AudioIoConfig's default
     for (int i = 2; i < argc; ++i) {
-        if (std::string(argv[i]) == "--audio") {
+        const std::string arg = argv[i];
+        if (arg == "--audio") {
             wantAudio = true;
+        } else if (arg == "--block-size" && i + 1 < argc) {
+            blockSizeOverride = static_cast<std::size_t>(std::strtoul(argv[++i], nullptr, 10));
         }
     }
 
@@ -70,6 +82,9 @@ int main(int argc, char** argv) {
     if (wantAudio) {
         audio_engine::AudioIoConfig config;
         config.sampleRate = engineState.sampleRate();
+        if (blockSizeOverride > 0) {
+            config.blockSize = blockSizeOverride;
+        }
         try {
             audioBackend.start(config, [&engineState](float* buffer, std::size_t numSamples) {
                 engineState.processAudioBlock(buffer, numSamples);
@@ -81,6 +96,10 @@ int main(int argc, char** argv) {
         }
         std::cerr << "audio-engine: streaming default audio device (sample rate "
                   << config.sampleRate << " Hz, block size " << config.blockSize << ")\n";
+        std::cerr << "audio-engine: negotiated latency: input "
+                  << (audioBackend.inputLatencySeconds() * 1000.0) << " ms, output "
+                  << (audioBackend.outputLatencySeconds() * 1000.0) << " ms (round-trip is "
+                     "roughly the sum, plus USB/driver overhead not visible to PortAudio)\n";
     }
 #else
     if (wantAudio) {

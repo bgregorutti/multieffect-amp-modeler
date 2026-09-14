@@ -39,6 +39,15 @@ public:
     void stop() override;
     bool isRunning() const override { return running_.load(); }
 
+    // The actual negotiated per-side latency PortAudio/the driver settled
+    // on (Pa_GetStreamInfo), in seconds -- can differ from the
+    // suggestedLatency requested in start(). 0 if not currently running.
+    // Reported by main.cpp on startup so "how much latency am I actually
+    // getting" is a measured number, not a guess -- see README.md
+    // "Latency".
+    double inputLatencySeconds() const;
+    double outputLatencySeconds() const;
+
 private:
     static int paCallback(const void* input, void* output, unsigned long frameCount,
                            const PaStreamCallbackTimeInfo* timeInfo,

@@ -93,6 +93,50 @@ an actual interactive terminal window at least once and approve the
 prompt; a headless/CI invocation of `--audio` will hang at that point
 until permission has already been granted.
 
+**Direct hardware monitoring will fight you.** If your interface has a
+"direct monitor" knob/switch (common on Focusrite/PreSonus/etc -- routes
+input straight to output in hardware, independent of the computer), it
+sums your dry signal into the output *underneath* whatever the engine
+sends back. Two copies of the same signal at a slight delay offset comb-
+filter each other, which sounds like a generic "not quite flat" coloration
+present no matter what the software is doing (confirmed this exact
+symptom during manual testing -- it looked like a bypass bug at first, and
+wasn't one). Turn direct monitoring off and monitor 100% through the
+software path when testing this engine.
+
+## Latency
+
+`--audio`'s block size directly trades off round-trip latency against
+xrun safety margin. Confirmed by benchmarking (not guessed): with the
+convolution engine's real-time IR cap (`kMaxRealtimeIrSamples`, see
+below), processing uses roughly the **same ~38% of the per-block budget
+regardless of block size** (block-size samples of work and block-size
+samples of budget both scale together), so shrinking the block size
+trades latency for margin much less than intuition suggests:
+
+| block size | budget/block | measured use | latency contribution |
+|---|---|---|---|
+| 256 | 5.33ms | 37.5% | ~5.33ms |
+| 128 | 2.67ms | 37.4% | ~2.67ms |
+| 64 (**default**) | 1.33ms | 37.6% | ~1.33ms |
+| 32 | 0.67ms | 44.1% | ~0.67ms |
+
+Default was lowered from 256 to **64** after real hardware testing
+surfaced round-trip latency as an audible, real problem, not just a
+theoretical one. Override with `--block-size N` -- go higher if you hear
+crackling/dropouts (a general-purpose OS scheduler, not an RTOS, means
+smaller blocks leave less slack for scheduling jitter than the CPU-time
+numbers above alone suggest), lower if your machine has room and you want
+less still.
+
+On startup, `--audio` prints the **actual negotiated** input/output
+latency PortAudio settled on for your device
+(`PortAudioBackend::inputLatencySeconds`/`outputLatencySeconds`, via
+`Pa_GetStreamInfo`) -- a measured number, not the block-size math above,
+since the driver/OS can add its own buffering on top. True round-trip
+latency is roughly that input+output sum, plus USB/driver overhead
+PortAudio itself can't see.
+
 ## Sample rate policy
 
 The engine standardizes on a single fixed internal operating rate --
