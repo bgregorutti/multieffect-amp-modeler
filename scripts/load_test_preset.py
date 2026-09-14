@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -48,17 +49,36 @@ import websockets
 
 
 def upload_asset(base_url: str, kind: str, path: Path) -> dict:
+    """Upload one asset, or report that the daemon already has these bytes.
+
+    Returns upload metadata, or ``{"existing_asset_id": ...}`` when the
+    daemon refuses the upload as a duplicate. The daemon deduplicates by
+    content checksum rather than filename, so re-running this script (or
+    pointing two rigs at the same cab IR) is expected, not an error --
+    hence reusing the registered asset instead of failing the run.
+    """
     data = path.read_bytes()
     # Real NAM/IR packs routinely have spaces (and other reserved
     # characters) in their filenames -- urlencode, don't just interpolate.
     query = urllib.parse.urlencode({"kind": kind, "filename": path.name})
     url = f"{base_url}/assets/upload?{query}"
     req = urllib.request.Request(url, data=data, method="POST")
-    with urllib.request.urlopen(req) as resp:
-        return json.loads(resp.read())
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:
+            raise
+        body = json.loads(exc.read())
+        return {"existing_asset_id": body["existing_asset_id"], "filename": path.name}
 
 
 async def register(ws: websockets.WebSocketClientProtocol, kind: str, meta: dict) -> str:
+    # Already in the daemon's library (same bytes, any filename) -- nothing
+    # to register, just point at what is already there.
+    if "existing_asset_id" in meta:
+        return meta["existing_asset_id"]
+
     await ws.send(
         json.dumps(
             {
@@ -82,6 +102,23 @@ async def main_async(args: argparse.Namespace) -> None:
     base_url = f"http://{args.host}:{args.port}"
     ws_uri = f"ws://{args.host}:{args.port}/ws"
 
+    # Every successful command is followed by a state_changed broadcast on
+    # this same connection. Keeping that broadcast's state (rather than
+    # discarding it) means the script never has to guess where the daemon
+    # put things -- ids and list positions are read back, not assumed.
+    latest_state: dict = {}
+
+    async def command(ws, payload: dict) -> dict:
+        nonlocal latest_state
+        await ws.send(json.dumps(payload))
+        reply = json.loads(await ws.recv())
+        if reply["type"] != "command_ok":
+            raise RuntimeError(f"{payload['type']} failed: {reply}")
+        broadcast = json.loads(await ws.recv())
+        if broadcast.get("type") == "state_changed":
+            latest_state = broadcast["state"]
+        return reply["result"]
+
     async with websockets.connect(ws_uri) as ws:
         await ws.send(json.dumps({"type": "hello", "role": "app", "client_name": "load-test-preset"}))
         snapshot = json.loads(await ws.recv())
@@ -89,82 +126,118 @@ async def main_async(args: argparse.Namespace) -> None:
             raise RuntimeError(f"expected state_snapshot, got {snapshot}")
         state = snapshot["state"]
 
-        nam_asset_id = None
+        # Find or create the rig. Everything this invocation adds goes into
+        # that one rig's chain, so calling this script twice -- once with a
+        # --nam, once with an --ir -- builds a single head+cab rig rather
+        # than two unrelated ones.
+        rigs = state["rigs"]
+        rig = next((r for r in rigs if r["name"] == args.rig), None)
+        if rig is None:
+            rig = (await command(ws, {"type": "create_rig", "name": args.rig, "chain": []}))["rig"]
+            print(f"[load-test-preset] created rig {rig['id']} ({args.rig!r})")
+
+        chain = list(rig["chain"])
+
+        def add_block(block_id: str, block_type: str, *, pinned: bool, asset_id=None, params=None):
+            # Replace an existing block of the same id rather than stacking
+            # duplicates, so re-running the script is idempotent.
+            block = {
+                "id": block_id,
+                "type": block_type,
+                "asset_id": asset_id,
+                "pinned": pinned,
+                "enabled": True,
+                "params": params or {},
+            }
+            for i, existing in enumerate(chain):
+                if existing["id"] == block_id:
+                    chain[i] = block
+                    return
+            chain.append(block)
+
         if args.nam:
             meta = upload_asset(base_url, "nam", Path(args.nam))
-            nam_asset_id = await register(ws, "nam", meta)
-            print(f"[load-test-preset] registered NAM asset {nam_asset_id} ({meta['filename']})")
+            asset_id = await register(ws, "nam", meta)
+            verb = "reused" if "existing_asset_id" in meta else "registered"
+            print(f"[load-test-preset] {verb} NAM asset {asset_id} ({meta['filename']})")
+            # Amp and cab are pinned: part of the rig's fixed backline, on in
+            # every preset, never switchable by a footswitch.
+            add_block("amp", "nam", pinned=True, asset_id=asset_id)
 
-        ir_asset_id = None
         if args.ir:
             meta = upload_asset(base_url, "ir", Path(args.ir))
-            ir_asset_id = await register(ws, "ir", meta)
-            print(f"[load-test-preset] registered IR asset {ir_asset_id} ({meta['filename']})")
+            asset_id = await register(ws, "ir", meta)
+            verb = "reused" if "existing_asset_id" in meta else "registered"
+            print(f"[load-test-preset] {verb} IR asset {asset_id} ({meta['filename']})")
+            add_block("cab", "ir", pinned=True, asset_id=asset_id)
 
-        blocks = []
+        effect_ids = []
         if args.gain_db != 0.0:
-            blocks.append({"type": "gain", "enabled": True, "params": {"gain_db": args.gain_db}})
+            add_block("gain", "gain", pinned=False, params={"gain_db": args.gain_db})
+            effect_ids.append("gain")
         if args.delay:
-            blocks.append(
-                {
-                    "type": "delay",
-                    "enabled": True,
-                    "params": {
-                        "delay_ms": args.delay_ms,
-                        "feedback": args.delay_feedback,
-                        "mix": args.delay_mix,
+            add_block(
+                "delay",
+                "delay",
+                pinned=False,
+                params={
+                    "delay_ms": args.delay_ms,
+                    "feedback": args.delay_feedback,
+                    "mix": args.delay_mix,
+                },
+            )
+            effect_ids.append("delay")
+
+        rig = (await command(ws, {"type": "update_rig", "rig_id": rig["id"], "chain": chain}))["rig"]
+        pinned = " + ".join(b["type"] for b in rig["chain"] if b["pinned"]) or "none"
+        print(f"[load-test-preset] rig {args.rig!r} chain: {len(rig['chain'])} block(s), pinned: {pinned}")
+
+        # One preset turning on whatever effects this invocation added.
+        preset = next((p for p in rig["presets"] if p["name"] == args.name), None)
+        block_states = {bid: {"enabled": True, "params": {}} for bid in effect_ids}
+        if preset is None:
+            preset = (
+                await command(
+                    ws,
+                    {
+                        "type": "create_preset",
+                        "rig_id": rig["id"],
+                        "name": args.name,
+                        "block_states": block_states,
                     },
-                }
-            )
-
-        await ws.send(
-            json.dumps(
-                {
-                    "type": "create_preset",
-                    "name": args.name,
-                    "blocks": blocks,
-                    "nam_asset_id": nam_asset_id,
-                    "ir_asset_id": ir_asset_id,
-                }
-            )
-        )
-        reply = json.loads(await ws.recv())
-        if reply["type"] != "command_ok":
-            raise RuntimeError(f"create_preset failed: {reply}")
-        await ws.recv()
-        preset = reply["result"]["preset"]
-        print(f"[load-test-preset] created preset {preset['id']} ({preset['name']!r}) with {len(blocks)} block(s)")
-
-        bank = next((b for b in state["banks"] if b["name"] == args.bank), None)
-        if bank is None:
-            await ws.send(json.dumps({"type": "create_bank", "name": args.bank, "num_slots": 4}))
-            reply = json.loads(await ws.recv())
-            if reply["type"] != "command_ok":
-                raise RuntimeError(f"create_bank failed: {reply}")
-            await ws.recv()
-            bank = reply["result"]["bank"]
-            print(f"[load-test-preset] created bank {bank['id']} ({args.bank!r})")
-
-        slot = next((i for i, pid in enumerate(bank["slots"]) if pid is None), None)
-        if slot is None:
-            raise RuntimeError(f"bank {args.bank!r} has no free slots -- pass --bank to use/create another one")
-
-        new_slots = list(bank["slots"])
-        new_slots[slot] = preset["id"]
-        await ws.send(json.dumps({"type": "update_bank", "bank_id": bank["id"], "slots": new_slots}))
-        reply = json.loads(await ws.recv())
-        if reply["type"] != "command_ok":
-            raise RuntimeError(f"update_bank failed: {reply}")
-        await ws.recv()
-        print(f"[load-test-preset] assigned {preset['name']!r} to bank {args.bank!r} slot {slot}")
+                )
+            )["preset"]
+            print(f"[load-test-preset] created preset {preset['id']} ({preset['name']!r}) in rig {args.rig!r}")
+        else:
+            preset = (
+                await command(
+                    ws,
+                    {
+                        "type": "update_preset",
+                        "rig_id": rig["id"],
+                        "preset_id": preset["id"],
+                        "block_states": block_states,
+                    },
+                )
+            )["preset"]
+            print(f"[load-test-preset] updated preset {preset['name']!r} in rig {args.rig!r}")
 
         if args.select:
-            await ws.send(json.dumps({"type": "select_preset", "preset_id": preset["id"]}))
-            reply = json.loads(await ws.recv())
-            if reply["type"] != "command_ok":
-                raise RuntimeError(f"select_preset failed: {reply}")
-            await ws.recv()
-            print(f"[load-test-preset] selected {preset['name']!r} as the active preset")
+            # select_preset addresses by position, not by id: presets live
+            # inside rigs, and two rigs may both have a preset called "Solo".
+            rig_index = next(
+                i for i, r in enumerate(latest_state["rigs"]) if r["id"] == rig["id"]
+            )
+            preset_index = next(
+                i
+                for i, p in enumerate(latest_state["rigs"][rig_index]["presets"])
+                if p["id"] == preset["id"]
+            )
+            await command(
+                ws,
+                {"type": "select_preset", "rig_index": rig_index, "preset_index": preset_index},
+            )
+            print(f"[load-test-preset] selected rig {args.rig!r} / preset {preset['name']!r}")
 
 
 def main() -> None:
@@ -172,7 +245,7 @@ def main() -> None:
     parser.add_argument("--name", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--bank", default="Test Bank")
+    parser.add_argument("--rig", default="Test Rig", help="rig to add these blocks to (created if missing)")
     parser.add_argument("--nam", help="path to a .nam file to upload+register (metadata only -- see module docstring)")
     parser.add_argument("--ir", help="path to a cabinet IR .wav file to upload+register (real convolution)")
     parser.add_argument("--gain-db", type=float, default=6.0)
