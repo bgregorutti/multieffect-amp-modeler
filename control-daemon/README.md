@@ -172,7 +172,7 @@ before the resulting broadcast copy on that same connection.
 ```
 `reason` is one of: `create_preset`, `update_preset`, `delete_preset`,
 `select_preset`, `create_bank`, `update_bank`, `reorder_banks`,
-`set_bypass`, `set_footswitch_mapping`, `register_asset`,
+`set_bypass`, `set_footswitch_mapping`, `register_asset`, `rename_asset`,
 `footswitch_next_bank`, `footswitch_prev_bank`, `footswitch_next_preset`,
 `footswitch_prev_preset`, `tap_tempo`.
 
@@ -234,8 +234,18 @@ before the resulting broadcast copy on that same connection.
 // below), or a .vst3 plugin bundle already installed out of band. For
 // "kind": "vst3" the resulting asset also carries the plugin's own
 // parameter schema (introspected by the engine as part of registering) --
-// see BlockParamDescriptor in models.py.
-{"type": "register_asset", "kind": "nam", "filename": "my_amp.nam", "stored_path": "/data/assets/abc123.nam", "size_bytes": 20971520, "sha256": "..."}
+// see BlockParamDescriptor in models.py. "display_name" is optional --
+// the user-facing label a mobile picker UI shows (e.g. "Crunch lampes
+// vintage") instead of the raw filename; omit it and the daemon defaults
+// it to "filename" so the stored asset's display_name is never actually
+// null.
+{"type": "register_asset", "kind": "nam", "filename": "my_amp.nam", "stored_path": "/data/assets/abc123.nam", "size_bytes": 20971520, "sha256": "...", "display_name": "Crunch lampes vintage"}
+
+// Rename an already-registered asset's display_name (e.g. the player
+// wants a nicer label than the register_asset-time default of
+// "filename"). Metadata only -- never touches the file on disk, its
+// checksum, or its engine registration.
+{"type": "rename_asset", "asset_id": "abc123", "display_name": "Crunch lampes vintage"}
 
 // Live, no-reload parameter tweak on one block within one preset (rig +
 // preset addressing -- see models.py's "Rigs and presets" docstring):

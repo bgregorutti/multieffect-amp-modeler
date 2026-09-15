@@ -57,6 +57,7 @@ from .ws_protocol import (
     HelloMessage,
     ListBlockTypesMessage,
     RegisterAssetMessage,
+    RenameAssetMessage,
     ReorderRigsMessage,
     SelectPresetMessage,
     SetBlockParamMessage,
@@ -401,6 +402,13 @@ def _apply(state_manager: DaemonStateManager, message) -> Optional[dict]:
             stored_path=message.stored_path,
             size_bytes=message.size_bytes,
             sha256=message.sha256,
+            display_name=message.display_name,
+        )
+        return {"asset": asset.model_dump(mode="json")}
+
+    if isinstance(message, RenameAssetMessage):
+        asset = state_manager.rename_asset(
+            asset_id=message.asset_id, display_name=message.display_name
         )
         return {"asset": asset.model_dump(mode="json")}
 

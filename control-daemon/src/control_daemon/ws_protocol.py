@@ -9,9 +9,9 @@ payloads. In short:
   ``footswitch_press`` events), or ``"display"`` (read-only, sends nothing
   but receives broadcasts).
 * App-only *commands* mutate state (create/update/delete rigs and the
-  presets inside them, bypass, footswitch mapping, asset registration).
-  Sending one from a non-"app" role gets a typed ``error`` with code
-  ``"role_forbidden"``.
+  presets inside them, bypass, footswitch mapping, asset registration and
+  renaming). Sending one from a non-"app" role gets a typed ``error`` with
+  code ``"role_forbidden"``.
 * ``footswitch_press`` is footswitch-only.
 * Every successful command gets a direct ``command_ok`` reply to the sender,
   and every state mutation is separately broadcast to *all* connected
@@ -129,6 +129,23 @@ class RegisterAssetMessage(BaseModel):
     stored_path: str
     size_bytes: int = 0
     sha256: Optional[str] = None
+    # Optional user-facing label (e.g. "Crunch lampes vintage") for the
+    # mobile picker UI. Omitting it defaults the stored asset's
+    # ``display_name`` to ``filename`` (see
+    # ``DaemonStateManager.register_asset``) -- it is never left ``None``
+    # in stored state.
+    display_name: Optional[str] = None
+
+
+class RenameAssetMessage(BaseModel):
+    """Change an already-registered asset's user-facing ``display_name``
+    (e.g. after the initial ``register_asset`` default of ``filename``
+    isn't the label the player actually wants). Mirrors the shape of other
+    simple single-field mutations like ``set_bypass``."""
+
+    type: Literal["rename_asset"] = "rename_asset"
+    asset_id: str
+    display_name: str
 
 
 class SetBlockParamMessage(BaseModel):
@@ -178,6 +195,7 @@ APP_ONLY_MESSAGES = {
     "set_bypass": SetBypassMessage,
     "set_footswitch_mapping": SetFootswitchMappingMessage,
     "register_asset": RegisterAssetMessage,
+    "rename_asset": RenameAssetMessage,
     "set_block_param": SetBlockParamMessage,
     "list_block_types": ListBlockTypesMessage,
 }
