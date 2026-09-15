@@ -262,6 +262,87 @@ def test_register_asset_duplicate_is_refused_over_ws(client: TestClient):
         assert err["code"] == "duplicate_asset"
 
 
+def test_register_asset_without_display_name_defaults_to_filename(client: TestClient):
+    payload = b"fake nam model bytes"
+    body = client.post(
+        "/assets/upload?kind=nam&filename=my_amp.nam", content=payload
+    ).json()
+
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+        ws.send_json(
+            {
+                "type": "register_asset",
+                "kind": body["kind"],
+                "filename": body["filename"],
+                "stored_path": body["stored_path"],
+                "size_bytes": body["size_bytes"],
+                "sha256": body["sha256"],
+            }
+        )
+        ack = ws.receive_json()
+        assert ack["result"]["asset"]["display_name"] == "my_amp.nam"
+
+
+def test_rename_asset_over_ws_updates_and_broadcasts(client: TestClient):
+    payload = b"fake nam model bytes"
+    body = client.post(
+        "/assets/upload?kind=nam&filename=my_amp.nam", content=payload
+    ).json()
+
+    with client.websocket_connect("/ws") as app_ws, client.websocket_connect(
+        "/ws"
+    ) as display_ws:
+        _hello(app_ws, "app")
+        _hello(display_ws, "display")
+
+        app_ws.send_json(
+            {
+                "type": "register_asset",
+                "kind": body["kind"],
+                "filename": body["filename"],
+                "stored_path": body["stored_path"],
+                "size_bytes": body["size_bytes"],
+                "sha256": body["sha256"],
+            }
+        )
+        register_ack = app_ws.receive_json()
+        asset_id = register_ack["result"]["asset"]["id"]
+        app_ws.receive_json()  # self broadcast
+        display_ws.receive_json()  # display broadcast
+
+        app_ws.send_json(
+            {
+                "type": "rename_asset",
+                "asset_id": asset_id,
+                "display_name": "Crunch lampes vintage",
+            }
+        )
+        rename_ack = app_ws.receive_json()
+        assert rename_ack["type"] == "command_ok"
+        assert rename_ack["command"] == "rename_asset"
+        assert rename_ack["result"]["asset"]["display_name"] == "Crunch lampes vintage"
+
+        app_ws.receive_json()  # self broadcast
+
+        display_broadcast = display_ws.receive_json()
+        assert display_broadcast["type"] == "state_changed"
+        assert display_broadcast["reason"] == "rename_asset"
+        assets = display_broadcast["state"]["assets"]
+        assert assets[asset_id]["display_name"] == "Crunch lampes vintage"
+
+
+def test_rename_asset_unknown_id_returns_not_found(client: TestClient):
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+        ws.send_json(
+            {"type": "rename_asset", "asset_id": "nope", "display_name": "X"}
+        )
+        reply = ws.receive_json()
+        assert reply["type"] == "error"
+        assert reply["code"] == "not_found"
+
+
 def test_list_block_types_is_a_pure_query(client: TestClient):
     with client.websocket_connect("/ws") as ws:
         _hello(ws, "app")

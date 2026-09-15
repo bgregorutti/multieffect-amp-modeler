@@ -448,6 +448,45 @@ def test_register_asset_leaves_parameters_none_for_native_kinds(manager):
     assert asset.parameters is None
 
 
+def test_register_asset_defaults_display_name_to_filename(manager):
+    """display_name is optional on the wire but never actually null in
+    stored state -- an omitted one defaults to the raw filename."""
+    asset = manager.register_asset(
+        kind=AssetKind.NAM, filename="my_amp.nam", stored_path="/x/my_amp.nam"
+    )
+    assert asset.display_name == "my_amp.nam"
+
+
+def test_register_asset_honors_explicit_display_name(manager):
+    asset = manager.register_asset(
+        kind=AssetKind.NAM,
+        filename="my_amp.nam",
+        stored_path="/x/my_amp.nam",
+        display_name="Crunch lampes vintage",
+    )
+    assert asset.display_name == "Crunch lampes vintage"
+
+
+def test_rename_asset_updates_display_name_and_broadcasts(manager):
+    asset = manager.register_asset(
+        kind=AssetKind.NAM, filename="my_amp.nam", stored_path="/x/my_amp.nam"
+    )
+    manager.changes.clear()
+
+    renamed = manager.rename_asset(asset.id, "Crunch lampes vintage")
+
+    assert renamed.id == asset.id
+    assert renamed.display_name == "Crunch lampes vintage"
+    assert manager.state.assets[asset.id].display_name == "Crunch lampes vintage"
+    assert manager.changes == ["rename_asset"]
+
+
+def test_rename_asset_unknown_id_raises_not_found(manager):
+    with pytest.raises(StateError) as exc:
+        manager.rename_asset("nope", "New Name")
+    assert exc.value.code == "not_found"
+
+
 def test_block_can_reference_a_registered_asset(manager):
     asset = manager.register_asset(
         kind=AssetKind.IR, filename="cab.wav", stored_path="/x/cab.wav"
