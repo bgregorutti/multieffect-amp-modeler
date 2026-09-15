@@ -5,10 +5,14 @@
 // AUDIO_ENGINE_WITH_VST3 is ON.
 #include "audio_engine/vst3_host.hpp"
 
+#include <memory>
 #include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
+
+#include "audio_engine/engine_state.hpp"
+#include "audio_engine/resource_manager.hpp"
 
 using namespace audio_engine;
 
@@ -62,6 +66,26 @@ TEST(Vst3Host, SetParamWithUnknownKeyReturnsFalse) {
     auto plugin = loadVst3Plugin(bundleDir());
     plugin->prepare(48000.0);
     EXPECT_FALSE(plugin->setParam("999", 1.0));
+}
+
+TEST(Vst3Host, RegisterAssetIntrospectsTheGainParameterIntoTheReply) {
+    // Exercises EngineState::handleRegisterAsset's VST3 case end to end --
+    // register_asset for a "vst3" asset should come back with the exact
+    // same parameter schema Vst3Host.ExposesTheGainParameterDescriptor
+    // gets directly from listParameters().
+    EngineState state(std::make_shared<FileAssetLoader>());
+    auto reply = state.handleCommand({{"cmd", "register_asset"},
+                                       {"asset",
+                                        {{"id", "plug1"},
+                                         {"kind", "vst3"},
+                                         {"filename", "GainTest.vst3"},
+                                         {"stored_path", bundleDir()}}}});
+    ASSERT_TRUE(reply["ok"].get<bool>()) << reply.dump();
+    ASSERT_TRUE(reply.contains("parameters"));
+    ASSERT_EQ(reply["parameters"].size(), 1u);
+    EXPECT_EQ(reply["parameters"][0]["key"], "0");
+    EXPECT_EQ(reply["parameters"][0]["label"], "Gain");
+    EXPECT_NEAR(reply["parameters"][0]["default"].get<double>(), 1.0, 1e-9);
 }
 
 TEST(Vst3Host, ProcessHandlesBlocksLargerThanTheInternalChunkSize) {

@@ -260,3 +260,94 @@ def test_register_asset_duplicate_is_refused_over_ws(client: TestClient):
         err = ws.receive_json()
         assert err["type"] == "error"
         assert err["code"] == "duplicate_asset"
+
+
+def test_list_block_types_is_a_pure_query(client: TestClient):
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+        ws.send_json({"type": "list_block_types"})
+        ack = ws.receive_json()
+        assert ack["type"] == "command_ok"
+        assert ack["command"] == "list_block_types"
+        assert "block_types" in ack["result"]
+
+        # A read-only query never mutates state, so a second app connection
+        # sees nothing -- if list_block_types had (wrongly) broadcast a
+        # state_changed, this second client would receive it right after
+        # its own hello snapshot instead of the create_rig below being its
+        # first observed change.
+        with client.websocket_connect("/ws") as other_ws:
+            _hello(other_ws, "app")
+            ws.send_json({"type": "create_rig", "name": "R", "chain": []})
+            ws.receive_json()  # command_ok on the sender
+            assert other_ws.receive_json()["reason"] == "create_rig"
+
+
+def test_set_block_param_mutates_the_active_preset_and_broadcasts(client: TestClient):
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+
+        ws.send_json(
+            {
+                "type": "create_rig",
+                "name": "Ampeg SVT",
+                "chain": [
+                    {"id": "amp", "type": "nam", "pinned": True},
+                    {"id": "dist", "type": "distortion", "enabled": True},
+                ],
+            }
+        )
+        rig_id = ws.receive_json()["result"]["rig"]["id"]
+        ws.receive_json()  # state_changed
+
+        ws.send_json({"type": "create_preset", "rig_id": rig_id, "name": "Drive"})
+        preset_id = ws.receive_json()["result"]["preset"]["id"]
+        ws.receive_json()  # state_changed
+
+        ws.send_json({"type": "select_preset", "rig_index": 0, "preset_index": 0})
+        ws.receive_json()  # command_ok
+        ws.receive_json()  # state_changed
+
+        ws.send_json(
+            {
+                "type": "set_block_param",
+                "rig_id": rig_id,
+                "preset_id": preset_id,
+                "block_id": "dist",
+                "param_key": "gain_db",
+                "value": 6.0,
+            }
+        )
+        ack = ws.receive_json()
+        assert ack["type"] == "command_ok"
+        assert ack["result"]["preset"]["block_states"]["dist"]["params"]["gain_db"] == 6.0
+
+        broadcast = ws.receive_json()
+        assert broadcast["type"] == "state_changed"
+        assert broadcast["reason"] == "set_block_param"
+
+
+def test_set_block_param_unknown_block_is_a_validation_error(client: TestClient):
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+        ws.send_json({"type": "create_rig", "name": "R", "chain": []})
+        rig_id = ws.receive_json()["result"]["rig"]["id"]
+        ws.receive_json()  # state_changed
+
+        ws.send_json({"type": "create_preset", "rig_id": rig_id, "name": "P"})
+        preset_id = ws.receive_json()["result"]["preset"]["id"]
+        ws.receive_json()  # state_changed
+
+        ws.send_json(
+            {
+                "type": "set_block_param",
+                "rig_id": rig_id,
+                "preset_id": preset_id,
+                "block_id": "nope",
+                "param_key": "gain_db",
+                "value": 1.0,
+            }
+        )
+        err = ws.receive_json()
+        assert err["type"] == "error"
+        assert err["code"] == "validation_error"

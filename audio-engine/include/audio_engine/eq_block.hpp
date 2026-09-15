@@ -43,6 +43,8 @@ public:
     // three of these.
     void setGainDb(double gainDb);
     double gainDb() const { return gainDb_; }
+    // Recognizes "gain_db" -- freq_hz/q are set at construction only for now.
+    bool setLiveParam(const std::string& key, double value) override;
 
     // Exposed for unit testing coefficient correctness / stability directly.
     struct Coefficients {

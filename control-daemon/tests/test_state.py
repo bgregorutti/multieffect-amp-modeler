@@ -3,7 +3,7 @@ selection transitions, bypass, asset dedup, and footswitch mapping -> state
 change (including tap tempo)."""
 
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import pytest
 
@@ -11,6 +11,7 @@ from control_daemon.audio_engine_client import AudioEngineClient
 from control_daemon.models import (
     Asset,
     AssetKind,
+    BlockParamDescriptor,
     EffectBlock,
     NextPresetAction,
     NextRigAction,
@@ -32,6 +33,11 @@ class RecordingAudioEngine(AudioEngineClient):
         self.bypass_calls: List[bool] = []
         self.tempo_calls: List[float] = []
         self.registered_assets: List[str] = []
+        self.block_param_calls: List[tuple] = []
+        # Test hook: set to a list before calling register_asset to make it
+        # return that as the introspected VST3 parameter schema (mirrors a
+        # real engine's register_asset reply for a "vst3" asset).
+        self.next_register_asset_parameters: Optional[List[BlockParamDescriptor]] = None
 
     def load_preset(self, preset) -> None:
         self.loaded_presets.append(preset.id)
@@ -45,8 +51,15 @@ class RecordingAudioEngine(AudioEngineClient):
     def set_tempo(self, bpm: float) -> None:
         self.tempo_calls.append(bpm)
 
-    def register_asset(self, asset: Asset) -> None:
+    def register_asset(self, asset: Asset) -> Optional[List[BlockParamDescriptor]]:
         self.registered_assets.append(asset.id)
+        return self.next_register_asset_parameters
+
+    def set_block_param(self, block_id: str, param_key: str, value: float) -> None:
+        self.block_param_calls.append((block_id, param_key, value))
+
+    def list_block_types(self) -> List[dict]:
+        return [{"type": "gain", "parameters": [{"key": "gain_db", "label": "Gain", "unit": "dB"}]}]
 
 
 class FakeClock:
@@ -391,6 +404,21 @@ def test_register_asset_without_checksum_is_not_deduped(manager):
     assert {first.id, second.id} == set(manager.state.assets)
 
 
+def test_register_asset_captures_vst3_parameters_from_engine(manager):
+    manager.engine.next_register_asset_parameters = [
+        BlockParamDescriptor(key="0", label="Gain", unit="x", min=0.0, max=2.0, default=1.0)
+    ]
+    asset = manager.register_asset(
+        kind=AssetKind.VST3, filename="Test.vst3", stored_path="/plugins/Test.vst3"
+    )
+    assert asset.parameters == manager.engine.next_register_asset_parameters
+
+
+def test_register_asset_leaves_parameters_none_for_native_kinds(manager):
+    asset = manager.register_asset(kind=AssetKind.NAM, filename="a.nam", stored_path="/x/a.nam")
+    assert asset.parameters is None
+
+
 def test_block_can_reference_a_registered_asset(manager):
     asset = manager.register_asset(
         kind=AssetKind.IR, filename="cab.wav", stored_path="/x/cab.wav"
@@ -399,6 +427,70 @@ def test_block_can_reference_a_registered_asset(manager):
         name="R", chain=[EffectBlock(type="ir", asset_id=asset.id, pinned=True)]
     )
     assert rig.chain[0].asset_id == asset.id
+
+
+# -- set_block_param / list_block_types --------------------------------------
+
+
+def test_set_block_param_mutates_live_preset_and_forwards_when_active(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(
+        rig_id=rig.id, name="P1", block_states={"dist": PresetBlockState(enabled=True)}
+    )
+    manager.select_preset(rig_index=0, preset_index=0)
+
+    updated = manager.set_block_param(rig.id, preset.id, "dist", "gain_db", 6.0)
+
+    assert updated.block_states["dist"].params["gain_db"] == 6.0
+    assert updated.block_states["dist"].enabled is True  # existing override not clobbered
+    assert manager.engine.block_param_calls == [("dist", "gain_db", 6.0)]
+
+
+def test_set_block_param_does_not_forward_when_preset_is_not_active(manager):
+    rig = _bass_rig(manager)
+    preset_a = manager.create_preset(rig_id=rig.id, name="A")
+    preset_b = manager.create_preset(rig_id=rig.id, name="B")
+    manager.select_preset(rig_index=0, preset_index=0)  # preset_a is active, not preset_b
+
+    manager.set_block_param(rig.id, preset_b.id, "dist", "gain_db", 6.0)
+
+    assert manager.engine.block_param_calls == []
+    assert preset_b.block_states["dist"].params["gain_db"] == 6.0  # still persisted
+
+
+def test_set_block_param_creates_a_block_state_when_none_existed(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig_id=rig.id, name="P1")  # no block_states at all
+
+    updated = manager.set_block_param(rig.id, preset.id, "fuzz", "gain_db", 3.0)
+
+    assert updated.block_states["fuzz"].params == {"gain_db": 3.0}
+
+
+def test_set_block_param_unknown_block_id_is_a_validation_error(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig_id=rig.id, name="P1")
+
+    with pytest.raises(StateError) as exc:
+        manager.set_block_param(rig.id, preset.id, "nope", "gain_db", 1.0)
+    assert exc.value.code == "validation_error"
+
+
+def test_set_block_param_unknown_rig_or_preset_is_not_found(manager):
+    rig = _bass_rig(manager)
+    preset = manager.create_preset(rig_id=rig.id, name="P1")
+
+    with pytest.raises(StateError) as exc:
+        manager.set_block_param("no-such-rig", preset.id, "dist", "gain_db", 1.0)
+    assert exc.value.code == "not_found"
+
+    with pytest.raises(StateError) as exc:
+        manager.set_block_param(rig.id, "no-such-preset", "dist", "gain_db", 1.0)
+    assert exc.value.code == "not_found"
+
+
+def test_list_block_types_proxies_to_engine(manager):
+    assert manager.list_block_types() == manager.engine.list_block_types()
 
 
 # -- footswitch mapping -> state change --------------------------------------

@@ -101,6 +101,16 @@ struct EngineChain {
     // which reserves `effects` up front so these stay valid.
     std::vector<EffectBlock*> processOrder;
 
+    // Every *enabled* block, keyed by its EffectBlockSpec::id -- lets a
+    // live-update command (set_block_param) find one block in the current
+    // chain by id without walking processOrder, non-owning like
+    // processOrder for the same reason. A disabled block was never
+    // constructed at all (see ResourceManager::loadPreset), so it simply
+    // isn't a key here -- looking one up fails the same way an unknown id
+    // would, which is the right behavior (nothing to tweak on a block that
+    // isn't running).
+    std::map<std::string, EffectBlock*> blocksById;
+
     // Runs the whole chain over `buffer` in place, walking `processOrder`
     // -- i.e. the exact block order the daemon sent, amp and cab included,
     // since where the cab sits relative to the effects is audible and is

@@ -1,6 +1,8 @@
 #include "audio_engine/engine_state.hpp"
 
+#include "audio_engine/block_type_registry.hpp"
 #include "audio_engine/nam_model.hpp"
+#include "audio_engine/vst3_host.hpp"
 #include "audio_engine/wav_file.hpp"
 
 namespace audio_engine {
@@ -60,6 +62,8 @@ json EngineState::handleCommand(const json& command) {
         if (cmd == "set_bypass") return handleSetBypass(command);
         if (cmd == "crossfade_ms") return handleCrossfadeMs(command);
         if (cmd == "register_asset") return handleRegisterAsset(command);
+        if (cmd == "set_block_param") return handleSetBlockParam(command);
+        if (cmd == "list_block_types") return handleListBlockTypes();
         if (cmd == "get_state") return handleGetState();
     } catch (const PresetParseError& e) {
         return makeError(EngineErrorCode::ValidationError, e.what());
@@ -116,7 +120,67 @@ json EngineState::handleRegisterAsset(const json& command) {
     }
     Asset asset = it->get<Asset>();  // throws PresetParseError on malformed shape
     resourceManager_.registerAsset(asset);
-    return json{{"ok", true}, {"cmd", "register_asset"}, {"asset_id", asset.id}};
+
+    json reply{{"ok", true}, {"cmd", "register_asset"}, {"asset_id", asset.id}};
+    if (asset.kind == AssetKind::Vst3) {
+        // A throwaway instantiation purely to introspect parameters -- the
+        // persistent instance a block actually plays through is created
+        // later, when a preset references this asset_id
+        // (ResourceManager::loadPreset). Lets the daemon fold "parameters"
+        // straight into its Asset record from this one reply, rather than
+        // needing a second round-trip once a rig actually uses the plugin.
+        auto plugin = loadVst3Plugin(asset.stored_path);
+        json parameters = json::array();
+        for (const auto& param : plugin->listParameters()) {
+            parameters.push_back(json{
+                {"key", param.key},
+                {"label", param.label},
+                {"unit", param.unit},
+                {"min", param.minValue},
+                {"max", param.maxValue},
+                {"default", param.defaultValue},
+                {"step_count", param.stepCount},
+            });
+        }
+        reply["parameters"] = std::move(parameters);
+    }
+    return reply;
+}
+
+json EngineState::handleSetBlockParam(const json& command) {
+    auto blockIdIt = command.find("block_id");
+    auto keyIt = command.find("param_key");
+    auto valueIt = command.find("value");
+    if (blockIdIt == command.end() || !blockIdIt->is_string() || keyIt == command.end() || !keyIt->is_string() ||
+        valueIt == command.end() || !valueIt->is_number()) {
+        return makeError(EngineErrorCode::ValidationError,
+                          "set_block_param requires string fields 'block_id'/'param_key' and a numeric field 'value'");
+    }
+    std::string blockId = blockIdIt->get<std::string>();
+    std::string paramKey = keyIt->get<std::string>();
+    double value = valueIt->get<double>();
+
+    EngineChain* chain = resourceManager_.currentChain();
+    if (chain == nullptr) {
+        return makeError(EngineErrorCode::NotFound, "no preset is currently loaded");
+    }
+    auto blockIt = chain->blocksById.find(blockId);
+    if (blockIt == chain->blocksById.end()) {
+        return makeError(EngineErrorCode::NotFound,
+                          "no enabled block with id '" + blockId + "' in the current chain");
+    }
+    // Mutates the already-loaded chain in place -- no ResourceManager::loadPreset
+    // call, same "live, not a reload" contract as set_bypass.
+    if (!blockIt->second->setLiveParam(paramKey, value)) {
+        return makeError(EngineErrorCode::ValidationError,
+                          "block '" + blockId + "' does not recognize param '" + paramKey + "'");
+    }
+    return json{
+        {"ok", true}, {"cmd", "set_block_param"}, {"block_id", blockId}, {"param_key", paramKey}, {"value", value}};
+}
+
+json EngineState::handleListBlockTypes() const {
+    return json{{"ok", true}, {"cmd", "list_block_types"}, {"block_types", listNativeBlockTypes()}};
 }
 
 void EngineState::processAudioBlock(float* buffer, std::size_t numSamples) {

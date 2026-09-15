@@ -117,15 +117,43 @@ class SetFootswitchMappingMessage(BaseModel):
 
 class RegisterAssetMessage(BaseModel):
     """Registers metadata for a .nam/IR file already uploaded via the plain
-    HTTP ``POST /assets/upload`` endpoint (see app.py / README for why
-    binary upload deliberately does not go over this WS protocol)."""
+    HTTP ``POST /assets/upload`` endpoint, or a ``.vst3`` plugin bundle
+    already installed out of band (see app.py / README for why binary
+    upload deliberately does not go over this WS protocol, and why a
+    ``.vst3`` bundle -- a directory -- doesn't fit that upload endpoint at
+    all)."""
 
     type: Literal["register_asset"] = "register_asset"
-    kind: Literal["nam", "ir"]
+    kind: Literal["nam", "ir", "vst3"]
     filename: str
     stored_path: str
     size_bytes: int = 0
     sha256: Optional[str] = None
+
+
+class SetBlockParamMessage(BaseModel):
+    """Live, no-reload parameter tweak on one block within one preset.
+
+    Persists into that preset's ``block_states[block_id].params`` override
+    (see ``PresetBlockState``) -- not the rig block's own default -- and is
+    forwarded to the engine only when this rig/preset is the one actually
+    playing (see ``DaemonStateManager.set_block_param``).
+    """
+
+    type: Literal["set_block_param"] = "set_block_param"
+    rig_id: str
+    preset_id: str
+    block_id: str
+    param_key: str
+    value: float
+
+
+class ListBlockTypesMessage(BaseModel):
+    """Static parameter schema for every native block type this engine
+    build recognizes. Static per engine build, not per-rig state -- a
+    client fetches this once (e.g. on connect), not per preset."""
+
+    type: Literal["list_block_types"] = "list_block_types"
 
 
 class FootswitchPressMessage(BaseModel):
@@ -150,6 +178,8 @@ APP_ONLY_MESSAGES = {
     "set_bypass": SetBypassMessage,
     "set_footswitch_mapping": SetFootswitchMappingMessage,
     "register_asset": RegisterAssetMessage,
+    "set_block_param": SetBlockParamMessage,
+    "list_block_types": ListBlockTypesMessage,
 }
 
 FOOTSWITCH_ONLY_MESSAGES = {

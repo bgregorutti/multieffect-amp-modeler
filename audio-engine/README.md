@@ -591,12 +591,13 @@ be buildable) are for later manual/hardware validation, not this test.
 | Module (`include/audio_engine/` + `src/`) | Responsibility |
 |---|---|
 | `preset_model`   | `Preset`/`Asset`/`EffectBlockSpec` structs + JSON (de)serialization, shaped identically to `control-daemon`'s Pydantic models (see "Shared data model" below) |
-| `effect_block`   | `EffectBlock` interface (`prepare(sampleRate)`, `process(buffer)`) implemented by every DSP block |
+| `effect_block`   | `EffectBlock` interface (`prepare(sampleRate)`, `process(buffer)`, optional `setLiveParam(key, value)` for a no-reload tweak) implemented by every DSP block |
 | `passthrough_block` | Identity `EffectBlock` -- test baseline / safe fallback for an unrecognized block type |
 | `gain_block`       | Gain block (`gain_db` param) -- built for block types `"gain"` (input trim) and `"volume"` (output level): same DSP, two type names so a rig's chain can tell them apart |
 | `eq_block`           | Biquad peaking/shelving EQ (RBJ Audio EQ Cookbook formulas); `setGainDb`/`gainDb()` support live boost/cut updates without reconstructing the block |
 | `tone_stack_block`     | 3-band tone stack (block type `"tone_stack"`, `{bass_db, mid_db, treble_db}` params) composing three `EqBlock`s (low-shelf/peaking/high-shelf) -- tone shaping around a NAM capture isn't part of the captured model itself, see "Rig chain: the gain stages around a NAM capture" below |
-| `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params) |
+| `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params, all three live-settable via `setLiveParam`) |
+| `block_type_registry`     | Static per-type parameter schema (label/unit/min/max/default) for every native block type -- backs the `list_block_types` command, see "Commands" below |
 | `wav_file`               | Hand-rolled RIFF/WAVE parser (reads PCM16/PCM24/PCM32/float32, mono or downmixed) + writer (PCM16/float32) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
 | `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate and truncates to a real-time-safe length (see "Real-time-safe IR length cap") |
@@ -717,14 +718,48 @@ used for the next preset switch:
 {"ok": true, "cmd": "crossfade_ms", "value": 50}
 ```
 
-**`register_asset`** -- registers metadata for a `.nam`/IR file already
-written to disk (mirrors control-daemon's own `register_asset` WS
+**`register_asset`** -- registers metadata for a `.nam`/IR/`.vst3` asset
+already on disk (mirrors control-daemon's own `register_asset` WS
 command/`Asset` shape -- see control-daemon/README.md):
 ```json
 {"cmd": "register_asset", "asset": {"id": "nam1", "kind": "nam", "filename": "my_amp.nam", "stored_path": "/data/assets/nam1.nam", "size_bytes": 20971520, "sha256": "..."}}
 ```
 ```json
 {"ok": true, "cmd": "register_asset", "asset_id": "nam1"}
+```
+For `"kind": "vst3"`, the reply also carries the plugin's own parameter
+schema (a throwaway instantiation purely to introspect it -- see "VST3
+plugin hosting" above) so the daemon never needs a second round-trip to
+learn what knobs a plugin has:
+```json
+{"ok": true, "cmd": "register_asset", "asset_id": "plug1", "parameters": [{"key": "0", "label": "Gain", "unit": "x", "min": 0.0, "max": 2.0, "default": 1.0, "step_count": 0}]}
+```
+
+**`set_block_param`** -- live, no-reload parameter tweak on one block of
+the *currently loaded* chain, addressed by the block's own id (native
+block's own param key, e.g. `"gain_db"`; a `"vst3"` block's stringified
+VST3 `ParamID`, from `register_asset`'s or `list_block_types`'
+`"parameters"`). Mutates the block in place, guarded by the same mutex
+`processAudioBlock` uses -- never calls `load_preset`:
+```json
+{"cmd": "set_block_param", "block_id": "boost", "param_key": "gain_db", "value": 6.0}
+```
+```json
+{"ok": true, "cmd": "set_block_param", "block_id": "boost", "param_key": "gain_db", "value": 6.0}
+```
+`not_found` if no preset is loaded or no *enabled* block with that id
+exists in the current chain; `validation_error` if the block doesn't
+recognize `param_key`.
+
+**`list_block_types`** -- static parameter schema for every native
+(non-`"vst3"`) block type this engine build recognizes -- see
+`block_type_registry.hpp`. Static per engine build, not per-rig state, so
+a client fetches this once (e.g. on connect) rather than per preset:
+```json
+{"cmd": "list_block_types"}
+```
+```json
+{"ok": true, "cmd": "list_block_types", "block_types": [{"type": "gain", "parameters": [{"key": "gain_db", "label": "Gain", "unit": "dB", "min": -60.0, "max": 24.0, "default": 0.0, "step_count": 0}]}, ...]}
 ```
 
 **`get_state`** -- debug/query command, reads back current engine state

@@ -19,8 +19,18 @@ public:
     void prepare(double sampleRate) override;
     void process(float* buffer, std::size_t numSamples) override;
     void reset() override;
+    // Recognizes "delay_ms" (resizes the delay line, clearing it -- same
+    // "an audible reset is an acceptable cost of changing delay time live"
+    // tradeoff a real delay pedal has), "feedback" and "mix" (pure scalar
+    // changes, no reallocation).
+    bool setLiveParam(const std::string& key, double value) override;
+
+    void setDelayMs(double delayMs);
+    void setFeedback(double feedback);
+    void setMix(double mix);
 
     std::size_t delaySamples() const { return delaySamples_; }
+    double delayMs() const { return delayMs_; }
     double feedback() const { return feedback_; }
     double mix() const { return mix_; }
 

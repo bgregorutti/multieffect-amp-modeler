@@ -47,4 +47,20 @@ void ToneStackBlock::reset() {
     treble_.reset();
 }
 
+bool ToneStackBlock::setLiveParam(const std::string& key, double value) {
+    if (key == "bass_db") {
+        setBassDb(value);
+        return true;
+    }
+    if (key == "mid_db") {
+        setMidDb(value);
+        return true;
+    }
+    if (key == "treble_db") {
+        setTrebleDb(value);
+        return true;
+    }
+    return false;
+}
+
 }  // namespace audio_engine

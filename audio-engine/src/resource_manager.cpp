@@ -131,7 +131,10 @@ void ResourceManager::loadPreset(const Preset& preset) {
             if (!blockSpec.asset_id.has_value()) continue;
             const Asset& asset = assets_.at(*blockSpec.asset_id);
             chain->namModel = loader_->loadNam(asset.stored_path);
-            if (chain->namModel) chain->processOrder.push_back(chain->namModel.get());
+            if (chain->namModel) {
+                chain->processOrder.push_back(chain->namModel.get());
+                chain->blocksById[blockSpec.id] = chain->namModel.get();
+            }
             continue;
         }
         if (blockSpec.type == "ir") {
@@ -141,6 +144,7 @@ void ResourceManager::loadPreset(const Preset& preset) {
             if (!chain->ir) continue;
             chain->cabinet = std::make_unique<ConvolutionEngine>(chain->ir->samples);
             chain->processOrder.push_back(chain->cabinet.get());
+            chain->blocksById[blockSpec.id] = chain->cabinet.get();
             continue;
         }
 
@@ -153,11 +157,13 @@ void ResourceManager::loadPreset(const Preset& preset) {
             const Asset& asset = assets_.at(*blockSpec.asset_id);
             chain->effects.push_back(loader_->loadVst3(asset.stored_path));
             chain->processOrder.push_back(chain->effects.back().get());
+            chain->blocksById[blockSpec.id] = chain->effects.back().get();
             continue;
         }
 
         chain->effects.push_back(createEffectBlock(blockSpec));
         chain->processOrder.push_back(chain->effects.back().get());
+        chain->blocksById[blockSpec.id] = chain->effects.back().get();
     }
 
     chain->prepare(sampleRate_);

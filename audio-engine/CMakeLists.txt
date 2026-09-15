@@ -24,6 +24,7 @@ find_package(Threads REQUIRED)
 # --- Core library (everything except main.cpp) -------------------------
 add_library(audio_engine_core
   src/preset_model.cpp
+  src/block_type_registry.cpp
   src/gain_block.cpp
   src/eq_block.cpp
   src/tone_stack_block.cpp

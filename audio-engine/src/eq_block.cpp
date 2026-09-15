@@ -38,6 +38,12 @@ void EqBlock::setGainDb(double gainDb) {
     recomputeCoefficients();
 }
 
+bool EqBlock::setLiveParam(const std::string& key, double value) {
+    if (key != "gain_db") return false;
+    setGainDb(value);
+    return true;
+}
+
 void EqBlock::prepare(double sampleRate) {
     sampleRate_ = sampleRate;
     recomputeCoefficients();

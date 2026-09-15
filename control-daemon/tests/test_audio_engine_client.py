@@ -17,7 +17,7 @@ from typing import List
 import pytest
 
 from control_daemon.audio_engine_client import UnixSocketAudioEngineClient
-from control_daemon.models import Asset, AssetKind, Preset
+from control_daemon.models import Asset, AssetKind, BlockParamDescriptor, Preset
 
 
 class FakeEngineServer:
@@ -29,6 +29,10 @@ class FakeEngineServer:
         self.socket_path = socket_path
         self.received: List[dict] = []
         self.reject_next = False
+        # Merged into the next reply -- lets a test simulate e.g.
+        # register_asset's "parameters" field or list_block_types'
+        # "block_types" field without a real engine process.
+        self.extra_reply_fields: dict = {}
         self._listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self._listener.bind(str(socket_path))
         self._listener.listen(1)
@@ -57,7 +61,7 @@ class FakeEngineServer:
                         reply = {"ok": False, "code": "validation_error", "message": "nope"}
                         self.reject_next = False
                     else:
-                        reply = {"ok": True, "cmd": command.get("cmd")}
+                        reply = {"ok": True, "cmd": command.get("cmd"), **self.extra_reply_fields}
                     conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
 
     def close(self) -> None:
@@ -134,3 +138,61 @@ def test_set_tempo_is_a_documented_noop(fake_engine):
     client.close()
 
     assert fake_engine.received == []
+
+
+def test_register_asset_returns_none_when_reply_has_no_parameters(fake_engine):
+    # The real engine only ever adds "parameters" for a "vst3" asset --
+    # this is what a nam/ir register_asset reply actually looks like.
+    client = UnixSocketAudioEngineClient(fake_engine.socket_path)
+    asset = Asset(kind=AssetKind.NAM, filename="amp.nam", stored_path="/data/assets/amp.nam")
+
+    result = client.register_asset(asset)
+    client.close()
+
+    assert result is None
+
+
+def test_register_asset_parses_vst3_parameters_from_the_reply(fake_engine):
+    fake_engine.extra_reply_fields = {
+        "parameters": [{"key": "0", "label": "Gain", "unit": "x", "min": 0.0, "max": 2.0, "default": 1.0, "step_count": 0}]
+    }
+    client = UnixSocketAudioEngineClient(fake_engine.socket_path)
+    asset = Asset(kind=AssetKind.VST3, filename="Test.vst3", stored_path="/plugins/Test.vst3")
+
+    result = client.register_asset(asset)
+    client.close()
+
+    assert result == [BlockParamDescriptor(key="0", label="Gain", unit="x", min=0.0, max=2.0, default=1.0, step_count=0)]
+
+
+def test_set_block_param_sends_matching_json(fake_engine):
+    client = UnixSocketAudioEngineClient(fake_engine.socket_path)
+
+    client.set_block_param("boost", "gain_db", 6.0)
+    client.close()
+
+    assert len(fake_engine.received) == 1
+    command = fake_engine.received[0]
+    assert command["cmd"] == "set_block_param"
+    assert command["block_id"] == "boost"
+    assert command["param_key"] == "gain_db"
+    assert command["value"] == 6.0
+
+
+def test_list_block_types_returns_the_reply_field(fake_engine):
+    fake_engine.extra_reply_fields = {"block_types": [{"type": "gain", "parameters": []}]}
+    client = UnixSocketAudioEngineClient(fake_engine.socket_path)
+
+    result = client.list_block_types()
+    client.close()
+
+    assert result == [{"type": "gain", "parameters": []}]
+
+
+def test_list_block_types_returns_empty_when_engine_unreachable(tmp_path: Path):
+    client = UnixSocketAudioEngineClient(tmp_path / "no_such.sock", timeout=0.2)
+
+    result = client.list_block_types()
+    client.close()
+
+    assert result == []

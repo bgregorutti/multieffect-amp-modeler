@@ -19,9 +19,9 @@ import socket
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Union
+from typing import List, Optional, Union
 
-from .models import Asset, ResolvedPreset
+from .models import Asset, BlockParamDescriptor, ResolvedPreset
 
 logger = logging.getLogger("control_daemon.audio_engine")
 
@@ -45,9 +45,25 @@ class AudioEngineClient(ABC):
         """Update the engine's tempo (e.g. for tempo-synced effects)."""
 
     @abstractmethod
-    def register_asset(self, asset: Asset) -> None:
-        """Register a newly-uploaded .nam/IR asset's metadata so a later
-        load_preset() referencing its id can resolve it."""
+    def register_asset(self, asset: Asset) -> Optional[List[BlockParamDescriptor]]:
+        """Register a newly-uploaded .nam/IR asset's (or installed .vst3
+        bundle's) metadata so a later load_preset() referencing its id can
+        resolve it. Returns the plugin's own parameter schema for a
+        ``vst3`` asset (the engine introspects it as part of registering),
+        or None for every other kind."""
+
+    @abstractmethod
+    def set_block_param(self, block_id: str, param_key: str, value: float) -> None:
+        """Live, no-reload tweak of one parameter on one block of the
+        chain currently loaded in the engine. A no-op (logged, not raised)
+        if no chain is loaded or the id/key isn't recognized -- same
+        fail-open posture as every other call here."""
+
+    @abstractmethod
+    def list_block_types(self) -> List[dict]:
+        """The engine's static, per-build parameter schema for every
+        native block type it recognizes (see audio-engine's
+        block_type_registry.hpp) -- empty if the engine is unreachable."""
 
 
 class NullAudioEngineClient(AudioEngineClient):
@@ -66,8 +82,16 @@ class NullAudioEngineClient(AudioEngineClient):
     def set_tempo(self, bpm: float) -> None:
         logger.info("set_tempo(%.2f bpm)", bpm)
 
-    def register_asset(self, asset: Asset) -> None:
+    def register_asset(self, asset: Asset) -> Optional[List[BlockParamDescriptor]]:
         logger.info("register_asset(id=%s, kind=%s)", asset.id, asset.kind)
+        return None
+
+    def set_block_param(self, block_id: str, param_key: str, value: float) -> None:
+        logger.info("set_block_param(block_id=%s, param_key=%s, value=%s)", block_id, param_key, value)
+
+    def list_block_types(self) -> List[dict]:
+        logger.info("list_block_types()")
+        return []
 
 
 class UnixSocketAudioEngineClient(AudioEngineClient):
@@ -108,8 +132,8 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
     def set_tempo(self, bpm: float) -> None:
         logger.info("set_tempo(%.2f bpm) -- no-op, engine has no tempo command yet", bpm)
 
-    def register_asset(self, asset: Asset) -> None:
-        self._send(
+    def register_asset(self, asset: Asset) -> Optional[List[BlockParamDescriptor]]:
+        reply = self._send(
             {
                 "cmd": "register_asset",
                 "asset": {
@@ -122,6 +146,19 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
                 },
             }
         )
+        raw_parameters = reply.get("parameters")
+        if raw_parameters is None:
+            return None
+        return [BlockParamDescriptor(**p) for p in raw_parameters]
+
+    def set_block_param(self, block_id: str, param_key: str, value: float) -> None:
+        self._send(
+            {"cmd": "set_block_param", "block_id": block_id, "param_key": param_key, "value": value}
+        )
+
+    def list_block_types(self) -> List[dict]:
+        reply = self._send({"cmd": "list_block_types"})
+        return reply.get("block_types", [])
 
     def close(self) -> None:
         with self._lock:
@@ -129,7 +166,12 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
 
     # -- socket plumbing ----------------------------------------------------
 
-    def _send(self, command: dict) -> None:
+    def _send(self, command: dict) -> dict:
+        """Sends one command and returns its reply (``{}`` if the engine is
+        unreachable or replies with something unparsable) -- most callers
+        here only care about the fail-open logging below and ignore the
+        return value, but register_asset/list_block_types need the reply's
+        own extra fields."""
         line = (json.dumps(command) + "\n").encode("utf-8")
         with self._lock:
             for attempt in (1, 2):
@@ -144,7 +186,7 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
                             command.get("cmd"),
                             reply.get("message", reply),
                         )
-                    return
+                    return reply
                 except OSError as exc:
                     logger.warning(
                         "audio-engine socket error on %s (attempt %d): %s",
@@ -158,6 +200,7 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
                 self.socket_path,
                 command.get("cmd"),
             )
+            return {}
 
     def _ensure_connected_locked(self) -> socket.socket:
         if self._sock is not None:

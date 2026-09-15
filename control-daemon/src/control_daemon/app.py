@@ -55,9 +55,11 @@ from .ws_protocol import (
     ErrorMessage,
     FootswitchPressMessage,
     HelloMessage,
+    ListBlockTypesMessage,
     RegisterAssetMessage,
     ReorderRigsMessage,
     SelectPresetMessage,
+    SetBlockParamMessage,
     SetBypassMessage,
     SetFootswitchMappingMessage,
     StateChangedMessage,
@@ -401,6 +403,19 @@ def _apply(state_manager: DaemonStateManager, message) -> Optional[dict]:
             sha256=message.sha256,
         )
         return {"asset": asset.model_dump(mode="json")}
+
+    if isinstance(message, SetBlockParamMessage):
+        preset = state_manager.set_block_param(
+            rig_id=message.rig_id,
+            preset_id=message.preset_id,
+            block_id=message.block_id,
+            param_key=message.param_key,
+            value=message.value,
+        )
+        return {"preset": preset.model_dump(mode="json")}
+
+    if isinstance(message, ListBlockTypesMessage):
+        return {"block_types": state_manager.list_block_types()}
 
     if isinstance(message, FootswitchPressMessage):
         state_manager.apply_footswitch_press(message.switch_index)

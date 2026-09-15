@@ -38,6 +38,8 @@ public:
     void prepare(double sampleRate) override;
     void process(float* buffer, std::size_t numSamples) override;
     void reset() override;
+    // Recognizes "bass_db"/"mid_db"/"treble_db".
+    bool setLiveParam(const std::string& key, double value) override;
 
 private:
     EqBlock bass_;

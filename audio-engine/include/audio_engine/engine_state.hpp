@@ -59,6 +59,8 @@ private:
     nlohmann::json handleSetBypass(const nlohmann::json& command);
     nlohmann::json handleCrossfadeMs(const nlohmann::json& command);
     nlohmann::json handleRegisterAsset(const nlohmann::json& command);
+    nlohmann::json handleSetBlockParam(const nlohmann::json& command);
+    nlohmann::json handleListBlockTypes() const;
     nlohmann::json handleGetState() const;
 
     mutable std::mutex mutex_;

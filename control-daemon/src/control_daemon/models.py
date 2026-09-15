@@ -130,14 +130,40 @@ def default_rig_chain() -> List[EffectBlock]:
 class AssetKind(str, Enum):
     NAM = "nam"
     IR = "ir"
+    VST3 = "vst3"
+
+
+class BlockParamDescriptor(BaseModel):
+    """One adjustable parameter's schema -- what a UI needs to render a real
+    control (a `Slider` bound to `min`/`max`/`unit`, or a discrete picker
+    when `step_count > 0`) instead of a generic key/value text editor.
+
+    Metadata only, never a value -- see ``PresetBlockState.params`` for
+    where a live-tweaked value actually lives. For a ``"vst3"`` asset this
+    is populated by the engine's ``register_asset`` reply (see
+    ``DaemonStateManager.register_asset``); ``key`` is the plugin's own
+    stringified VST3 ``ParamID`` in that case, or a block's own param name
+    (e.g. ``"gain_db"``) for a native block type (see ``list_block_types``).
+    """
+
+    key: str
+    label: str
+    unit: str = ""
+    min: float = 0.0
+    max: float = 1.0
+    default: float = 0.0
+    step_count: int = 0
 
 
 class Asset(BaseModel):
-    """Registry metadata for one uploaded ``.nam`` model or IR file.
+    """Registry metadata for one uploaded ``.nam``/IR file or installed
+    ``.vst3`` plugin bundle.
 
-    The binary itself is written to disk by the HTTP upload endpoint
-    (streamed, never buffered whole in memory -- see app.py); this model
-    only ever holds metadata about it.
+    The binary itself is written to disk by the HTTP upload endpoint for
+    ``nam``/``ir`` (streamed, never buffered whole in memory -- see
+    app.py) -- a ``vst3`` bundle is a *directory*, installed out of band,
+    and registered by path instead (see ``list_available_plugins``); this
+    model only ever holds metadata either way.
     """
 
     id: str = Field(default_factory=_new_id)
@@ -147,6 +173,10 @@ class Asset(BaseModel):
     size_bytes: int = 0
     sha256: Optional[str] = None
     uploaded_at: float = Field(default_factory=_now)
+    # Only ever populated for kind == VST3 (see register_asset) -- a
+    # nam/ir asset's "schema" is nothing new, it's just whatever block type
+    # it's attached to (see list_block_types instead).
+    parameters: Optional[List[BlockParamDescriptor]] = None
 
 
 class PresetBlockState(BaseModel):
