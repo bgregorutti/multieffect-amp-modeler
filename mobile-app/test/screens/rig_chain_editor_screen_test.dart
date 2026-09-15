@@ -238,4 +238,38 @@ void main() {
     await tester.pumpAndSettle();
     expect(paramRow, findsOneWidget);
   });
+
+  testWidgets(
+      'tapping an empty stage opens a picker; selecting an asset assigns it',
+      (tester) async {
+    // "amp" here has no asset yet -- an empty stage -- while "cab" already
+    // has one, so this exercises the empty-stage picker path specifically
+    // (a filled stage instead opens the full editor -- see the "changing a
+    // block's type" test above).
+    final rig = rigSvt.copyWith(chain: const [
+      EffectBlock(id: 'amp', type: 'nam', pinned: true),
+      EffectBlock(id: 'cab', type: 'ir', assetId: 'ir-1', pinned: true),
+    ]);
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    final controller = DaemonStateController(fakeClient);
+    await tester.pumpWidget(MaterialApp(
+      home: RigChainEditorScreen(controller: controller, rig: rig),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('block-card-0')));
+    await tester.pumpAndSettle();
+
+    // The picker only offers assets of the matching kind (nam, here).
+    expect(find.byKey(const Key('asset-picker-option-nam-1')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('asset-picker-option-nam-1')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp =
+        lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.assetId, 'nam-1');
+  });
 }
