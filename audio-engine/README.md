@@ -478,8 +478,9 @@ layered approach as the IR fix, and the existing chain-level clamp in
 | `preset_model`   | `Preset`/`Asset`/`EffectBlockSpec` structs + JSON (de)serialization, shaped identically to `control-daemon`'s Pydantic models (see "Shared data model" below) |
 | `effect_block`   | `EffectBlock` interface (`prepare(sampleRate)`, `process(buffer)`) implemented by every DSP block |
 | `passthrough_block` | Identity `EffectBlock` -- test baseline / safe fallback for an unrecognized block type |
-| `gain_block`       | Gain/volume block (`gain_db` param) |
-| `eq_block`           | Biquad peaking/shelving EQ (RBJ Audio EQ Cookbook formulas) |
+| `gain_block`       | Gain block (`gain_db` param) -- built for block types `"gain"` (input trim) and `"volume"` (output level): same DSP, two type names so a rig's chain can tell them apart |
+| `eq_block`           | Biquad peaking/shelving EQ (RBJ Audio EQ Cookbook formulas); `setGainDb`/`gainDb()` support live boost/cut updates without reconstructing the block |
+| `tone_stack_block`     | 3-band tone stack (block type `"tone_stack"`, `{bass_db, mid_db, treble_db}` params) composing three `EqBlock`s (low-shelf/peaking/high-shelf) -- tone shaping around a NAM capture isn't part of the captured model itself, see "Rig chain: the gain stages around a NAM capture" below |
 | `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params) |
 | `wav_file`               | Hand-rolled RIFF/WAVE parser (reads PCM16/PCM24/PCM32/float32, mono or downmixed) + writer (PCM16/float32) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
@@ -497,14 +498,46 @@ layered approach as the IR fix, and the existing chain-level clamp in
 ### Shared data model
 
 `preset_model.hpp`'s `Preset`/`Asset`/`EffectBlockSpec` structs mirror
-`control-daemon/src/control_daemon/models.py`'s `Preset`/`Asset`/
-`EffectBlock` Pydantic models field-for-field (`id`, `name`, `blocks:
-[{type, enabled, params}]`, `nam_asset_id`, `ir_asset_id`, `created_at`,
-`updated_at` for `Preset`; `id`, `kind` ("nam"|"ir"), `filename`,
-`stored_path`, `size_bytes`, `sha256`, `uploaded_at` for `Asset`), so a
-preset JSON blob produced by the control daemon deserializes here with no
-translation layer. `tests/test_preset_model.cpp` round-trips a fixture
-shaped exactly like a real control-daemon preset export.
+`control-daemon/src/control_daemon/models.py`'s `ResolvedPreset`/`Asset`/
+`ResolvedBlock` field-for-field (`id`, `name`, `rig_id`, `rig_name`,
+`blocks: [{id, type, asset_id, enabled, params}]` for `Preset`; `id`,
+`kind` ("nam"|"ir"), `filename`, `stored_path`, `size_bytes`, `sha256`,
+`uploaded_at` for `Asset`), so a resolved-preset JSON blob produced by the
+control daemon deserializes here with no translation layer. There is no
+preset-level `nam_asset_id`/`ir_asset_id` -- the daemon models a rig (an
+ordered chain whose amp/cab blocks are pinned) containing presets that
+only toggle the rest of that chain, and flattens rig+preset into this
+`ResolvedPreset` shape before sending it; the engine never sees a rig or
+a preset override, only the exact chain to play, `blocks` order included.
+`tests/test_preset_model.cpp` round-trips a fixture shaped exactly like a
+real control-daemon resolved-preset export.
+
+### Rig chain: the gain stages around a NAM capture
+
+A captured `.nam` model has no gain/tone controls of its own -- it's a
+frozen snapshot of one amp setting. The daemon's default new-rig template
+(`control_daemon.models.default_rig_chain`) surrounds the amp/cab with
+four extra pinned blocks that add that feel back in software, in this
+fixed order:
+
+```
+gain (input trim) -> nam (amp) -> ...switchable effects... -> ir (cab) -> tone_stack -> volume (output level)
+```
+
+* **`gain`** before the amp -- the "push the amp harder/softer" feel a
+  physical gain knob would give, since the model itself can't be pushed.
+* **`tone_stack`** after the cab -- generic 3-band tone shaping, since
+  that's not part of the captured model or the cabinet IR either.
+* **`volume`** after the tone stack -- a plain output-level trim. Built by
+  `createEffectBlock` from the exact same `GainBlock` as `"gain"`; the two
+  type names exist only so a chain (and its UI) can tell an input-trim
+  knob from an output-level one apart, not because the DSP differs.
+
+None of this is special-cased in the engine beyond `createEffectBlock`
+recognizing the `"gain"`/`"tone_stack"`/`"volume"` type strings -- same
+"just another block" treatment as `"eq"`/`"delay"`. The daemon is what
+gives new rigs this shape by default; `resource_manager.cpp` only needs
+to know how to build each block type.
 
 ## Control socket protocol
 

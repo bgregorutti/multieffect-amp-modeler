@@ -99,6 +99,27 @@ def test_create_rig(manager):
     assert manager.changes[-1] == "create_rig"
 
 
+def test_create_rig_with_no_chain_gets_the_default_gain_amp_cab_tone_volume_skeleton(
+    manager,
+):
+    rig = manager.create_rig(name="New Rig")
+
+    types = [b.type for b in rig.chain]
+    assert types == ["gain", "nam", "ir", "tone_stack", "volume"]
+    assert all(b.pinned for b in rig.chain)
+    assert all(b.asset_id is None for b in rig.chain)
+    # amp/cab keep the ids scripts/load_test_preset.py and the app already
+    # address by convention, so filling in a real asset later replaces the
+    # placeholder rather than adding a duplicate block.
+    ids = {b.id for b in rig.chain}
+    assert {"amp", "cab"} <= ids
+
+
+def test_create_rig_with_explicit_empty_chain_is_honored_as_is(manager):
+    rig = manager.create_rig(name="Truly Empty", chain=[])
+    assert rig.chain == []
+
+
 def test_create_rig_rejects_unknown_asset_ref(manager):
     with pytest.raises(StateError) as exc:
         manager.create_rig(

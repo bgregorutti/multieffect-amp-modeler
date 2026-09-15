@@ -98,6 +98,35 @@ class EffectBlock(BaseModel):
     params: Dict[str, ParamValue] = Field(default_factory=dict)
 
 
+def default_rig_chain() -> List[EffectBlock]:
+    """The standard skeleton a new rig starts with: gain -> amp -> cab ->
+    tone stack -> volume, all pinned.
+
+    A captured .nam model has no gain/tone controls of its own -- it is a
+    frozen snapshot of one amp setting -- so these four extra stages (input
+    trim, a 3-band tone stack, output volume) are how the "push the amp
+    harder/softer" and tone-shaping feel a real amp would give get added
+    back in software. They are ordinary blocks, not a special case the
+    engine or this module knows the meaning of: ``"gain"``/``"volume"`` are
+    both a plain gain stage (two names so the UI can tell an input-trim
+    knob from an output-level one at a glance), and ``"tone_stack"`` is a
+    3-band EQ block -- see audio-engine's ``createEffectBlock``.
+
+    ``amp``/``cab`` ship with no ``asset_id`` -- the caller fills those in
+    (e.g. by replacing these blocks by id once a NAM/IR asset is chosen,
+    the same convention ``scripts/load_test_preset.py`` already uses).
+    Callers that want a different shape (or a genuinely empty rig) pass
+    their own ``chain`` to ``create_rig`` instead of omitting it.
+    """
+    return [
+        EffectBlock(id="input_trim", type="gain", pinned=True),
+        EffectBlock(id="amp", type="nam", pinned=True),
+        EffectBlock(id="cab", type="ir", pinned=True),
+        EffectBlock(id="tone_stack", type="tone_stack", pinned=True),
+        EffectBlock(id="output_volume", type="volume", pinned=True),
+    ]
+
+
 class AssetKind(str, Enum):
     NAM = "nam"
     IR = "ir"

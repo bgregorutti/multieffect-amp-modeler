@@ -35,20 +35,24 @@ abstract class DaemonCommand {
   Map<String, dynamic> toJson();
 }
 
+/// Omitting [chain] (the default) makes the daemon seed the standard
+/// gain/amp/cab/tone-stack/volume skeleton (see control-daemon's
+/// `models.default_rig_chain`) rather than an empty rig; pass an explicit
+/// `[]` for a deliberately empty one instead.
 class CreateRigCommand implements DaemonCommand {
   @override
   String get type => 'create_rig';
 
   final String name;
-  final List<EffectBlock> chain;
+  final List<EffectBlock>? chain;
 
-  const CreateRigCommand({required this.name, this.chain = const []});
+  const CreateRigCommand({required this.name, this.chain});
 
   @override
   Map<String, dynamic> toJson() => {
         'type': type,
         'name': name,
-        'chain': chain.map((b) => b.toJson()).toList(),
+        if (chain != null) 'chain': chain!.map((b) => b.toJson()).toList(),
       };
 }
 

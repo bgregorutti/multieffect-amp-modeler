@@ -41,6 +41,7 @@ from .models import (
     SelectPresetAction,
     TapTempoAction,
     ToggleBypassAction,
+    default_rig_chain,
     resolve_preset,
 )
 from .persistence import load_state, save_state
@@ -166,9 +167,16 @@ class DaemonStateManager:
         name: str,
         chain: Optional[List[EffectBlock]] = None,
     ) -> Rig:
-        for block in chain or []:
+        """Create a rig. Omitting ``chain`` entirely (as opposed to passing
+        an explicit ``[]``) seeds the standard gain -> amp -> cab -> tone
+        stack -> volume skeleton (see ``models.default_rig_chain``) rather
+        than an empty one, since that shape is what every rig with a NAM
+        capture wants -- an explicit ``[]`` is respected as a deliberate
+        choice (e.g. a rig with no amp at all), not overridden."""
+        resolved_chain = default_rig_chain() if chain is None else list(chain)
+        for block in resolved_chain:
             self._validate_asset_ref(block.asset_id)
-        rig = Rig(name=name, chain=list(chain or []))
+        rig = Rig(name=name, chain=resolved_chain)
         self.state.rigs.append(rig)
         self._notify("create_rig")
         return rig

@@ -37,6 +37,12 @@ void main() {
       expect(cmd.toJson(), createRigFixture);
     });
 
+    test('create_rig with no chain omits the field (daemon default-scaffolds)',
+        () {
+      const cmd = CreateRigCommand(name: 'New Rig');
+      expect(cmd.toJson().containsKey('chain'), isFalse);
+    });
+
     test('update_rig (partial update omits untouched fields)', () {
       const cmd = UpdateRigCommand(rigId: 'rig1', name: 'Ampeg SVT II');
       expect(cmd.toJson(), updateRigFixture);

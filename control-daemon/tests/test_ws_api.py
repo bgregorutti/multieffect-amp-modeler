@@ -99,6 +99,17 @@ def test_app_create_rig_and_select_preset_broadcasts_to_display(client: TestClie
         assert display_broadcast_2["state"]["active_preset_id"] == preset_id
 
 
+def test_create_rig_without_a_chain_field_gets_the_default_skeleton(client: TestClient):
+    with client.websocket_connect("/ws") as ws:
+        _hello(ws, "app")
+
+        ws.send_json({"type": "create_rig", "name": "New Rig"})
+        ack = ws.receive_json()
+
+        types = [b["type"] for b in ack["result"]["rig"]["chain"]]
+        assert types == ["gain", "nam", "ir", "tone_stack", "volume"]
+
+
 def test_display_role_cannot_send_config_commands(client: TestClient):
     with client.websocket_connect("/ws") as ws:
         _hello(ws, "display")

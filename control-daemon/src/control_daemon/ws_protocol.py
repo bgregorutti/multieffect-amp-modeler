@@ -44,9 +44,13 @@ class HelloMessage(BaseModel):
 
 
 class CreateRigMessage(BaseModel):
+    """Omitting ``chain`` seeds the standard gain/amp/cab/tone-stack/volume
+    skeleton (see ``models.default_rig_chain``); sending an explicit ``[]``
+    is honored as a deliberate empty rig instead."""
+
     type: Literal["create_rig"] = "create_rig"
     name: str
-    chain: List[EffectBlock] = Field(default_factory=list)
+    chain: Optional[List[EffectBlock]] = None
 
 
 class UpdateRigMessage(BaseModel):
