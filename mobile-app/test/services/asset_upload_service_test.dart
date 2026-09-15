@@ -164,6 +164,12 @@ class _FakeDaemonClientForRegister extends DaemonClientBase {
   Future<Map<String, dynamic>> setFootswitchMapping(
           SetFootswitchMappingCommand cmd) =>
       throw UnimplementedError();
+  @override
+  Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd) =>
+      throw UnimplementedError();
+  @override
+  Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd) =>
+      throw UnimplementedError();
 }
 
 void main() {

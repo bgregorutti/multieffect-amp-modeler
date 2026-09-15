@@ -133,4 +133,12 @@ class FakeDaemonClient extends DaemonClientBase {
   @override
   Future<Map<String, dynamic>> registerAsset(RegisterAssetCommand cmd) =>
       _record('register_asset', cmd);
+
+  @override
+  Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd) =>
+      _record('set_block_param', cmd);
+
+  @override
+  Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd) =>
+      _record('list_block_types', cmd);
 }

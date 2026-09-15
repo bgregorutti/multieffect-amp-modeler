@@ -67,6 +67,39 @@ every command sent -- instead of a real socket. `DaemonClient` and
 (`dart:io` `HttpServer`/`WebSocketTransformer`), not in-process fakes -- see
 "Protocol-compatibility notes" below for why.
 
+## Live parameter controls (dynamic per-block schema)
+
+`PresetEditorScreen`'s "Live controls" section renders one real `Slider`
+per adjustable parameter of every block in the active preset's rig --
+gain, drive, blend, whatever the block actually has -- from a schema
+fetched from the daemon, not a hardcoded "always a gain slider" UI (the
+same way a DAW's generic plugin view works):
+
+- **Native block types** (gain, volume, eq, tone_stack, delay): schema
+  comes from `list_block_types`, fetched once when the screen opens
+  (`BlockTypeDescriptor`/`BlockParamDescriptor`, `lib/models/
+  block_param_descriptor.dart`) -- static per engine build, not per-rig
+  state.
+- **`vst3` blocks**: schema is per-*asset*, not per-type (different
+  `.vst3` files have different parameters) -- it rides along on
+  `Asset.parameters`, already populated by `register_asset`'s reply, so
+  no extra round-trip is needed once a rig references the plugin.
+- A block with neither (an experimental/unrecognized type) simply gets no
+  live-controls card -- fail safe, not a broken or empty one.
+
+Dragging a slider updates the local value immediately (so the UI never
+waits on a round-trip to feel responsive) and sends `set_block_param`
+(`rig_id`/`preset_id`/`block_id`/`param_key`/`value`) on every tick --
+live, not gated on the screen's own Save button, same pattern the
+now-removed Step-2 "Amp" panel established for gain/tone knobs. The value
+persists into *this preset's* block-state override, so the same plugin or
+block can sit at different settings per preset within one rig.
+
+This is a live per-preset override, distinct from editing a block's own
+*default* parameters (what a freshly-created preset starts from), which
+stays `RigChainEditorScreen`'s generic key/value `_ParamsEditor` -- an
+edit-time, save-gated concern on the rig itself.
+
 ## Protocol-compatibility notes
 
 - `test/models/protocol_fixtures.dart` copies the example JSON payloads from

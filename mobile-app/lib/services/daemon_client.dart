@@ -43,6 +43,8 @@ abstract class DaemonClientBase {
   Future<Map<String, dynamic>> setFootswitchMapping(
       SetFootswitchMappingCommand cmd);
   Future<Map<String, dynamic>> registerAsset(RegisterAssetCommand cmd);
+  Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd);
+  Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd);
 }
 
 /// Wraps a WebSocket connection to the control daemon.
@@ -233,6 +235,14 @@ class DaemonClient extends DaemonClientBase {
 
   @override
   Future<Map<String, dynamic>> registerAsset(RegisterAssetCommand cmd) =>
+      _sendCommand(cmd);
+
+  @override
+  Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd) =>
+      _sendCommand(cmd);
+
+  @override
+  Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd) =>
       _sendCommand(cmd);
 
   @override

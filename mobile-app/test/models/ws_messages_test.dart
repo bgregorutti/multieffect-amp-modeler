@@ -119,6 +119,22 @@ void main() {
       );
       expect(cmd.toJson(), registerAssetFixture);
     });
+
+    test('set_block_param', () {
+      const cmd = SetBlockParamCommand(
+        rigId: 'rig1',
+        presetId: 'abc123',
+        blockId: 'dist',
+        paramKey: 'gain_db',
+        value: 6.0,
+      );
+      expect(cmd.toJson(), setBlockParamFixture);
+    });
+
+    test('list_block_types', () {
+      const cmd = ListBlockTypesCommand();
+      expect(cmd.toJson(), listBlockTypesFixture);
+    });
   });
 
   group('Server -> client envelopes parse their fixtures', () {

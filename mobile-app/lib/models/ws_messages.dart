@@ -254,6 +254,52 @@ class RegisterAssetCommand implements DaemonCommand {
       };
 }
 
+/// Live, no-reload parameter tweak on one block within one preset. Persists
+/// into that preset's `block_states[block_id].params` override (see
+/// `PresetBlockState`) and is forwarded to the engine only when this
+/// rig/preset is the one actually playing.
+class SetBlockParamCommand implements DaemonCommand {
+  @override
+  String get type => 'set_block_param';
+
+  final String rigId;
+  final String presetId;
+  final String blockId;
+  final String paramKey;
+  final double value;
+
+  const SetBlockParamCommand({
+    required this.rigId,
+    required this.presetId,
+    required this.blockId,
+    required this.paramKey,
+    required this.value,
+  });
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'type': type,
+        'rig_id': rigId,
+        'preset_id': presetId,
+        'block_id': blockId,
+        'param_key': paramKey,
+        'value': value,
+      };
+}
+
+/// Static per-engine-build parameter schema for every native block type --
+/// a pure query, meant to be fetched once (e.g. on connect), not per-rig
+/// state.
+class ListBlockTypesCommand implements DaemonCommand {
+  @override
+  String get type => 'list_block_types';
+
+  const ListBlockTypesCommand();
+
+  @override
+  Map<String, dynamic> toJson() => {'type': type};
+}
+
 // ---------------------------------------------------------------------------
 // Server -> client
 // ---------------------------------------------------------------------------
