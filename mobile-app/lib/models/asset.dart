@@ -38,6 +38,12 @@ class Asset {
   final String? sha256;
   final double uploadedAt;
 
+  /// A user-chosen label for this asset (e.g. "My Fender Twin" instead of
+  /// `fender_twin_v3_final2.nam`), set via the `rename_asset` command. Null
+  /// until ever renamed -- always fall back to [filename] for display
+  /// (see [displayLabel]) rather than assuming this is set.
+  final String? displayName;
+
   /// The plugin's own parameter schema -- only ever non-null for
   /// `kind == AssetKind.vst3` (the engine introspects it as part of
   /// `register_asset`; see `BlockParamDescriptor`). A `nam`/`ir` asset's
@@ -53,8 +59,13 @@ class Asset {
     this.sizeBytes = 0,
     this.sha256,
     required this.uploadedAt,
+    this.displayName,
     this.parameters,
   });
+
+  /// What the UI should show for this asset: the user's own name if they
+  /// ever set one, otherwise the uploaded filename.
+  String get displayLabel => displayName ?? filename;
 
   factory Asset.fromJson(Map<String, dynamic> json) {
     final rawParameters = json['parameters'] as List<dynamic>?;
@@ -66,6 +77,7 @@ class Asset {
       sizeBytes: (json['size_bytes'] as num?)?.toInt() ?? 0,
       sha256: json['sha256'] as String?,
       uploadedAt: (json['uploaded_at'] as num).toDouble(),
+      displayName: json['display_name'] as String?,
       parameters: rawParameters
           ?.map((p) => BlockParamDescriptor.fromJson(p as Map<String, dynamic>))
           .toList(),
@@ -80,6 +92,7 @@ class Asset {
         'size_bytes': sizeBytes,
         'sha256': sha256,
         'uploaded_at': uploadedAt,
+        if (displayName != null) 'display_name': displayName,
         if (parameters != null)
           'parameters': parameters!.map((p) => p.toJson()).toList(),
       };

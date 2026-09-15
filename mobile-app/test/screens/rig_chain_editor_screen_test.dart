@@ -147,16 +147,32 @@ void main() {
     return fakeClient;
   }
 
+  /// Backline stages are filled/tappable cards; the type/asset/params
+  /// fields (`block-type-field-*`, `block-asset-dropdown-*`, etc.) only
+  /// exist once a tap on the card opens its editor sheet.
+  Future<void> openStageEditor(WidgetTester tester, int index) async {
+    await tester.tap(find.byKey(Key('block-card-$index')));
+    await tester.pumpAndSettle();
+  }
+
   testWidgets(
       'changing a block\'s type fills in its schema defaults and clears its '
       'asset', (tester) async {
     final fakeClient = await pumpEditorWithBlockTypes(tester);
 
     // "amp" (index 0) is a nam block with an asset -- switching it to
-    // "gain" must drop the asset and pick up gain's schema default.
+    // "gain" must drop the asset and pick up gain's schema default. It
+    // already has an asset, so tapping it opens the full editor directly
+    // (not the empty-stage asset picker).
+    await openStageEditor(tester, 0);
     await tester.tap(find.byKey(const Key('block-type-field-0')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('gain').last);
+    await tester.pumpAndSettle();
+
+    // Dismiss the editor sheet (tap its scrim) before reaching the AppBar's
+    // save button underneath it.
+    await tester.tapAt(const Offset(10, 10));
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('save-rig-button')));
@@ -173,6 +189,7 @@ void main() {
       (tester) async {
     await pumpEditorWithBlockTypes(tester);
 
+    await openStageEditor(tester, 0);
     await tester.tap(find.byKey(const Key('block-type-field-0')));
     await tester.pumpAndSettle();
 
@@ -212,7 +229,10 @@ void main() {
     await tester.pumpAndSettle();
 
     // A backline block whose type has no known schema must still be
-    // editable via the fallback key/value editor.
+    // editable via the fallback key/value editor, reached by tapping its
+    // stage card open (it needs no asset, so this opens the full editor
+    // directly, not a picker).
+    await openStageEditor(tester, 0);
     final paramRow = find.byKey(const Key('param-row-decay'));
     await tester.ensureVisible(paramRow);
     await tester.pumpAndSettle();

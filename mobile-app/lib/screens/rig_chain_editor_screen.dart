@@ -3,11 +3,14 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/asset.dart';
+import '../models/asset_category.dart';
 import '../models/block_param_descriptor.dart';
 import '../models/effect_block.dart';
 import '../models/rig.dart';
 import '../models/ws_messages.dart';
 import '../state/daemon_state_controller.dart';
+import '../widgets/chain_connector.dart';
+import '../widgets/chain_stage_card.dart';
 
 /// The block types a rig's backline is made of. Effects (delay, eq, vst3,
 /// ...) are added per preset in `PresetEditorScreen`, not here. A block
@@ -206,28 +209,40 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(
               'Always on in every preset of this rig. '
-              'Effects are added from each preset.',
+              'Effects are added from each preset. Tap a stage to edit it.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
-          ReorderableListView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            itemCount: backline.length,
-            onReorderItem: _reorderBacklineBlocks,
-            itemBuilder: (context, index) {
-              final block = backline[index];
-              return _BlockEditor(
-                key: ValueKey('block-editor-${block.id}'),
-                index: index,
-                block: block,
-                assets: assets,
-                blockTypes: _blockTypes,
-                onChanged: _updateBlock,
-                onTypeChanged: (t) => _changeBlockType(block, t),
-                onRemove: () => _removeBlock(block.id),
-              );
-            },
+          SizedBox(
+            height: 150,
+            child: ReorderableListView.builder(
+              scrollDirection: Axis.horizontal,
+              buildDefaultDragHandles: false,
+              itemCount: backline.length,
+              onReorderItem: _reorderBacklineBlocks,
+              itemBuilder: (context, index) {
+                final block = backline[index];
+                return Padding(
+                  key: ValueKey('block-editor-${block.id}'),
+                  padding: const EdgeInsets.symmetric(vertical: 6),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _BacklineStageCard(
+                        index: index,
+                        block: block,
+                        assets: assets,
+                        blockTypes: _blockTypes,
+                        onChanged: _updateBlock,
+                        onTypeChanged: (t) => _changeBlockType(block, t),
+                        onRemove: () => _removeBlock(block.id),
+                      ),
+                      if (index < backline.length - 1) const ChainConnector(),
+                    ],
+                  ),
+                );
+              },
+            ),
           ),
         ],
       ),
@@ -246,7 +261,13 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
   }
 }
 
-class _BlockEditor extends StatelessWidget {
+/// One backline slot in the horizontal chain strip: a `ChainStageCard` that
+/// is either the greyed "empty" placeholder (an asset-backed type with no
+/// asset yet -- tap opens a picker) or filled (tap opens the full
+/// type/asset/params editor, reusing exactly the fields `_BlockEditor` used
+/// to render inline). Also owns the reorder drag handle and remove button,
+/// so removing/reordering a stage never requires opening its editor first.
+class _BacklineStageCard extends StatelessWidget {
   final int index;
   final EffectBlock block;
   final List<Asset> assets;
@@ -255,8 +276,7 @@ class _BlockEditor extends StatelessWidget {
   final ValueChanged<String> onTypeChanged;
   final VoidCallback onRemove;
 
-  const _BlockEditor({
-    super.key,
+  const _BacklineStageCard({
     required this.index,
     required this.block,
     required this.assets,
@@ -264,6 +284,151 @@ class _BlockEditor extends StatelessWidget {
     required this.onChanged,
     required this.onTypeChanged,
     required this.onRemove,
+  });
+
+  AssetKind? get _wantedAssetKind => assetKindForBlockType(block.type);
+
+  Asset? _assignedAsset() {
+    final id = block.assetId;
+    if (id == null) return null;
+    for (final asset in assets) {
+      if (asset.id == id) return asset;
+    }
+    return null;
+  }
+
+  void _openAssetPicker(BuildContext context, AssetKind wantedKind) {
+    final candidates = assets.where((a) => a.kind == wantedKind).toList();
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text(
+                'Choose a ${wantedKind.name.toUpperCase()} for this stage',
+                style: Theme.of(sheetContext).textTheme.titleMedium,
+              ),
+            ),
+            if (candidates.isEmpty)
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                child: Text('No matching assets yet -- upload one first.'),
+              ),
+            for (final asset in candidates)
+              ListTile(
+                key: Key('asset-picker-option-${asset.id}'),
+                leading: Icon(assetKindIcon(asset.kind)),
+                title: Text(asset.displayLabel),
+                onTap: () {
+                  onChanged(block.copyWith(assetId: () => asset.id));
+                  Navigator.of(sheetContext).pop();
+                },
+              ),
+            TextButton(
+              key: Key('open-block-editor-$index'),
+              onPressed: () {
+                Navigator.of(sheetContext).pop();
+                _openFullEditor(context);
+              },
+              child: const Text('Change block type instead'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _openFullEditor(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => Padding(
+        padding: EdgeInsets.only(
+          left: 16,
+          right: 16,
+          top: 16,
+          bottom: 16 + MediaQuery.of(sheetContext).viewInsets.bottom,
+        ),
+        child: SingleChildScrollView(
+          child: _BlockEditorFields(
+            index: index,
+            block: block,
+            assets: assets,
+            blockTypes: blockTypes,
+            onChanged: onChanged,
+            onTypeChanged: onTypeChanged,
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final wantedKind = _wantedAssetKind;
+    final asset = _assignedAsset();
+    final isEmptyStage = wantedKind != null && block.assetId == null;
+
+    return ChainStageCard(
+      key: ValueKey('block-card-$index'),
+      icon: blockTypeIcon(block.type),
+      label: block.type,
+      subtitle: asset?.displayLabel,
+      isEmpty: isEmptyStage,
+      onTap: () {
+        if (isEmptyStage) {
+          _openAssetPicker(context, wantedKind);
+        } else {
+          _openFullEditor(context);
+        }
+      },
+      corner: SizedBox(
+        width: 28,
+        height: 28,
+        child: IconButton(
+          key: Key('remove-block-button-$index'),
+          padding: EdgeInsets.zero,
+          iconSize: 18,
+          style: IconButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.errorContainer,
+            foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
+          ),
+          icon: const Icon(Icons.close),
+          onPressed: onRemove,
+        ),
+      ),
+      footer: ReorderableDragStartListener(
+        index: index,
+        child: Icon(Icons.drag_indicator,
+            size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
+      ),
+    );
+  }
+}
+
+/// The type/asset/params fields for one backline block -- shown inside the
+/// bottom sheet `_BacklineStageCard` opens on tap. Kept as its own widget
+/// (rather than rebuilt) so both the picker's "change type instead" escape
+/// hatch and a direct tap on a filled stage land on exactly the same editor.
+class _BlockEditorFields extends StatelessWidget {
+  final int index;
+  final EffectBlock block;
+  final List<Asset> assets;
+  final List<BlockTypeDescriptor> blockTypes;
+  final ValueChanged<EffectBlock> onChanged;
+  final ValueChanged<String> onTypeChanged;
+
+  const _BlockEditorFields({
+    required this.index,
+    required this.block,
+    required this.assets,
+    required this.blockTypes,
+    required this.onChanged,
+    required this.onTypeChanged,
   });
 
   /// The backline types, plus this block's own current type if it is
@@ -306,80 +471,58 @@ class _BlockEditor extends StatelessWidget {
     final isKnownType =
         needsAsset || blockTypes.any((t) => t.type == block.type);
 
-    return Card(
-      key: ValueKey('block-card-$index'),
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: Padding(
-        padding: const EdgeInsets.all(8.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: DropdownButtonFormField<String>(
-                    key: Key('block-type-field-$index'),
-                    initialValue: block.type,
-                    decoration: const InputDecoration(labelText: 'Type'),
-                    items: [
-                      for (final type in _typeOptions)
-                        DropdownMenuItem(value: type, child: Text(type)),
-                    ],
-                    onChanged: (v) {
-                      if (v != null && v != block.type) onTypeChanged(v);
-                    },
-                  ),
-                ),
-                IconButton(
-                  key: Key('remove-block-button-$index'),
-                  icon: const Icon(Icons.delete_outline),
-                  onPressed: onRemove,
-                ),
-                ReorderableDragStartListener(
-                  index: index,
-                  child: const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 4),
-                    child: Icon(Icons.drag_handle),
-                  ),
-                ),
-              ],
-            ),
-            if (needsAsset)
-              _AssetDropdown(
-                // Keyed by type too: a nam->ir change must start a fresh
-                // field, not keep the old nam asset selected in a list that
-                // no longer contains it.
-                key: Key('block-asset-dropdown-$index-${block.type}'),
-                label: 'Asset (${wantedKind.name.toUpperCase()})',
-                assets: assets.where((a) => a.kind == wantedKind).toList(),
-                value: block.assetId,
-                onChanged: (id) => onChanged(block.copyWith(assetId: () => id)),
-              ),
-            if (schema.isNotEmpty)
-              _SchemaParamsEditor(
-                // Same reason: fields from the previous type must not keep
-                // their typed text after params were reset to new defaults.
-                key: ValueKey('schema-params-${block.type}'),
-                descriptors: schema,
-                params: block.params,
-                onChanged: (p) => onChanged(block.copyWith(params: p)),
-              )
-            else if (!isKnownType)
-              _ParamsEditor(
-                params: block.params,
-                onChanged: (p) => onChanged(block.copyWith(params: p)),
-              )
-            else if (block.type == 'vst3' && block.assetId != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  'This plugin exposes no adjustable parameters.',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('Edit stage', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          key: Key('block-type-field-$index'),
+          initialValue: block.type,
+          decoration: const InputDecoration(labelText: 'Type'),
+          items: [
+            for (final type in _typeOptions)
+              DropdownMenuItem(value: type, child: Text(type)),
           ],
+          onChanged: (v) {
+            if (v != null && v != block.type) onTypeChanged(v);
+          },
         ),
-      ),
+        if (needsAsset)
+          _AssetDropdown(
+            // Keyed by type too: a nam->ir change must start a fresh
+            // field, not keep the old nam asset selected in a list that
+            // no longer contains it.
+            key: Key('block-asset-dropdown-$index-${block.type}'),
+            label: 'Asset (${wantedKind.name.toUpperCase()})',
+            assets: assets.where((a) => a.kind == wantedKind).toList(),
+            value: block.assetId,
+            onChanged: (id) => onChanged(block.copyWith(assetId: () => id)),
+          ),
+        if (schema.isNotEmpty)
+          _SchemaParamsEditor(
+            // Same reason: fields from the previous type must not keep
+            // their typed text after params were reset to new defaults.
+            key: ValueKey('schema-params-${block.type}'),
+            descriptors: schema,
+            params: block.params,
+            onChanged: (p) => onChanged(block.copyWith(params: p)),
+          )
+        else if (!isKnownType)
+          _ParamsEditor(
+            params: block.params,
+            onChanged: (p) => onChanged(block.copyWith(params: p)),
+          )
+        else if (block.type == 'vst3' && block.assetId != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              'This plugin exposes no adjustable parameters.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+      ],
     );
   }
 }
@@ -409,7 +552,7 @@ class _AssetDropdown extends StatelessWidget {
         ...assets.map(
           (a) => DropdownMenuItem<String?>(
             value: a.id,
-            child: Text(a.filename, overflow: TextOverflow.ellipsis),
+            child: Text(a.displayLabel, overflow: TextOverflow.ellipsis),
           ),
         ),
       ],

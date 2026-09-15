@@ -133,6 +133,10 @@ class _FakeDaemonClientForRegister extends DaemonClientBase {
   }
 
   @override
+  Future<Map<String, dynamic>> renameAsset(RenameAssetCommand cmd) =>
+      throw UnimplementedError();
+
+  @override
   Future<Map<String, dynamic>> createPreset(CreatePresetCommand cmd) =>
       throw UnimplementedError();
   @override
