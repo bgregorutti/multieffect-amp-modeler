@@ -8,6 +8,7 @@ import 'package:mobile_app/models/preset.dart';
 import 'package:mobile_app/models/ws_messages.dart';
 import 'package:mobile_app/screens/preset_editor_screen.dart';
 import 'package:mobile_app/state/daemon_state_controller.dart';
+import 'package:mobile_app/widgets/chain_stage_card.dart';
 
 import 'fake_daemon_client.dart';
 import 'test_fixtures.dart';
@@ -70,6 +71,23 @@ void main() {
   testWidgets('resolves the pinned amp asset to its filename', (tester) async {
     await pumpEditor(tester, preset: presetClean);
     expect(find.text('my_amp.nam'), findsOneWidget);
+  });
+
+  testWidgets(
+      'pinned blocks render as locked, non-tappable chain-stage cards',
+      (tester) async {
+    await pumpEditor(tester, preset: presetClean);
+
+    final ampCard =
+        tester.widget<ChainStageCard>(find.byKey(const Key('pinned-block-amp')));
+    expect(ampCard.isLocked, isTrue);
+    expect(ampCard.onTap, isNull,
+        reason: 'a pinned block is never editable from the preset screen');
+
+    final effectCard = tester.widget<ChainStageCard>(
+      find.byKey(const Key('switchable-block-dist')),
+    );
+    expect(effectCard.isLocked, isFalse);
   });
 
   UpdatePresetCommand lastPresetUpdate(FakeDaemonClient client) =>
@@ -264,9 +282,80 @@ void main() {
     expect(sliderFinder, findsOneWidget);
     expect(tester.widget<Slider>(sliderFinder).value, 0.0);
 
+    // "Drive" only overrides `dist`'s enabled flag, not its gain_db param --
+    // this is the block's own default, so no override dot.
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('live-param-dist-gain_db')),
+        matching: find.byKey(const Key('live-param-override-dot')),
+      ),
+      findsNothing,
+    );
+
     // A "reverb" block has no matching entry in list_block_types here, so
     // it gets no live-controls card at all -- not an empty one.
     expect(find.byKey(const Key('live-params-card-reverb')), findsNothing);
+  });
+
+  testWidgets(
+      'shows an override dot only for a parameter this preset actually '
+      'overrides', (tester) async {
+    const presetWithOverride = Preset(
+      id: 'preset-a',
+      name: 'Clean',
+      blockStates: {
+        'dist': PresetBlockState(enabled: true, params: {'gain_db': 9.0}),
+      },
+      createdAt: 0,
+      updatedAt: 0,
+    );
+    final rig = rigSvt.copyWith(presets: const [presetWithOverride, presetDrive]);
+    final fakeClient = FakeDaemonClient(
+      state: DaemonState(rigs: [rig, rigOrange], assets: sampleState.assets),
+    );
+    fakeClient.nextResult = {
+      'block_types': [
+        {
+          'type': 'distortion',
+          'parameters': [
+            {
+              'key': 'gain_db',
+              'label': 'Gain',
+              'unit': 'dB',
+              'min': -60.0,
+              'max': 24.0,
+              'default': 0.0,
+              'step_count': 0,
+            },
+          ],
+        },
+      ],
+    };
+    final controller = DaemonStateController(fakeClient);
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(MaterialApp(
+      home: PresetEditorScreen(
+        controller: controller,
+        rig: rig,
+        preset: presetWithOverride,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    final dot = find.descendant(
+      of: find.byKey(const Key('live-param-dist-gain_db')),
+      matching: find.byKey(const Key('live-param-override-dot')),
+    );
+    expect(dot, findsOneWidget);
+
+    final slider = tester.widget<Slider>(find.descendant(
+      of: find.byKey(const Key('live-param-dist-gain_db')),
+      matching: find.byType(Slider),
+    ));
+    expect(slider.value, 9.0);
   });
 
   testWidgets('dragging a live slider sends set_block_param immediately',

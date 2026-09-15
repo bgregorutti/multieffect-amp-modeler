@@ -43,6 +43,7 @@ abstract class DaemonClientBase {
   Future<Map<String, dynamic>> setFootswitchMapping(
       SetFootswitchMappingCommand cmd);
   Future<Map<String, dynamic>> registerAsset(RegisterAssetCommand cmd);
+  Future<Map<String, dynamic>> renameAsset(RenameAssetCommand cmd);
   Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd);
   Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd);
 }
@@ -292,6 +293,10 @@ class DaemonClient extends DaemonClientBase {
 
   @override
   Future<Map<String, dynamic>> registerAsset(RegisterAssetCommand cmd) =>
+      _sendCommand(cmd);
+
+  @override
+  Future<Map<String, dynamic>> renameAsset(RenameAssetCommand cmd) =>
       _sendCommand(cmd);
 
   @override

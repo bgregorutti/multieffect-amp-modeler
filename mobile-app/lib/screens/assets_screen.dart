@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../models/asset.dart';
+import '../models/asset_category.dart';
+import '../models/ws_messages.dart';
 import '../services/asset_upload_service.dart';
 import '../state/daemon_state_controller.dart';
 
@@ -61,6 +63,42 @@ class _AssetsScreenState extends State<AssetsScreen> {
     return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 
+  Future<void> _rename(Asset asset) async {
+    final controller = TextEditingController(text: asset.displayLabel);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Rename'),
+        content: TextField(
+          key: const Key('rename-asset-input'),
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(labelText: 'Name'),
+          onSubmitted: (v) => Navigator.of(context).pop(v),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            key: const Key('confirm-rename-asset'),
+            onPressed: () => Navigator.of(context).pop(controller.text),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+    if (newName == null || !mounted) return;
+    final trimmed = newName.trim();
+    await widget.controller.client.renameAsset(
+      RenameAssetCommand(
+        assetId: asset.id,
+        displayName: trimmed.isEmpty ? null : trimmed,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -106,19 +144,36 @@ class _AssetsScreenState extends State<AssetsScreen> {
                 }
 
                 return ListView.builder(
+                  padding: const EdgeInsets.symmetric(vertical: 4),
                   itemCount: assets.length,
                   itemBuilder: (context, index) {
                     final Asset asset = assets[index];
-                    return ListTile(
+                    return Card(
                       key: Key('asset-tile-${asset.id}'),
-                      leading: Icon(
-                        asset.kind == AssetKind.nam
-                            ? Icons.memory
-                            : Icons.graphic_eq,
+                      margin:
+                          const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                        side: BorderSide(
+                          color: Theme.of(context)
+                              .colorScheme
+                              .outlineVariant
+                              .withValues(alpha: 0.4),
+                        ),
                       ),
-                      title: Text(asset.filename),
-                      subtitle: Text(
-                        '${asset.kind.toWire().toUpperCase()} • ${_formatSize(asset.sizeBytes)}',
+                      child: ListTile(
+                        leading: Icon(assetKindIcon(asset.kind)),
+                        title: Text(asset.displayLabel),
+                        subtitle: Text(
+                          '${asset.kind.toWire().toUpperCase()} • ${_formatSize(asset.sizeBytes)}',
+                        ),
+                        trailing: IconButton(
+                          key: Key('rename-asset-button-${asset.id}'),
+                          icon: const Icon(Icons.edit_outlined),
+                          tooltip: 'Rename',
+                          onPressed: () => _rename(asset),
+                        ),
                       ),
                     );
                   },

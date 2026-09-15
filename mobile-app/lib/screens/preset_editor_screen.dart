@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../models/asset.dart';
+import '../models/asset_category.dart';
 import '../models/block_param_descriptor.dart';
 import '../models/effect_block.dart';
 import '../models/preset.dart';
@@ -10,6 +11,8 @@ import '../models/rig.dart';
 import '../models/ws_messages.dart';
 import '../services/daemon_client.dart';
 import '../state/daemon_state_controller.dart';
+import '../widgets/chain_connector.dart';
+import '../widgets/chain_stage_card.dart';
 
 /// Native block types that belong to the rig's backline rather than being
 /// offered as a preset effect (see `RigChainEditorScreen`).
@@ -123,6 +126,18 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
     final raw = override ?? fromBlock;
     if (raw is num) return raw.toDouble();
     return descriptor.defaultValue;
+  }
+
+  /// True when the value `_resolvedValue` returned for this block+key came
+  /// from *this preset's own override* -- either dragged on this screen
+  /// (not yet round-tripped through a broadcast) or already persisted in
+  /// `preset.blockStates[block.id].params` -- rather than from the block's
+  /// own default. Drives the small "overridden" dot on `_LiveParamSlider`
+  /// (see the issue's open question: a live override otherwise looks
+  /// identical to a default value).
+  bool _isOverridden(EffectBlock block, BlockParamDescriptor descriptor) {
+    if (_liveValues[block.id]?[descriptor.key] != null) return true;
+    return _preset.blockStates[block.id]?.params[descriptor.key] != null;
   }
 
   /// This preset's full block_states for [rig]'s switchable blocks: latest
@@ -314,10 +329,59 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
     );
   }
 
+  /// One card in the "Signal chain" strip: the locked/greyed variant for a
+  /// rig-inherited pinned block (no tap -- matches the existing "no switch
+  /// for pinned blocks" rule, just a nicer visual treatment), or the normal
+  /// interactive variant for a switchable effect, with its enable switch
+  /// and remove button reachable directly on the card (same `Key`s the
+  /// vertical layout used to expose, so nothing in the daemon-facing
+  /// behavior changes -- only how it's laid out).
+  Widget _chainStageCardFor(BuildContext context, EffectBlock block) {
+    final asset =
+        block.assetId == null ? null : widget.controller.state.assets[block.assetId];
+    if (block.pinned) {
+      return ChainStageCard(
+        key: Key('pinned-block-${block.id}'),
+        icon: blockTypeIcon(block.type),
+        label: block.type,
+        subtitle: asset?.displayLabel,
+        isLocked: true,
+      );
+    }
+    return ChainStageCard(
+      key: Key('switchable-block-${block.id}'),
+      width: 156,
+      icon: blockTypeIcon(block.type),
+      label: block.type,
+      subtitle: asset?.displayLabel,
+      corner: SizedBox(
+        width: 28,
+        height: 28,
+        child: IconButton(
+          key: Key('remove-effect-${block.id}'),
+          padding: EdgeInsets.zero,
+          iconSize: 18,
+          style: IconButton.styleFrom(
+            backgroundColor: Theme.of(context).colorScheme.errorContainer,
+            foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
+          ),
+          icon: const Icon(Icons.close),
+          onPressed: () => _removeEffect(block),
+        ),
+      ),
+      footer: SwitchListTile(
+        key: Key('preset-block-switch-${block.id}'),
+        dense: true,
+        contentPadding: EdgeInsets.zero,
+        visualDensity: VisualDensity.compact,
+        value: _isOn(block),
+        onChanged: (v) => _setEffectEnabled(block, v),
+      ),
+    );
+  }
+
   Widget _buildScaffold(BuildContext context) {
     final rig = _rig;
-    final pinned = rig.pinnedBlocks;
-    final switchable = rig.switchableBlocks;
 
     return Scaffold(
       appBar: AppBar(
@@ -339,39 +403,11 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
             decoration: const InputDecoration(labelText: 'Name'),
           ),
           const SizedBox(height: 24),
-          Text('Always on', style: Theme.of(context).textTheme.titleMedium),
-          Padding(
-            padding: const EdgeInsets.only(top: 4, bottom: 8),
-            child: Text(
-              'Part of rig "${rig.name}" -- shared by every preset in it.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ),
-          if (pinned.isEmpty)
-            const ListTile(
-              dense: true,
-              title: Text('No pinned amp or cab in this rig'),
-            )
-          else
-            for (final block in pinned)
-              ListTile(
-                key: Key('pinned-block-${block.id}'),
-                dense: true,
-                leading: const Icon(Icons.push_pin, size: 18),
-                title: Text(block.type),
-                subtitle: block.assetId == null
-                    ? null
-                    : Text(
-                        widget.controller.state.assets[block.assetId]
-                                ?.filename ??
-                            block.assetId!,
-                      ),
-              ),
-          const SizedBox(height: 24),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Effects', style: Theme.of(context).textTheme.titleMedium),
+              Text('Signal chain',
+                  style: Theme.of(context).textTheme.titleMedium),
               TextButton.icon(
                 key: const Key('add-effect-button'),
                 icon: const Icon(Icons.add),
@@ -380,37 +416,33 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
               ),
             ],
           ),
-          if (switchable.isEmpty)
-            const ListTile(
-              dense: true,
-              title: Text('No effects yet'),
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 8),
+            child: Text(
+              'The locked stages are part of rig "${rig.name}", shared by '
+              'every preset in it. Use an effect\'s switch to turn it on '
+              'here.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+          if (rig.chain.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('This rig has no blocks yet.'),
             )
           else
-            for (final block in switchable)
-              Row(
+            SizedBox(
+              height: 150,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
                 children: [
-                  Expanded(
-                    child: SwitchListTile(
-                      key: Key('preset-block-switch-${block.id}'),
-                      title: Text(block.type),
-                      subtitle: block.assetId == null
-                          ? null
-                          : Text(
-                              widget.controller.state.assets[block.assetId]
-                                      ?.filename ??
-                                  block.assetId!,
-                            ),
-                      value: _isOn(block),
-                      onChanged: (v) => _setEffectEnabled(block, v),
-                    ),
-                  ),
-                  IconButton(
-                    key: Key('remove-effect-${block.id}'),
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => _removeEffect(block),
-                  ),
+                  for (var i = 0; i < rig.chain.length; i++) ...[
+                    _chainStageCardFor(context, rig.chain[i]),
+                    if (i < rig.chain.length - 1) const ChainConnector(),
+                  ],
                 ],
               ),
+            ),
           const SizedBox(height: 24),
           Text('Live controls', style: Theme.of(context).textTheme.titleMedium),
           Padding(
@@ -428,6 +460,8 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
                 block: block,
                 descriptors: _descriptorsFor(block),
                 valueOf: (descriptor) => _resolvedValue(block, descriptor),
+                isOverridden: (descriptor) =>
+                    _isOverridden(block, descriptor),
                 onChanged: (descriptor, value) =>
                     _onLiveParamChanged(block, descriptor, value),
               ),
@@ -446,6 +480,7 @@ class _LiveParamsCard extends StatelessWidget {
   final EffectBlock block;
   final List<BlockParamDescriptor> descriptors;
   final double Function(BlockParamDescriptor) valueOf;
+  final bool Function(BlockParamDescriptor) isOverridden;
   final void Function(BlockParamDescriptor, double) onChanged;
 
   const _LiveParamsCard({
@@ -453,6 +488,7 @@ class _LiveParamsCard extends StatelessWidget {
     required this.block,
     required this.descriptors,
     required this.valueOf,
+    required this.isOverridden,
     required this.onChanged,
   });
 
@@ -460,8 +496,15 @@ class _LiveParamsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
+      elevation: 0,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(16),
+        side: BorderSide(
+          color: Theme.of(context).colorScheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
       child: Padding(
-        padding: const EdgeInsets.all(8.0),
+        padding: const EdgeInsets.all(12.0),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -471,6 +514,7 @@ class _LiveParamsCard extends StatelessWidget {
                 key: Key('live-param-${block.id}-${descriptor.key}'),
                 descriptor: descriptor,
                 value: valueOf(descriptor).clamp(descriptor.min, descriptor.max),
+                isOverridden: isOverridden(descriptor),
                 onChanged: (v) => onChanged(descriptor, v),
               ),
           ],
@@ -483,12 +527,14 @@ class _LiveParamsCard extends StatelessWidget {
 class _LiveParamSlider extends StatelessWidget {
   final BlockParamDescriptor descriptor;
   final double value;
+  final bool isOverridden;
   final ValueChanged<double> onChanged;
 
   const _LiveParamSlider({
     super.key,
     required this.descriptor,
     required this.value,
+    required this.isOverridden,
     required this.onChanged,
   });
 
@@ -497,8 +543,29 @@ class _LiveParamSlider extends StatelessWidget {
     final unitSuffix = descriptor.unit.isEmpty ? '' : ' ${descriptor.unit}';
     return Row(
       children: [
+        // A small, unobtrusive dot -- not a badge or banner -- marking that
+        // this preset has its own value for this parameter rather than
+        // inheriting the block's default. See the issue's open question:
+        // previously a live override had no visual distinction at all.
         SizedBox(
-          width: 72,
+          width: 10,
+          child: isOverridden
+              ? Tooltip(
+                  message: 'This preset overrides the default value',
+                  child: Container(
+                    key: const Key('live-param-override-dot'),
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.tertiary,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                )
+              : null,
+        ),
+        SizedBox(
+          width: 68,
           child: Text(descriptor.label, overflow: TextOverflow.ellipsis),
         ),
         Expanded(
