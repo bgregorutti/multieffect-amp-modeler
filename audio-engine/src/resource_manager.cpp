@@ -129,6 +129,17 @@ void ResourceManager::loadPreset(const Preset& preset) {
         // fallback in createEffectBlock).
         if (blockSpec.type == "nam") {
             if (!blockSpec.asset_id.has_value()) continue;
+            // namModel is a single dedicated shared_ptr field, and
+            // processOrder holds a non-owning raw pointer into it -- a
+            // second enabled "nam" block would reassign namModel out from
+            // under the first one's already-pushed pointer, destroying it
+            // (nothing else holds a reference) and leaving a dangling
+            // entry in processOrder. Fail loud instead of a silent
+            // use-after-free the very next audio block.
+            if (chain->namModel) {
+                throw std::runtime_error("preset '" + preset.id + "' has more than one enabled 'nam' "
+                                          "block -- only one amp channel may be active at a time");
+            }
             const Asset& asset = assets_.at(*blockSpec.asset_id);
             chain->namModel = loader_->loadNam(asset.stored_path);
             if (chain->namModel) {
@@ -139,6 +150,12 @@ void ResourceManager::loadPreset(const Preset& preset) {
         }
         if (blockSpec.type == "ir") {
             if (!blockSpec.asset_id.has_value()) continue;
+            // Same dedicated-field aliasing hazard as "nam" above, for
+            // chain->cabinet/chain->ir.
+            if (chain->cabinet) {
+                throw std::runtime_error("preset '" + preset.id + "' has more than one enabled 'ir' "
+                                          "block -- only one cabinet may be active at a time");
+            }
             const Asset& asset = assets_.at(*blockSpec.asset_id);
             chain->ir = loader_->loadIr(asset.stored_path, sampleRate_);
             if (!chain->ir) continue;

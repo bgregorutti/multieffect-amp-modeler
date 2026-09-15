@@ -4,6 +4,7 @@ import 'package:mobile_app/models/asset.dart';
 import 'package:mobile_app/models/block_param_descriptor.dart';
 import 'package:mobile_app/models/daemon_state.dart';
 import 'package:mobile_app/models/effect_block.dart';
+import 'package:mobile_app/models/preset.dart';
 import 'package:mobile_app/models/ws_messages.dart';
 import 'package:mobile_app/screens/preset_editor_screen.dart';
 import 'package:mobile_app/state/daemon_state_controller.dart';
@@ -18,6 +19,12 @@ void main() {
   }) async {
     final fakeClient = FakeDaemonClient(state: sampleState);
     final controller = DaemonStateController(fakeClient);
+    // Live controls sit below the default 800x600 viewport, and ListView
+    // only builds on-screen children.
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(MaterialApp(
       home: PresetEditorScreen(
         controller: controller,
@@ -65,19 +72,18 @@ void main() {
     expect(find.text('my_amp.nam'), findsOneWidget);
   });
 
-  testWidgets('toggling an effect and saving sends update_preset',
+  UpdatePresetCommand lastPresetUpdate(FakeDaemonClient client) =>
+      client.sentCommands.lastWhere((c) => c.type == 'update_preset').command
+          as UpdatePresetCommand;
+
+  testWidgets('toggling an effect sends update_preset immediately',
       (tester) async {
     final fakeClient = await pumpEditor(tester, preset: presetClean);
 
     await tester.tap(find.byKey(const Key('preset-block-switch-dist')));
     await tester.pump();
-    await tester.tap(find.byKey(const Key('save-preset-button')));
-    await tester.pumpAndSettle();
 
-    final cmd = fakeClient.sentCommands
-        .firstWhere((c) => c.type == 'update_preset')
-        .command as UpdatePresetCommand;
-
+    final cmd = lastPresetUpdate(fakeClient);
     expect(cmd.rigId, 'rig-1');
     expect(cmd.presetId, 'preset-a');
     expect(cmd.blockStates!['dist']!.enabled, isTrue);
@@ -87,15 +93,112 @@ void main() {
   testWidgets('never sends block_states for pinned blocks', (tester) async {
     final fakeClient = await pumpEditor(tester, preset: presetClean);
 
+    await tester.tap(find.byKey(const Key('preset-block-switch-dist')));
+    await tester.pump();
+
+    final cmd = lastPresetUpdate(fakeClient);
+    expect(cmd.blockStates!.containsKey('amp'), isFalse);
+    expect(cmd.blockStates!.containsKey('cab'), isFalse);
+  });
+
+  testWidgets(
+      'toggling keeps the preset\'s existing param overrides (update_preset '
+      'replaces block_states wholesale)', (tester) async {
+    const presetTweaked = Preset(
+      id: 'preset-a',
+      name: 'Clean',
+      blockStates: {
+        'dist': PresetBlockState(enabled: true, params: {'gain_db': 6.0}),
+      },
+      createdAt: 0,
+      updatedAt: 0,
+    );
+    final rig = rigSvt.copyWith(presets: const [presetTweaked, presetDrive]);
+    final fakeClient = FakeDaemonClient(
+      state: DaemonState(rigs: [rig, rigOrange], assets: sampleState.assets),
+    );
+    await tester.pumpWidget(MaterialApp(
+      home: PresetEditorScreen(
+        controller: DaemonStateController(fakeClient),
+        rig: rig,
+        preset: presetTweaked,
+      ),
+    ));
+
+    await tester.tap(find.byKey(const Key('preset-block-switch-reverb')));
+    await tester.pump();
+
+    final cmd = lastPresetUpdate(fakeClient);
+    expect(cmd.blockStates!['reverb']!.enabled, isTrue);
+    expect(cmd.blockStates!['dist']!.params['gain_db'], 6.0);
+  });
+
+  testWidgets(
+      'saving only renames -- it never sends block_states, which would wipe '
+      'live param overrides', (tester) async {
+    final fakeClient = await pumpEditor(tester, preset: presetDrive);
+
     await tester.tap(find.byKey(const Key('save-preset-button')));
     await tester.pumpAndSettle();
 
-    final cmd = fakeClient.sentCommands
-        .firstWhere((c) => c.type == 'update_preset')
-        .command as UpdatePresetCommand;
+    final cmd = lastPresetUpdate(fakeClient);
+    expect(cmd.name, 'Drive');
+    expect(cmd.blockStates, isNull);
+  });
 
-    expect(cmd.blockStates!.containsKey('amp'), isFalse);
-    expect(cmd.blockStates!.containsKey('cab'), isFalse);
+  testWidgets(
+      'adding an effect inserts it before the cab, off at rig level, and '
+      'turns it on in this preset', (tester) async {
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    fakeClient.nextResult = {
+      'block_types': [
+        {
+          'type': 'delay',
+          'parameters': [
+            {
+              'key': 'delay_ms',
+              'label': 'Time',
+              'unit': 'ms',
+              'min': 1.0,
+              'max': 2000.0,
+              'default': 300.0,
+              'step_count': 0,
+            },
+          ],
+        },
+        {'type': 'volume', 'parameters': <Map<String, dynamic>>[]},
+      ],
+    };
+    await tester.pumpWidget(MaterialApp(
+      home: PresetEditorScreen(
+        controller: DaemonStateController(fakeClient),
+        rig: rigSvt,
+        preset: presetClean,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('add-effect-button')));
+    await tester.pumpAndSettle();
+    // Backline-only types are not offered as effects.
+    expect(find.byKey(const Key('add-effect-type-volume')), findsNothing);
+    await tester.tap(find.byKey(const Key('add-effect-type-delay')));
+    await tester.pumpAndSettle();
+
+    final rigCmd = fakeClient.sentCommands
+        .lastWhere((c) => c.type == 'update_rig')
+        .command as UpdateRigCommand;
+    final ids = rigCmd.chain!.map((b) => b.id).toList();
+    final delay = rigCmd.chain!.firstWhere((b) => b.type == 'delay');
+    expect(ids.indexOf(delay.id), ids.indexOf('cab') - 1);
+    expect(ids.indexOf('amp'), lessThan(ids.indexOf(delay.id)));
+    expect(delay.pinned, isFalse);
+    expect(delay.enabled, isFalse);
+    expect(delay.params['delay_ms'], 300.0);
+
+    final presetCmd = lastPresetUpdate(fakeClient);
+    expect(presetCmd.presetId, 'preset-a');
+    expect(presetCmd.blockStates![delay.id]!.enabled, isTrue);
   });
 
   testWidgets('renaming and saving sends the new name', (tester) async {
@@ -137,11 +240,18 @@ void main() {
       ],
     };
     final controller = DaemonStateController(fakeClient);
+    // Live controls sit below the default 800x600 viewport, and ListView
+    // only builds on-screen children.
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(MaterialApp(
       home: PresetEditorScreen(
         controller: controller,
         rig: rigSvt,
-        preset: presetClean,
+        // dist is on in "Drive" -- effects that are off get no controls.
+        preset: presetDrive,
       ),
     ));
     await tester.pumpAndSettle();
@@ -181,11 +291,17 @@ void main() {
       ],
     };
     final controller = DaemonStateController(fakeClient);
+    // Live controls sit below the default 800x600 viewport, and ListView
+    // only builds on-screen children.
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     await tester.pumpWidget(MaterialApp(
       home: PresetEditorScreen(
         controller: controller,
         rig: rigSvt,
-        preset: presetClean,
+        preset: presetDrive,
       ),
     ));
     await tester.pumpAndSettle();
@@ -204,7 +320,7 @@ void main() {
         .firstWhere((c) => c.type == 'set_block_param')
         .command as SetBlockParamCommand;
     expect(sent.rigId, 'rig-1');
-    expect(sent.presetId, 'preset-a');
+    expect(sent.presetId, 'preset-b');
     expect(sent.blockId, 'dist');
     expect(sent.paramKey, 'gain_db');
     expect(sent.value, 12.0);
@@ -232,8 +348,12 @@ void main() {
         ),
       ],
     );
+    final rigWithPlugin = rigSvt.copyWith(chain: [
+      ...svtChain,
+      const EffectBlock(id: 'fx1', type: 'vst3', assetId: 'plug-1'),
+    ]);
     final stateWithPlugin = DaemonState(
-      rigs: sampleState.rigs,
+      rigs: [rigWithPlugin, rigOrange],
       assets: {...sampleState.assets, 'plug-1': vst3Asset},
       footswitchMapping: sampleState.footswitchMapping,
       activeRigIndex: sampleState.activeRigIndex,
@@ -243,11 +363,6 @@ void main() {
       bypass: sampleState.bypass,
       tempoBpm: sampleState.tempoBpm,
     );
-    final rigWithPlugin = rigSvt.copyWith(chain: [
-      ...svtChain,
-      const EffectBlock(id: 'fx1', type: 'vst3', assetId: 'plug-1'),
-    ]);
-
     final fakeClient = FakeDaemonClient(state: stateWithPlugin);
     final controller = DaemonStateController(fakeClient);
 

@@ -60,7 +60,15 @@ std::string utf16ToUtf8(const TChar* str) {
 }
 
 // Finds `<bundlePath>/Contents/<arch>-linux/*.so` -- the standard VST3
-// bundle layout on Linux (see steinbergmedia/vst3sdk's own module loader).
+// bundle layout on Linux (see steinbergmedia/vst3sdk's own module loader) --
+// or, failing that, `<bundlePath>/Contents/MacOS/*` -- the standard macOS
+// bundle layout (an Info.plist-described app bundle, same shape VST3 uses
+// there: one Mach-O binary directly under Contents/MacOS, no arch
+// subdirectory or file extension). Checking Linux first keeps this engine's
+// own in-repo test plugin (deliberately packaged `-linux`-style even when
+// built on macOS, see CMakeLists.txt "VST3 plugin hosting") resolving the
+// same way regardless of host OS; real third-party plugins installed on a
+// Mac fall through to the MacOS branch.
 std::string resolveModuleSharedLibrary(const std::string& bundlePath) {
     namespace fs = std::filesystem;
     fs::path contents = fs::path(bundlePath) / "Contents";
@@ -76,7 +84,16 @@ std::string resolveModuleSharedLibrary(const std::string& bundlePath) {
             if (file.path().extension() == ".so") return file.path().string();
         }
     }
-    throw std::runtime_error("VST3 bundle '" + bundlePath + "' has no <arch>-linux/*.so module");
+    fs::path macosDir = contents / "MacOS";
+    std::error_code macosEc;
+    if (fs::is_directory(macosDir, macosEc)) {
+        std::error_code innerEc;
+        for (const auto& file : fs::directory_iterator(macosDir, innerEc)) {
+            if (file.is_regular_file()) return file.path().string();
+        }
+    }
+    throw std::runtime_error(
+        "VST3 bundle '" + bundlePath + "' has no <arch>-linux/*.so module or Contents/MacOS/* binary");
 }
 
 // Minimal host-side FUnknown implementations. None of these need a real

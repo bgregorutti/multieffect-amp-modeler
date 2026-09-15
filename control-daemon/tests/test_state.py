@@ -207,6 +207,35 @@ def test_reorder_rigs_rejects_incomplete_list(manager):
         manager.reorder_rigs([one.id])
 
 
+def test_select_preset_on_a_rig_with_no_presets_activates_the_rig_without_erroring(
+    manager,
+):
+    """A freshly created rig has no presets yet (create_preset is a
+    separate call) -- selecting it (e.g. the mobile app's "tap a rig to
+    make it active", which always sends preset_index=0) must not hard-fail
+    just because index 0 doesn't exist yet. Regression test: this used to
+    raise validation_error, which silently broke selecting any rig beyond
+    the first one in the app (RigListScreen's tap handler swallows the
+    resulting WS error)."""
+    _bass_rig(manager, name="One")
+    manager.create_rig(name="Two", chain=[])
+
+    manager.select_preset(rig_index=1, preset_index=0)
+
+    assert manager.state.active_rig_index == 1
+    assert manager.active_rig().name == "Two"
+    assert manager.active_preset() is None
+
+
+def test_select_preset_still_rejects_out_of_range_index_on_a_non_empty_rig(manager):
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="Clean")
+
+    with pytest.raises(StateError) as exc:
+        manager.select_preset(rig_index=0, preset_index=5)
+    assert exc.value.code == "validation_error"
+
+
 # -- presets ------------------------------------------------------------------
 
 

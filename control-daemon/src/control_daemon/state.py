@@ -311,15 +311,27 @@ class DaemonStateManager:
             )
         rig = self.state.rigs[target_rig_index]
 
-        target_preset_index = (
-            self.state.active_preset_index if preset_index is None else preset_index
-        )
-        if not (0 <= target_preset_index < len(rig.presets)):
-            raise StateError(
-                "validation_error",
-                f"preset_index {target_preset_index} out of range for rig "
-                f"{rig.name!r} (has {len(rig.presets)} presets)",
+        if rig.presets:
+            target_preset_index = (
+                self.state.active_preset_index if preset_index is None else preset_index
             )
+            if not (0 <= target_preset_index < len(rig.presets)):
+                raise StateError(
+                    "validation_error",
+                    f"preset_index {target_preset_index} out of range for rig "
+                    f"{rig.name!r} (has {len(rig.presets)} presets)",
+                )
+        else:
+            # A rig with no presets yet (e.g. freshly created) has nothing
+            # to select -- not a client error, the same "no active preset"
+            # state active_preset()/_load_active() already tolerate
+            # gracefully for the footswitch rig-stepping path (_change_rig).
+            # A specific preset_index request against an empty rig is
+            # inherently unsatisfiable, so it's ignored here rather than
+            # rejected -- this is what lets the app's "tap a rig to make it
+            # active" (RigListScreen, always sends preset_index=0) work on a
+            # rig that doesn't have a preset yet either.
+            target_preset_index = 0
 
         self.state.active_rig_index = target_rig_index
         self.state.active_preset_index = target_preset_index

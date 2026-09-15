@@ -76,6 +76,35 @@ void main() {
     },
   );
 
+  test(
+    'a mutating command\'s Future does not resolve until state already '
+    'reflects it -- no grace-period delay needed',
+    () async {
+      // Regression test: command_ok and the state_changed it triggers are
+      // two separate WebSocket messages; completing a command's Future as
+      // soon as command_ok arrives let its continuation (e.g. a screen
+      // saving an edit and immediately navigating to read `state`) run
+      // before the broadcast had been processed, so a caller could
+      // observe stale state right after a successful, awaited command --
+      // concretely, saving a rig edit and immediately reopening it could
+      // show the value from before the edit. DaemonClient now holds a
+      // mutating command's completer until its state_changed has been
+      // applied (see _onData's CommandOkMessage case) instead of resolving
+      // on command_ok alone.
+      client = DaemonClient(uri: daemon.wsUri, clientName: 'test-app');
+      await client.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      expect(client.state.bypass, false);
+
+      await client.setBypass(const SetBypassCommand(bypass: true));
+
+      // No delay here on purpose -- if this were flaky/failing, the fix
+      // regressed back to resolving on command_ok alone.
+      expect(client.state.bypass, true);
+    },
+  );
+
   test('an error reply surfaces as a DaemonCommandError', () async {
     client = DaemonClient(uri: daemon.wsUri, clientName: 'test-app');
     await client.connect();

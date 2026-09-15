@@ -305,6 +305,60 @@ TEST(ResourceManager, AmpAndCabBlocksLoadTheirOwnAssets) {
     EXPECT_TRUE(manager.currentChain()->effects.empty());
 }
 
+// Regression test for a real use-after-free: namModel is a single
+// shared_ptr field and processOrder holds a non-owning raw pointer into
+// it, so a second enabled "nam" block would silently destroy the first
+// one's object (via the shared_ptr reassignment) while a dangling pointer
+// to it stayed in processOrder -- the next processAudioBlock would then
+// call into freed memory. This must fail loud at load time instead.
+TEST(ResourceManager, RejectsMoreThanOneEnabledNamBlock) {
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loaderOwned);
+
+    Asset nam1;
+    nam1.id = "n1";
+    nam1.kind = AssetKind::Nam;
+    nam1.filename = "n1.nam";
+    nam1.stored_path = "/fake/n1.nam";
+    Asset nam2;
+    nam2.id = "n2";
+    nam2.kind = AssetKind::Nam;
+    nam2.filename = "n2.nam";
+    nam2.stored_path = "/fake/n2.nam";
+    manager.registerAsset(nam1);
+    manager.registerAsset(nam2);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("channel-clean", "nam", "n1"), makeBlock("channel-crunch", "nam", "n2")};
+    EXPECT_THROW(manager.loadPreset(p), std::runtime_error);
+}
+
+TEST(ResourceManager, RejectsMoreThanOneEnabledIrBlock) {
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loaderOwned);
+
+    Asset ir1;
+    ir1.id = "i1";
+    ir1.kind = AssetKind::Ir;
+    ir1.filename = "i1.wav";
+    ir1.stored_path = "/fake/i1.wav";
+    Asset ir2;
+    ir2.id = "i2";
+    ir2.kind = AssetKind::Ir;
+    ir2.filename = "i2.wav";
+    ir2.stored_path = "/fake/i2.wav";
+    manager.registerAsset(ir1);
+    manager.registerAsset(ir2);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("cab-a", "ir", "i1"), makeBlock("cab-b", "ir", "i2")};
+    EXPECT_THROW(manager.loadPreset(p), std::runtime_error);
+}
+
 TEST(ResourceManager, DisabledAmpBlockIsNotLoaded) {
     auto loaderOwned = std::make_shared<CountingAssetLoader>();
     CountingAssetLoader& loader = *loaderOwned;

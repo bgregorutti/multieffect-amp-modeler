@@ -53,6 +53,17 @@ class Rig {
   /// The fixed backline: always on, shared by every preset in this rig.
   List<EffectBlock> get pinnedBlocks => chain.where((b) => b.pinned).toList();
 
+  /// This rig's chain with [effect] inserted right before the first cab
+  /// ("ir") block -- the gain -> amp -> effects -> cab -> tone -> volume
+  /// order -- or at the end if there is no cab. Effects added one after
+  /// another therefore stay in the order they were added.
+  List<EffectBlock> chainWithEffect(EffectBlock effect) {
+    final cabIndex = chain.indexWhere((b) => b.type == 'ir');
+    final next = List.of(chain);
+    next.insert(cabIndex == -1 ? next.length : cabIndex, effect);
+    return next;
+  }
+
   Rig copyWith({
     String? name,
     List<EffectBlock>? chain,
