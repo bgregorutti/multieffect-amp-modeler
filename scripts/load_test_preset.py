@@ -130,10 +130,16 @@ async def main_async(args: argparse.Namespace) -> None:
         # that one rig's chain, so calling this script twice -- once with a
         # --nam, once with an --ir -- builds a single head+cab rig rather
         # than two unrelated ones.
+        # Omitting "chain" (not sending an explicit []) makes the daemon
+        # seed the standard gain -> amp -> cab -> tone stack -> volume
+        # skeleton (see control_daemon.models.default_rig_chain) with
+        # placeholder amp/cab blocks (ids "amp"/"cab", no asset yet) --
+        # add_block below fills those in by replacing them by id, the same
+        # convention it already uses for idempotent re-runs.
         rigs = state["rigs"]
         rig = next((r for r in rigs if r["name"] == args.rig), None)
         if rig is None:
-            rig = (await command(ws, {"type": "create_rig", "name": args.rig, "chain": []}))["rig"]
+            rig = (await command(ws, {"type": "create_rig", "name": args.rig}))["rig"]
             print(f"[load-test-preset] created rig {rig['id']} ({args.rig!r})")
 
         chain = list(rig["chain"])
@@ -153,7 +159,14 @@ async def main_async(args: argparse.Namespace) -> None:
                 if existing["id"] == block_id:
                     chain[i] = block
                     return
-            chain.append(block)
+            # A genuinely new block (not a replacement) is a switchable
+            # effect -- insert it right before the cab, not at the end, so
+            # it lands between the amp and the cab per the required
+            # gain -> NAM -> effects -> cab -> tone stack -> volume order
+            # instead of after the tone stack/volume stages that now
+            # always sit at the end of a rig's default chain.
+            cab_index = next((i for i, b in enumerate(chain) if b["id"] == "cab"), len(chain))
+            chain.insert(cab_index, block)
 
         if args.nam:
             meta = upload_asset(base_url, "nam", Path(args.nam))

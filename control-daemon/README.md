@@ -230,8 +230,24 @@ before the resulting broadcast copy on that same connection.
   }
 }
 
-// Register metadata for a .nam/IR file already uploaded via HTTP (see below)
+// Register metadata for a .nam/IR file already uploaded via HTTP (see
+// below), or a .vst3 plugin bundle already installed out of band. For
+// "kind": "vst3" the resulting asset also carries the plugin's own
+// parameter schema (introspected by the engine as part of registering) --
+// see BlockParamDescriptor in models.py.
 {"type": "register_asset", "kind": "nam", "filename": "my_amp.nam", "stored_path": "/data/assets/abc123.nam", "size_bytes": 20971520, "sha256": "..."}
+
+// Live, no-reload parameter tweak on one block within one preset (rig +
+// preset addressing -- see models.py's "Rigs and presets" docstring):
+// persists into that preset's block_states[block_id].params override,
+// forwarded to the engine only if this rig/preset is the one actually
+// playing.
+{"type": "set_block_param", "rig_id": "rig1", "preset_id": "abc123", "block_id": "dist", "param_key": "gain_db", "value": 6.0}
+
+// Static per-engine-build parameter schema for every native block type
+// (label/unit/min/max/default) -- a pure query, fetch once (e.g. on
+// connect), not per-rig state. See audio-engine's block_type_registry.hpp.
+{"type": "list_block_types"}
 ```
 
 ### Client -> server: footswitch-only event

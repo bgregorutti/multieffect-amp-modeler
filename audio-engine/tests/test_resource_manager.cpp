@@ -43,18 +43,40 @@ struct CountingIrHandle : public IrHandle {
     std::atomic<int>& live_;
 };
 
+// Unlike CountingNamModel/CountingIrHandle, a "vst3" block has no dedicated
+// EngineChain field to release-and-replace -- it just lives in `effects`
+// like any other block, so a plain identity EffectBlock double (counted the
+// same way) is enough to prove ResourceManager::loadPreset's "vst3" branch
+// actually calls IAssetLoader::loadVst3 and wires the result into the
+// chain, without needing the real VST3 SDK at all.
+struct CountingVst3Block : public EffectBlock {
+    explicit CountingVst3Block(std::atomic<int>& liveCount, std::atomic<int>& totalCount) : live_(liveCount) {
+        ++live_;
+        ++totalCount;
+    }
+    ~CountingVst3Block() override { --live_; }
+    void prepare(double) override {}
+    void process(float*, std::size_t) override {}
+    std::atomic<int>& live_;
+};
+
 class CountingAssetLoader : public IAssetLoader {
 public:
     std::atomic<int> liveNamCount{0};
     std::atomic<int> totalNamLoaded{0};
     std::atomic<int> liveIrCount{0};
     std::atomic<int> totalIrLoaded{0};
+    std::atomic<int> liveVst3Count{0};
+    std::atomic<int> totalVst3Loaded{0};
 
     std::shared_ptr<INamModel> loadNam(const std::string&) override {
         return std::make_shared<CountingNamModel>(liveNamCount, totalNamLoaded);
     }
     std::shared_ptr<IrHandle> loadIr(const std::string&, double) override {
         return std::make_shared<CountingIrHandle>(liveIrCount, totalIrLoaded);
+    }
+    std::unique_ptr<EffectBlock> loadVst3(const std::string&) override {
+        return std::make_unique<CountingVst3Block>(liveVst3Count, totalVst3Loaded);
     }
 };
 
@@ -283,6 +305,60 @@ TEST(ResourceManager, AmpAndCabBlocksLoadTheirOwnAssets) {
     EXPECT_TRUE(manager.currentChain()->effects.empty());
 }
 
+// Regression test for a real use-after-free: namModel is a single
+// shared_ptr field and processOrder holds a non-owning raw pointer into
+// it, so a second enabled "nam" block would silently destroy the first
+// one's object (via the shared_ptr reassignment) while a dangling pointer
+// to it stayed in processOrder -- the next processAudioBlock would then
+// call into freed memory. This must fail loud at load time instead.
+TEST(ResourceManager, RejectsMoreThanOneEnabledNamBlock) {
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loaderOwned);
+
+    Asset nam1;
+    nam1.id = "n1";
+    nam1.kind = AssetKind::Nam;
+    nam1.filename = "n1.nam";
+    nam1.stored_path = "/fake/n1.nam";
+    Asset nam2;
+    nam2.id = "n2";
+    nam2.kind = AssetKind::Nam;
+    nam2.filename = "n2.nam";
+    nam2.stored_path = "/fake/n2.nam";
+    manager.registerAsset(nam1);
+    manager.registerAsset(nam2);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("channel-clean", "nam", "n1"), makeBlock("channel-crunch", "nam", "n2")};
+    EXPECT_THROW(manager.loadPreset(p), std::runtime_error);
+}
+
+TEST(ResourceManager, RejectsMoreThanOneEnabledIrBlock) {
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loaderOwned);
+
+    Asset ir1;
+    ir1.id = "i1";
+    ir1.kind = AssetKind::Ir;
+    ir1.filename = "i1.wav";
+    ir1.stored_path = "/fake/i1.wav";
+    Asset ir2;
+    ir2.id = "i2";
+    ir2.kind = AssetKind::Ir;
+    ir2.filename = "i2.wav";
+    ir2.stored_path = "/fake/i2.wav";
+    manager.registerAsset(ir1);
+    manager.registerAsset(ir2);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("cab-a", "ir", "i1"), makeBlock("cab-b", "ir", "i2")};
+    EXPECT_THROW(manager.loadPreset(p), std::runtime_error);
+}
+
 TEST(ResourceManager, DisabledAmpBlockIsNotLoaded) {
     auto loaderOwned = std::make_shared<CountingAssetLoader>();
     CountingAssetLoader& loader = *loaderOwned;
@@ -379,6 +455,146 @@ TEST(ResourceManager, ChainProcessClampsFinalOutputToUnitRange) {
     for (float s : buf) EXPECT_LE(std::fabs(s), 1.0f);
     EXPECT_FLOAT_EQ(buf[0], 1.0f);   // 0.5 * ~100 clamps to the ceiling
     EXPECT_FLOAT_EQ(buf[1], -1.0f);  // -0.5 * ~100 clamps to the floor
+}
+
+TEST(ResourceManager, CreateEffectBlockBuildsVolumeAsAGainBlock) {
+    EffectBlockSpec spec;
+    spec.type = "volume";
+    spec.params["gain_db"] = 20.0;  // 10x linear
+    auto block = createEffectBlock(spec);
+    ASSERT_NE(block, nullptr);
+    block->prepare(48000.0);
+
+    std::vector<float> buf = {0.05f, 0.0f};
+    block->process(buf);
+    EXPECT_NEAR(buf[0], 0.5f, 1e-5f);
+}
+
+TEST(ResourceManager, CreateEffectBlockBuildsToneStack) {
+    EffectBlockSpec spec;
+    spec.type = "tone_stack";
+    spec.params["bass_db"] = 12.0;
+    auto block = createEffectBlock(spec);
+    ASSERT_NE(block, nullptr);
+    block->prepare(48000.0);
+
+    // A boosted bass band must actually change a non-trivial signal --
+    // proves ToneStackBlock is really wired in via createEffectBlock, not
+    // just constructed and discarded.
+    std::vector<float> buf(256, 0.0f);
+    buf[0] = 1.0f;
+    block->process(buf);
+    bool anyNonZero = false;
+    for (float s : buf) anyNonZero = anyNonZero || (s != 0.0f);
+    EXPECT_TRUE(anyNonZero);
+}
+
+TEST(ResourceManager, LoadPresetRunsGainNamEffectsCabToneVolumeInOrder) {
+    // The full chain order the product spec calls for: gain (input trim)
+    // -> NAM -> effects -> cab -> tone stack -> volume (output level).
+    // Every stage here is identity except the two gain stages, so the
+    // combined effect must be exactly their product regardless of what
+    // sits between them.
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+
+    Asset nam;
+    nam.id = "n";
+    nam.kind = AssetKind::Nam;
+    nam.filename = "n.nam";
+    nam.stored_path = "/fake/n.nam";
+    Asset ir;
+    ir.id = "i";
+    ir.kind = AssetKind::Ir;
+    ir.filename = "i.wav";
+    ir.stored_path = "/fake/i.wav";
+    manager.registerAsset(nam);
+    manager.registerAsset(ir);
+
+    EffectBlockSpec inputTrim;
+    inputTrim.id = "input_trim";
+    inputTrim.type = "gain";
+    inputTrim.params["gain_db"] = 20.0;  // 10x
+
+    EffectBlockSpec amp;
+    amp.id = "amp";
+    amp.type = "nam";
+    amp.asset_id = "n";
+
+    EffectBlockSpec cab;
+    cab.id = "cab";
+    cab.type = "ir";
+    cab.asset_id = "i";
+
+    EffectBlockSpec toneStack;
+    toneStack.id = "tone_stack";
+    toneStack.type = "tone_stack";  // flat (0dB every band) -- identity
+
+    EffectBlockSpec outputVolume;
+    outputVolume.id = "output_volume";
+    outputVolume.type = "volume";
+    outputVolume.params["gain_db"] = 6.0;  // ~2x
+
+    Preset p;
+    p.id = "p1";
+    p.name = "p1";
+    p.blocks = {inputTrim, amp, cab, toneStack, outputVolume};
+    manager.loadPreset(p);
+
+    std::vector<float> buf = {0.01f, 0.0f};
+    manager.currentChain()->process(buf.data(), buf.size());
+    // CountingIrHandle's IR is {1.0} (identity), NAM stub is identity --
+    // only the two gain stages should have scaled the signal: 0.01 * 10 *
+    // ~2 ~= 0.2.
+    EXPECT_NEAR(buf[0], 0.01f * 10.0f * std::pow(10.0f, 6.0f / 20.0f), 1e-4f);
+}
+
+TEST(ResourceManager, Vst3BlockLoadsViaAssetLoaderAndRunsInChain) {
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    CountingAssetLoader& loader = *loaderOwned;
+    ResourceManager manager(loaderOwned);
+
+    Asset plugin;
+    plugin.id = "plug1";
+    plugin.kind = AssetKind::Vst3;
+    plugin.filename = "Test.vst3";
+    plugin.stored_path = "/fake/Test.vst3";
+    manager.registerAsset(plugin);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("fx", "vst3", "plug1")};
+    manager.loadPreset(p);
+
+    EXPECT_EQ(loader.totalVst3Loaded.load(), 1);
+    ASSERT_NE(manager.currentChain(), nullptr);
+    ASSERT_EQ(manager.currentChain()->effects.size(), 1u);
+    EXPECT_EQ(manager.currentChain()->processOrder[0], manager.currentChain()->effects[0].get());
+}
+
+TEST(ResourceManager, MultipleVst3BlocksCanCoexistInOneChain) {
+    // Unlike "nam"/"ir" (one dedicated chain-level slot each), "vst3" has no
+    // such limit -- a rig can chain any number of plugin instances.
+    auto loaderOwned = std::make_shared<CountingAssetLoader>();
+    CountingAssetLoader& loader = *loaderOwned;
+    ResourceManager manager(loaderOwned);
+
+    Asset plugin;
+    plugin.id = "plug1";
+    plugin.kind = AssetKind::Vst3;
+    plugin.filename = "Test.vst3";
+    plugin.stored_path = "/fake/Test.vst3";
+    manager.registerAsset(plugin);
+
+    Preset p;
+    p.id = "p";
+    p.name = "p";
+    p.blocks = {makeBlock("fx1", "vst3", "plug1"), makeBlock("fx2", "vst3", "plug1")};
+    manager.loadPreset(p);
+
+    EXPECT_EQ(loader.totalVst3Loaded.load(), 2);
+    ASSERT_EQ(manager.currentChain()->effects.size(), 2u);
 }
 
 TEST(ResourceManager, CreateEffectBlockFallsBackToPassthroughForUnknownType) {

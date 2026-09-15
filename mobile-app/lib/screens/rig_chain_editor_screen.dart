@@ -1,22 +1,47 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../models/asset.dart';
+import '../models/block_param_descriptor.dart';
 import '../models/effect_block.dart';
 import '../models/rig.dart';
 import '../models/ws_messages.dart';
 import '../state/daemon_state_controller.dart';
 
-/// Edits a rig's name and its signal `chain`: add/remove/reorder blocks, and
-/// per block set `type` (free text), `asset_id` (from the uploaded library),
-/// `pinned`, `enabled` and `params` (generic key-value editor).
+/// The block types a rig's backline is made of. Effects (delay, eq, vst3,
+/// ...) are added per preset in `PresetEditorScreen`, not here. A block
+/// loaded with some other type is still shown as-is (see `_typeOptions`).
+const List<String> _kBacklineTypes = ['gain', 'nam', 'ir', 'tone_stack', 'volume'];
+
+/// The asset kind a block of [type] should be paired with, or null if it
+/// isn't asset-backed (a native gain/eq/delay/etc. block, or an
+/// unrecognized type gets no asset picker at all). A top-level function
+/// (not a private method) so it's directly unit-testable without pumping
+/// a widget tree -- this is the exact mapping that keeps a block's asset
+/// picker from offering an asset of the wrong kind (e.g. a `.nam` file for
+/// an `"ir"` block, which the engine rejects at load time with "missing
+/// 'RIFF' chunk id").
+AssetKind? assetKindForBlockType(String type) {
+  switch (type) {
+    case 'nam':
+      return AssetKind.nam;
+    case 'ir':
+      return AssetKind.ir;
+    case 'vst3':
+      return AssetKind.vst3;
+    default:
+      return null;
+  }
+}
+
+/// Edits a rig's name and its backline: the pinned blocks (input gain, amp,
+/// cab, tone stack, output volume) shared by every preset. Per block: type,
+/// asset (filtered to the kind that type wants) and default params.
 ///
-/// `EffectBlock.type`/`params` are opaque, engine-defined data as far as the
-/// daemon (and this app) are concerned -- this is deliberately a generic
-/// editor, not a bespoke UI per "known" effect type.
-///
-/// Pinning is the rig/preset split made visible: a pinned block (the amp and
-/// cab) is always on and cannot be switched by any preset in this rig, so the
-/// preset editor only offers the unpinned ones.
+/// Effects -- the unpinned blocks of the chain -- are managed from each
+/// preset instead. They are not shown here, but are kept exactly where they
+/// are in the chain when this screen saves.
 class RigChainEditorScreen extends StatefulWidget {
   final DaemonStateController controller;
   final Rig rig;
@@ -36,11 +61,28 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
   late List<EffectBlock> _chain;
   int _newBlockCounter = 0;
 
+  /// Static per-engine-build native block schema (same fetch/shape
+  /// `PresetEditorScreen` already uses for its live-controls panel).
+  List<BlockTypeDescriptor> _blockTypes = const [];
+
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.rig.name);
     _chain = List.of(widget.rig.chain);
+    unawaited(_loadBlockTypes());
+  }
+
+  Future<void> _loadBlockTypes() async {
+    final result =
+        await widget.controller.client.listBlockTypes(const ListBlockTypesCommand());
+    final raw = result['block_types'] as List<dynamic>? ?? const [];
+    if (!mounted) return;
+    setState(() {
+      _blockTypes = raw
+          .map((t) => BlockTypeDescriptor.fromJson(t as Map<String, dynamic>))
+          .toList();
+    });
   }
 
   @override
@@ -57,54 +99,76 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
     return 'blk-${DateTime.now().microsecondsSinceEpoch}-$_newBlockCounter';
   }
 
+  /// A brand-new backline block: pinned, and a "gain" so it always has a
+  /// real schema.
   void _addBlock() {
     setState(() {
-      _chain = [..._chain, EffectBlock(id: _newBlockId(), type: 'new_block')];
+      _chain = [
+        ..._chain,
+        EffectBlock(
+          id: _newBlockId(),
+          type: 'gain',
+          pinned: true,
+          params: _defaultParamsFor('gain'),
+        ),
+      ];
     });
   }
 
-  void _removeBlockAt(int index) {
-    setState(() {
-      final next = List.of(_chain);
-      next.removeAt(index);
-      _chain = next;
-    });
+  List<EffectBlock> get _backline => _chain.where((b) => b.pinned).toList();
+
+  Map<String, Object?> _defaultParamsFor(String type) {
+    for (final blockType in _blockTypes) {
+      if (blockType.type == type) {
+        return {for (final p in blockType.parameters) p.key: p.defaultValue};
+      }
+    }
+    return const {};
   }
 
-  void _reorderBlocks(int oldIndex, int newIndex) {
+  void _removeBlock(String id) {
+    setState(() => _chain = _chain.where((b) => b.id != id).toList());
+  }
+
+  /// Reorders backline blocks among themselves. The chain positions that
+  /// hold backline blocks stay backline positions, so effects (not shown on
+  /// this screen) keep their exact place in the chain.
+  void _reorderBacklineBlocks(int oldIndex, int newIndex) {
     // `onReorderItem` (unlike the deprecated `onReorder`) already adjusts
     // `newIndex` for the removed item at `oldIndex`, so no manual `-1`
     // correction is needed here.
     setState(() {
-      final next = List.of(_chain);
-      final item = next.removeAt(oldIndex);
-      next.insert(newIndex, item);
-      _chain = next;
+      final backline = _backline;
+      final item = backline.removeAt(oldIndex);
+      backline.insert(newIndex, item);
+      var i = 0;
+      _chain = [for (final b in _chain) b.pinned ? backline[i++] : b];
     });
   }
 
-  void _updateBlockAt(int index, EffectBlock updated) {
+  void _updateBlock(EffectBlock updated) {
     setState(() {
-      final next = List.of(_chain);
-      next[index] = updated;
-      _chain = next;
+      _chain = [for (final b in _chain) b.id == updated.id ? updated : b];
     });
   }
 
-  Future<void> _save() async {
-    await widget.controller.client.updateRig(
-      UpdateRigCommand(
-        rigId: widget.rig.id,
-        name: _nameController.text.trim(),
-        chain: _chain,
+  /// Type changed in the dropdown: the old asset (if any) almost certainly
+  /// doesn't match the new type's kind, and the old params belong to the
+  /// old type's schema -- both are reset rather than carried over stale.
+  void _changeBlockType(EffectBlock current, String newType) {
+    _updateBlock(
+      current.copyWith(
+        type: newType,
+        assetId: () => null,
+        params: _defaultParamsFor(newType),
       ),
     );
-    if (mounted) Navigator.of(context).pop();
   }
 
   @override
   Widget build(BuildContext context) {
     final assets = widget.controller.state.assets.values.toList();
+    final backline = _backline;
 
     return Scaffold(
       appBar: AppBar(
@@ -129,7 +193,7 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Signal chain',
+              Text('Backline',
                   style: Theme.of(context).textTheme.titleMedium),
               IconButton(
                 key: const Key('add-block-button'),
@@ -141,24 +205,27 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(
-              'Pinned blocks (amp, cab) stay on in every preset. '
-              'Unpinned blocks are what presets switch.',
+              'Always on in every preset of this rig. '
+              'Effects are added from each preset.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
           ReorderableListView.builder(
             shrinkWrap: true,
             physics: const NeverScrollableScrollPhysics(),
-            itemCount: _chain.length,
-            onReorderItem: _reorderBlocks,
+            itemCount: backline.length,
+            onReorderItem: _reorderBacklineBlocks,
             itemBuilder: (context, index) {
+              final block = backline[index];
               return _BlockEditor(
-                key: ValueKey('block-editor-${_chain[index].id}'),
+                key: ValueKey('block-editor-${block.id}'),
                 index: index,
-                block: _chain[index],
+                block: block,
                 assets: assets,
-                onChanged: (b) => _updateBlockAt(index, b),
-                onRemove: () => _removeBlockAt(index),
+                blockTypes: _blockTypes,
+                onChanged: _updateBlock,
+                onTypeChanged: (t) => _changeBlockType(block, t),
+                onRemove: () => _removeBlock(block.id),
               );
             },
           ),
@@ -166,13 +233,26 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
       ),
     );
   }
+
+  Future<void> _save() async {
+    await widget.controller.client.updateRig(
+      UpdateRigCommand(
+        rigId: widget.rig.id,
+        name: _nameController.text.trim(),
+        chain: _chain,
+      ),
+    );
+    if (mounted) Navigator.of(context).pop();
+  }
 }
 
 class _BlockEditor extends StatelessWidget {
   final int index;
   final EffectBlock block;
   final List<Asset> assets;
+  final List<BlockTypeDescriptor> blockTypes;
   final ValueChanged<EffectBlock> onChanged;
+  final ValueChanged<String> onTypeChanged;
   final VoidCallback onRemove;
 
   const _BlockEditor({
@@ -180,12 +260,52 @@ class _BlockEditor extends StatelessWidget {
     required this.index,
     required this.block,
     required this.assets,
+    required this.blockTypes,
     required this.onChanged,
+    required this.onTypeChanged,
     required this.onRemove,
   });
 
+  /// The backline types, plus this block's own current type if it is
+  /// something else (e.g. a rig where tone_stack was turned into a delay),
+  /// so the dropdown still shows it and it can be changed back.
+  List<String> get _typeOptions => [
+        ..._kBacklineTypes,
+        if (!_kBacklineTypes.contains(block.type)) block.type,
+      ];
+
+  AssetKind? get _wantedAssetKind => assetKindForBlockType(block.type);
+
+  /// The parameter schema for this block, if any -- a native type's schema
+  /// from `list_block_types`, or a `vst3` block's own asset-specific schema
+  /// (see `Asset.parameters`). Same lookup `PresetEditorScreen` uses for its
+  /// live-controls panel, reused here to drive the *default*-params editor.
+  List<BlockParamDescriptor> get _paramSchema {
+    if (block.type == 'vst3') {
+      final assetId = block.assetId;
+      if (assetId == null) return const [];
+      for (final asset in assets) {
+        if (asset.id == assetId) return asset.parameters ?? const [];
+      }
+      return const [];
+    }
+    for (final blockType in blockTypes) {
+      if (blockType.type == block.type) return blockType.parameters;
+    }
+    return const [];
+  }
+
   @override
   Widget build(BuildContext context) {
+    final wantedKind = _wantedAssetKind;
+    final needsAsset = wantedKind != null;
+    final schema = _paramSchema;
+    // Asset-backed types have no params of their own; any other type with
+    // no known schema falls back to the free-form editor so nothing becomes
+    // uneditable.
+    final isKnownType =
+        needsAsset || blockTypes.any((t) => t.type == block.type);
+
     return Card(
       key: ValueKey('block-card-$index'),
       margin: const EdgeInsets.symmetric(vertical: 4),
@@ -197,17 +317,18 @@ class _BlockEditor extends StatelessWidget {
             Row(
               children: [
                 Expanded(
-                  child: TextFormField(
+                  child: DropdownButtonFormField<String>(
                     key: Key('block-type-field-$index'),
                     initialValue: block.type,
                     decoration: const InputDecoration(labelText: 'Type'),
-                    onChanged: (v) => onChanged(block.copyWith(type: v)),
+                    items: [
+                      for (final type in _typeOptions)
+                        DropdownMenuItem(value: type, child: Text(type)),
+                    ],
+                    onChanged: (v) {
+                      if (v != null && v != block.type) onTypeChanged(v);
+                    },
                   ),
-                ),
-                Switch(
-                  key: Key('block-enabled-switch-$index'),
-                  value: block.enabled,
-                  onChanged: (v) => onChanged(block.copyWith(enabled: v)),
                 ),
                 IconButton(
                   key: Key('remove-block-button-$index'),
@@ -223,25 +344,39 @@ class _BlockEditor extends StatelessWidget {
                 ),
               ],
             ),
-            _AssetDropdown(
-              key: Key('block-asset-dropdown-$index'),
-              label: 'Asset (NAM / IR)',
-              assets: assets,
-              value: block.assetId,
-              onChanged: (id) => onChanged(block.copyWith(assetId: () => id)),
-            ),
-            SwitchListTile(
-              key: Key('block-pinned-switch-$index'),
-              contentPadding: EdgeInsets.zero,
-              dense: true,
-              title: const Text('Pinned (always on)'),
-              value: block.pinned,
-              onChanged: (v) => onChanged(block.copyWith(pinned: v)),
-            ),
-            _ParamsEditor(
-              params: block.params,
-              onChanged: (p) => onChanged(block.copyWith(params: p)),
-            ),
+            if (needsAsset)
+              _AssetDropdown(
+                // Keyed by type too: a nam->ir change must start a fresh
+                // field, not keep the old nam asset selected in a list that
+                // no longer contains it.
+                key: Key('block-asset-dropdown-$index-${block.type}'),
+                label: 'Asset (${wantedKind.name.toUpperCase()})',
+                assets: assets.where((a) => a.kind == wantedKind).toList(),
+                value: block.assetId,
+                onChanged: (id) => onChanged(block.copyWith(assetId: () => id)),
+              ),
+            if (schema.isNotEmpty)
+              _SchemaParamsEditor(
+                // Same reason: fields from the previous type must not keep
+                // their typed text after params were reset to new defaults.
+                key: ValueKey('schema-params-${block.type}'),
+                descriptors: schema,
+                params: block.params,
+                onChanged: (p) => onChanged(block.copyWith(params: p)),
+              )
+            else if (!isKnownType)
+              _ParamsEditor(
+                params: block.params,
+                onChanged: (p) => onChanged(block.copyWith(params: p)),
+              )
+            else if (block.type == 'vst3' && block.assetId != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'This plugin exposes no adjustable parameters.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
           ],
         ),
       ),
@@ -274,7 +409,7 @@ class _AssetDropdown extends StatelessWidget {
         ...assets.map(
           (a) => DropdownMenuItem<String?>(
             value: a.id,
-            child: Text('${a.filename} (${a.kind.toWire()})'),
+            child: Text(a.filename, overflow: TextOverflow.ellipsis),
           ),
         ),
       ],
@@ -283,9 +418,60 @@ class _AssetDropdown extends StatelessWidget {
   }
 }
 
-/// A generic key/value editor for a block's opaque `params` map. Values are
-/// edited as free text and coerced to `num`/`bool`/`String` (matching the
-/// daemon's `float | int | str | bool` schema) on change.
+/// One labeled numeric field per known parameter (label/unit from the
+/// schema, current value from `params` falling back to the descriptor's own
+/// default) -- the schema-driven replacement for `_ParamsEditor` when a
+/// block's type (or, for `vst3`, its selected asset) has a real parameter
+/// schema. No "add param" here: every field this block can have is already
+/// shown.
+class _SchemaParamsEditor extends StatelessWidget {
+  final List<BlockParamDescriptor> descriptors;
+  final Map<String, Object?> params;
+  final ValueChanged<Map<String, Object?>> onChanged;
+
+  const _SchemaParamsEditor({
+    super.key,
+    required this.descriptors,
+    required this.params,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final d in descriptors)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: TextFormField(
+              key: Key('param-value-field-${d.key}'),
+              initialValue:
+                  ((params[d.key] as num?)?.toDouble() ?? d.defaultValue).toString(),
+              decoration: InputDecoration(
+                labelText: d.unit.isEmpty ? d.label : '${d.label} (${d.unit})',
+              ),
+              keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true, signed: true),
+              onChanged: (v) {
+                final parsed = double.tryParse(v);
+                if (parsed == null) return;
+                final next = Map<String, Object?>.of(params);
+                next[d.key] = parsed;
+                onChanged(next);
+              },
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+/// A generic key/value editor for a block's opaque `params` map -- the
+/// fallback for a type this app has no known schema for (see
+/// `_SchemaParamsEditor` for the normal case). Values are edited as free
+/// text and coerced to `num`/`bool`/`String` (matching the daemon's
+/// `float | int | str | bool` schema) on change.
 class _ParamsEditor extends StatelessWidget {
   final Map<String, Object?> params;
   final ValueChanged<Map<String, Object?>> onChanged;

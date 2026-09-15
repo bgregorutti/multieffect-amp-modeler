@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_app/models/asset.dart';
+import 'package:mobile_app/models/block_param_descriptor.dart';
 
 import 'protocol_fixtures.dart';
 
@@ -47,9 +48,51 @@ void main() {
     test('AssetKind wire round-trip', () {
       expect(AssetKind.fromWire('nam'), AssetKind.nam);
       expect(AssetKind.fromWire('ir'), AssetKind.ir);
+      expect(AssetKind.fromWire('vst3'), AssetKind.vst3);
       expect(AssetKind.nam.toWire(), 'nam');
       expect(AssetKind.ir.toWire(), 'ir');
+      expect(AssetKind.vst3.toWire(), 'vst3');
       expect(() => AssetKind.fromWire('bogus'), throwsArgumentError);
+    });
+
+    test('a vst3 asset round-trips its introspected parameter schema', () {
+      const original = Asset(
+        id: 'plug1',
+        kind: AssetKind.vst3,
+        filename: 'GainTest.vst3',
+        storedPath: '/plugins/GainTest.vst3',
+        uploadedAt: 42.0,
+        parameters: [
+          BlockParamDescriptor(
+            key: '0',
+            label: 'Gain',
+            unit: 'x',
+            min: 0.0,
+            max: 2.0,
+            defaultValue: 1.0,
+          ),
+        ],
+      );
+
+      final roundTripped = Asset.fromJson(original.toJson());
+
+      expect(roundTripped.kind, AssetKind.vst3);
+      expect(roundTripped.parameters, hasLength(1));
+      expect(roundTripped.parameters!.single.key, '0');
+      expect(roundTripped.parameters!.single.label, 'Gain');
+      expect(roundTripped.parameters!.single.max, 2.0);
+    });
+
+    test('a nam/ir asset has no parameters field on the wire', () {
+      const original = Asset(
+        id: 'nam1',
+        kind: AssetKind.nam,
+        filename: 'amp.nam',
+        storedPath: '/data/assets/amp.nam',
+        uploadedAt: 1.0,
+      );
+      expect(original.toJson().containsKey('parameters'), isFalse);
+      expect(Asset.fromJson(original.toJson()).parameters, isNull);
     });
   });
 }

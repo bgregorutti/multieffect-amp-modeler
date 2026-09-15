@@ -7,6 +7,7 @@
 #include "audio_engine/eq_block.hpp"
 #include "audio_engine/gain_block.hpp"
 #include "audio_engine/passthrough_block.hpp"
+#include "audio_engine/tone_stack_block.hpp"
 #include "audio_engine/wav_file.hpp"
 
 #ifdef AUDIO_ENGINE_WITH_REAL_NAM
@@ -48,8 +49,15 @@ void EngineChain::prepare(double sampleRate) {
 }
 
 std::unique_ptr<EffectBlock> createEffectBlock(const EffectBlockSpec& spec) {
+    // "gain" and "volume" are the same GainBlock DSP under two distinct
+    // type names, so a rig chain (and its UI) can tell an input-trim-style
+    // gain stage apart from an output-level one at a glance, even though
+    // the underlying processing is identical. See tone_stack_block.hpp for
+    // "tone_stack".
     if (spec.type == "gain") return std::make_unique<GainBlock>(spec.params);
+    if (spec.type == "volume") return std::make_unique<GainBlock>(spec.params);
     if (spec.type == "eq") return std::make_unique<EqBlock>(spec.params);
+    if (spec.type == "tone_stack") return std::make_unique<ToneStackBlock>(spec.params);
     if (spec.type == "delay") return std::make_unique<DelayBlock>(spec.params);
     // "passthrough" and any unrecognized type: fail safe, not fail closed.
     return std::make_unique<PassthroughBlock>();
@@ -78,6 +86,10 @@ std::shared_ptr<IrHandle> FileAssetLoader::loadIr(const std::string& storedPath,
     auto handle = std::make_shared<IrHandle>();
     handle->samples = loadImpulseResponseFile(storedPath, targetSampleRate);
     return handle;
+}
+
+std::unique_ptr<EffectBlock> FileAssetLoader::loadVst3(const std::string& storedPath) {
+    return std::make_unique<Vst3EffectBlock>(loadVst3Plugin(storedPath));
 }
 
 ResourceManager::ResourceManager(std::shared_ptr<IAssetLoader> loader, double sampleRate)
@@ -117,23 +129,58 @@ void ResourceManager::loadPreset(const Preset& preset) {
         // fallback in createEffectBlock).
         if (blockSpec.type == "nam") {
             if (!blockSpec.asset_id.has_value()) continue;
+            // namModel is a single dedicated shared_ptr field, and
+            // processOrder holds a non-owning raw pointer into it -- a
+            // second enabled "nam" block would reassign namModel out from
+            // under the first one's already-pushed pointer, destroying it
+            // (nothing else holds a reference) and leaving a dangling
+            // entry in processOrder. Fail loud instead of a silent
+            // use-after-free the very next audio block.
+            if (chain->namModel) {
+                throw std::runtime_error("preset '" + preset.id + "' has more than one enabled 'nam' "
+                                          "block -- only one amp channel may be active at a time");
+            }
             const Asset& asset = assets_.at(*blockSpec.asset_id);
             chain->namModel = loader_->loadNam(asset.stored_path);
-            if (chain->namModel) chain->processOrder.push_back(chain->namModel.get());
+            if (chain->namModel) {
+                chain->processOrder.push_back(chain->namModel.get());
+                chain->blocksById[blockSpec.id] = chain->namModel.get();
+            }
             continue;
         }
         if (blockSpec.type == "ir") {
             if (!blockSpec.asset_id.has_value()) continue;
+            // Same dedicated-field aliasing hazard as "nam" above, for
+            // chain->cabinet/chain->ir.
+            if (chain->cabinet) {
+                throw std::runtime_error("preset '" + preset.id + "' has more than one enabled 'ir' "
+                                          "block -- only one cabinet may be active at a time");
+            }
             const Asset& asset = assets_.at(*blockSpec.asset_id);
             chain->ir = loader_->loadIr(asset.stored_path, sampleRate_);
             if (!chain->ir) continue;
             chain->cabinet = std::make_unique<ConvolutionEngine>(chain->ir->samples);
             chain->processOrder.push_back(chain->cabinet.get());
+            chain->blocksById[blockSpec.id] = chain->cabinet.get();
+            continue;
+        }
+
+        // "vst3" is an ordinary chain position like any effect -- unlike
+        // "nam"/"ir" it can appear any number of times in one rig, so (unlike
+        // those) it has no dedicated EngineChain field and just lands in
+        // `effects` alongside gain/eq/delay blocks.
+        if (blockSpec.type == "vst3") {
+            if (!blockSpec.asset_id.has_value()) continue;
+            const Asset& asset = assets_.at(*blockSpec.asset_id);
+            chain->effects.push_back(loader_->loadVst3(asset.stored_path));
+            chain->processOrder.push_back(chain->effects.back().get());
+            chain->blocksById[blockSpec.id] = chain->effects.back().get();
             continue;
         }
 
         chain->effects.push_back(createEffectBlock(blockSpec));
         chain->processOrder.push_back(chain->effects.back().get());
+        chain->blocksById[blockSpec.id] = chain->effects.back().get();
     }
 
     chain->prepare(sampleRate_);

@@ -21,6 +21,8 @@ public:
 
     void prepare(double sampleRate) override;
     void process(float* buffer, std::size_t numSamples) override;
+    // Recognizes "gain_db" (used by both the "gain" and "volume" block types).
+    bool setLiveParam(const std::string& key, double value) override;
 
 private:
     double gainDb_;

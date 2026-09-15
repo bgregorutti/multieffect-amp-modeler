@@ -31,6 +31,10 @@ public:
         ADD_FAILURE() << "loadIr should not be called by these tests";
         return nullptr;
     }
+    std::unique_ptr<EffectBlock> loadVst3(const std::string&) override {
+        ADD_FAILURE() << "loadVst3 should not be called by these tests";
+        return nullptr;
+    }
 };
 
 Preset makeGainPreset(double gainDb) {
@@ -97,4 +101,88 @@ TEST(EngineStateAudio, UnbypassResumesProcessing) {
     state.processAudioBlock(buf.data(), buf.size());
 
     EXPECT_GT(buf[0], 0.15f);
+}
+
+TEST(EngineStateSetBlockParam, MutatesTheLiveChainWithoutReloading) {
+    EngineState state(std::make_shared<UnusedAssetLoader>());
+    state.resourceManager().loadPreset(makeGainPreset(0.0));  // 0dB = identity
+
+    auto reply = state.handleCommand(
+        {{"cmd", "set_block_param"}, {"block_id", "boost"}, {"param_key", "gain_db"}, {"value", 6.0206}});
+    ASSERT_TRUE(reply["ok"].get<bool>()) << reply.dump();
+    EXPECT_EQ(reply["block_id"], "boost");
+
+    std::vector<float> buf = {0.25f};
+    state.processAudioBlock(buf.data(), buf.size());
+    EXPECT_NEAR(buf[0], 0.5f, 1e-3f);  // ~doubled, same block instance still in place
+}
+
+TEST(EngineStateSetBlockParam, UnknownBlockIdIsNotFound) {
+    EngineState state(std::make_shared<UnusedAssetLoader>());
+    state.resourceManager().loadPreset(makeGainPreset(0.0));
+
+    auto reply =
+        state.handleCommand({{"cmd", "set_block_param"}, {"block_id", "nope"}, {"param_key", "gain_db"}, {"value", 1.0}});
+    EXPECT_FALSE(reply["ok"].get<bool>());
+    EXPECT_EQ(reply["code"], "not_found");
+}
+
+TEST(EngineStateSetBlockParam, UnrecognizedParamKeyIsAValidationError) {
+    EngineState state(std::make_shared<UnusedAssetLoader>());
+    state.resourceManager().loadPreset(makeGainPreset(0.0));
+
+    auto reply = state.handleCommand(
+        {{"cmd", "set_block_param"}, {"block_id", "boost"}, {"param_key", "not_a_real_param"}, {"value", 1.0}});
+    EXPECT_FALSE(reply["ok"].get<bool>());
+    EXPECT_EQ(reply["code"], "validation_error");
+}
+
+TEST(EngineStateSetBlockParam, NoPresetLoadedIsNotFound) {
+    EngineState state(std::make_shared<UnusedAssetLoader>());
+
+    auto reply = state.handleCommand(
+        {{"cmd", "set_block_param"}, {"block_id", "boost"}, {"param_key", "gain_db"}, {"value", 1.0}});
+    EXPECT_FALSE(reply["ok"].get<bool>());
+    EXPECT_EQ(reply["code"], "not_found");
+}
+
+TEST(EngineStateListBlockTypes, ReturnsGainAndToneStackAmongOthers) {
+    EngineState state(std::make_shared<UnusedAssetLoader>());
+    auto reply = state.handleCommand({{"cmd", "list_block_types"}});
+    ASSERT_TRUE(reply["ok"].get<bool>());
+
+    bool foundGain = false, foundToneStack = false;
+    for (const auto& entry : reply["block_types"]) {
+        if (entry["type"] == "gain") {
+            foundGain = true;
+            ASSERT_EQ(entry["parameters"].size(), 1u);
+            EXPECT_EQ(entry["parameters"][0]["key"], "gain_db");
+        }
+        if (entry["type"] == "tone_stack") {
+            foundToneStack = true;
+            EXPECT_EQ(entry["parameters"].size(), 3u);
+        }
+    }
+    EXPECT_TRUE(foundGain);
+    EXPECT_TRUE(foundToneStack);
+}
+
+TEST(EngineStateRegisterAsset, NativeKindsGetNoParametersField) {
+    // "parameters" is a VST3-only addition to the reply (see
+    // handleRegisterAsset) -- a nam/ir asset's schema is nothing new, it's
+    // just carried by the block type it's attached to.
+    EngineState state(std::make_shared<UnusedAssetLoader>());
+    auto reply = state.handleCommand(
+        {{"cmd", "register_asset"},
+         {"asset", {{"id", "n1"}, {"kind", "nam"}, {"filename", "a.nam"}, {"stored_path", "/fake/a.nam"}}}});
+    ASSERT_TRUE(reply["ok"].get<bool>()) << reply.dump();
+    EXPECT_EQ(reply["asset_id"], "n1");
+    EXPECT_FALSE(reply.contains("parameters"));
+}
+
+TEST(EngineStateRegisterAsset, MalformedAssetIsAValidationError) {
+    EngineState state(std::make_shared<UnusedAssetLoader>());
+    auto reply = state.handleCommand({{"cmd", "register_asset"}, {"asset", {{"id", "n1"}}}});  // missing "kind" etc.
+    EXPECT_FALSE(reply["ok"].get<bool>());
+    EXPECT_EQ(reply["code"], "validation_error");
 }

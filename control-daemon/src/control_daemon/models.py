@@ -98,17 +98,72 @@ class EffectBlock(BaseModel):
     params: Dict[str, ParamValue] = Field(default_factory=dict)
 
 
+def default_rig_chain() -> List[EffectBlock]:
+    """The standard skeleton a new rig starts with: gain -> amp -> cab ->
+    tone stack -> volume, all pinned.
+
+    A captured .nam model has no gain/tone controls of its own -- it is a
+    frozen snapshot of one amp setting -- so these four extra stages (input
+    trim, a 3-band tone stack, output volume) are how the "push the amp
+    harder/softer" and tone-shaping feel a real amp would give get added
+    back in software. They are ordinary blocks, not a special case the
+    engine or this module knows the meaning of: ``"gain"``/``"volume"`` are
+    both a plain gain stage (two names so the UI can tell an input-trim
+    knob from an output-level one at a glance), and ``"tone_stack"`` is a
+    3-band EQ block -- see audio-engine's ``createEffectBlock``.
+
+    ``amp``/``cab`` ship with no ``asset_id`` -- the caller fills those in
+    (e.g. by replacing these blocks by id once a NAM/IR asset is chosen,
+    the same convention ``scripts/load_test_preset.py`` already uses).
+    Callers that want a different shape (or a genuinely empty rig) pass
+    their own ``chain`` to ``create_rig`` instead of omitting it.
+    """
+    return [
+        EffectBlock(id="input_trim", type="gain", pinned=True),
+        EffectBlock(id="amp", type="nam", pinned=True),
+        EffectBlock(id="cab", type="ir", pinned=True),
+        EffectBlock(id="tone_stack", type="tone_stack", pinned=True),
+        EffectBlock(id="output_volume", type="volume", pinned=True),
+    ]
+
+
 class AssetKind(str, Enum):
     NAM = "nam"
     IR = "ir"
+    VST3 = "vst3"
+
+
+class BlockParamDescriptor(BaseModel):
+    """One adjustable parameter's schema -- what a UI needs to render a real
+    control (a `Slider` bound to `min`/`max`/`unit`, or a discrete picker
+    when `step_count > 0`) instead of a generic key/value text editor.
+
+    Metadata only, never a value -- see ``PresetBlockState.params`` for
+    where a live-tweaked value actually lives. For a ``"vst3"`` asset this
+    is populated by the engine's ``register_asset`` reply (see
+    ``DaemonStateManager.register_asset``); ``key`` is the plugin's own
+    stringified VST3 ``ParamID`` in that case, or a block's own param name
+    (e.g. ``"gain_db"``) for a native block type (see ``list_block_types``).
+    """
+
+    key: str
+    label: str
+    unit: str = ""
+    min: float = 0.0
+    max: float = 1.0
+    default: float = 0.0
+    step_count: int = 0
 
 
 class Asset(BaseModel):
-    """Registry metadata for one uploaded ``.nam`` model or IR file.
+    """Registry metadata for one uploaded ``.nam``/IR file or installed
+    ``.vst3`` plugin bundle.
 
-    The binary itself is written to disk by the HTTP upload endpoint
-    (streamed, never buffered whole in memory -- see app.py); this model
-    only ever holds metadata about it.
+    The binary itself is written to disk by the HTTP upload endpoint for
+    ``nam``/``ir`` (streamed, never buffered whole in memory -- see
+    app.py) -- a ``vst3`` bundle is a *directory*, installed out of band,
+    and registered by path instead (see ``list_available_plugins``); this
+    model only ever holds metadata either way.
     """
 
     id: str = Field(default_factory=_new_id)
@@ -118,6 +173,10 @@ class Asset(BaseModel):
     size_bytes: int = 0
     sha256: Optional[str] = None
     uploaded_at: float = Field(default_factory=_now)
+    # Only ever populated for kind == VST3 (see register_asset) -- a
+    # nam/ir asset's "schema" is nothing new, it's just whatever block type
+    # it's attached to (see list_block_types instead).
+    parameters: Optional[List[BlockParamDescriptor]] = None
 
 
 class PresetBlockState(BaseModel):

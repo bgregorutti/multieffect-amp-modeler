@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace audio_engine {
@@ -32,6 +33,20 @@ public:
     // needing a full prepare() call. Default: no-op (stateless blocks like
     // Gain/Passthrough don't need it).
     virtual void reset() {}
+
+    // Live, no-reload parameter tweak (e.g. a slider drag): mutates one
+    // named parameter of an *already-loaded* block in place, guarded by
+    // whatever mutex the caller already holds around processAudioBlock --
+    // same contract as GainBlock::setGainDb, just reachable generically by
+    // key so a single engine command (set_block_param) can drive any block
+    // type, native or VST3, without a per-type special case. `key` is the
+    // block's own parameter name for native blocks (e.g. "gain_db") or a
+    // stringified VST3 ParamID for a Vst3EffectBlock; `value` is in the
+    // parameter's own plain units (dB, ms, ...), not a normalized [0,1].
+    // Returns false if `key` isn't a parameter this block recognizes --
+    // fail safe, same spirit as an unrecognized block `type` falling back
+    // to PassthroughBlock in createEffectBlock(). Default: no live params.
+    virtual bool setLiveParam(const std::string& /*key*/, double /*value*/) { return false; }
 };
 
 }  // namespace audio_engine

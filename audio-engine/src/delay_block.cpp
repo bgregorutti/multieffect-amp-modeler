@@ -37,6 +37,30 @@ void DelayBlock::reset() {
     writeIndex_ = 0;
 }
 
+void DelayBlock::setDelayMs(double delayMs) {
+    delayMs_ = delayMs;
+    prepare(sampleRate_);  // resizes buffer_ to match -- see the header comment on setLiveParam
+}
+
+void DelayBlock::setFeedback(double feedback) { feedback_ = feedback; }
+void DelayBlock::setMix(double mix) { mix_ = mix; }
+
+bool DelayBlock::setLiveParam(const std::string& key, double value) {
+    if (key == "delay_ms") {
+        setDelayMs(value);
+        return true;
+    }
+    if (key == "feedback") {
+        setFeedback(value);
+        return true;
+    }
+    if (key == "mix") {
+        setMix(value);
+        return true;
+    }
+    return false;
+}
+
 void DelayBlock::process(float* buffer, std::size_t numSamples) {
     if (buffer_.empty()) return;
     const float fb = static_cast<float>(feedback_);

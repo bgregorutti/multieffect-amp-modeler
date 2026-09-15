@@ -37,6 +37,12 @@ void main() {
       expect(cmd.toJson(), createRigFixture);
     });
 
+    test('create_rig with no chain omits the field (daemon default-scaffolds)',
+        () {
+      const cmd = CreateRigCommand(name: 'New Rig');
+      expect(cmd.toJson().containsKey('chain'), isFalse);
+    });
+
     test('update_rig (partial update omits untouched fields)', () {
       const cmd = UpdateRigCommand(rigId: 'rig1', name: 'Ampeg SVT II');
       expect(cmd.toJson(), updateRigFixture);
@@ -112,6 +118,22 @@ void main() {
             'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
       );
       expect(cmd.toJson(), registerAssetFixture);
+    });
+
+    test('set_block_param', () {
+      const cmd = SetBlockParamCommand(
+        rigId: 'rig1',
+        presetId: 'abc123',
+        blockId: 'dist',
+        paramKey: 'gain_db',
+        value: 6.0,
+      );
+      expect(cmd.toJson(), setBlockParamFixture);
+    });
+
+    test('list_block_types', () {
+      const cmd = ListBlockTypesCommand();
+      expect(cmd.toJson(), listBlockTypesFixture);
     });
   });
 

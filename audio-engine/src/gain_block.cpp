@@ -22,6 +22,12 @@ void GainBlock::setGainDb(double gainDb) {
     linearGain_ = static_cast<float>(std::pow(10.0, gainDb / 20.0));
 }
 
+bool GainBlock::setLiveParam(const std::string& key, double value) {
+    if (key != "gain_db") return false;
+    setGainDb(value);
+    return true;
+}
+
 void GainBlock::prepare(double /*sampleRate*/) {
     // Stateless: nothing sample-rate dependent to (re)compute.
 }

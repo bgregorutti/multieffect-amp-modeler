@@ -41,6 +41,7 @@ from .models import (
     SelectPresetAction,
     TapTempoAction,
     ToggleBypassAction,
+    default_rig_chain,
     resolve_preset,
 )
 from .persistence import load_state, save_state
@@ -166,9 +167,16 @@ class DaemonStateManager:
         name: str,
         chain: Optional[List[EffectBlock]] = None,
     ) -> Rig:
-        for block in chain or []:
+        """Create a rig. Omitting ``chain`` entirely (as opposed to passing
+        an explicit ``[]``) seeds the standard gain -> amp -> cab -> tone
+        stack -> volume skeleton (see ``models.default_rig_chain``) rather
+        than an empty one, since that shape is what every rig with a NAM
+        capture wants -- an explicit ``[]`` is respected as a deliberate
+        choice (e.g. a rig with no amp at all), not overridden."""
+        resolved_chain = default_rig_chain() if chain is None else list(chain)
+        for block in resolved_chain:
             self._validate_asset_ref(block.asset_id)
-        rig = Rig(name=name, chain=list(chain or []))
+        rig = Rig(name=name, chain=resolved_chain)
         self.state.rigs.append(rig)
         self._notify("create_rig")
         return rig
@@ -303,15 +311,27 @@ class DaemonStateManager:
             )
         rig = self.state.rigs[target_rig_index]
 
-        target_preset_index = (
-            self.state.active_preset_index if preset_index is None else preset_index
-        )
-        if not (0 <= target_preset_index < len(rig.presets)):
-            raise StateError(
-                "validation_error",
-                f"preset_index {target_preset_index} out of range for rig "
-                f"{rig.name!r} (has {len(rig.presets)} presets)",
+        if rig.presets:
+            target_preset_index = (
+                self.state.active_preset_index if preset_index is None else preset_index
             )
+            if not (0 <= target_preset_index < len(rig.presets)):
+                raise StateError(
+                    "validation_error",
+                    f"preset_index {target_preset_index} out of range for rig "
+                    f"{rig.name!r} (has {len(rig.presets)} presets)",
+                )
+        else:
+            # A rig with no presets yet (e.g. freshly created) has nothing
+            # to select -- not a client error, the same "no active preset"
+            # state active_preset()/_load_active() already tolerate
+            # gracefully for the footswitch rig-stepping path (_change_rig).
+            # A specific preset_index request against an empty rig is
+            # inherently unsatisfiable, so it's ignored here rather than
+            # rejected -- this is what lets the app's "tap a rig to make it
+            # active" (RigListScreen, always sends preset_index=0) work on a
+            # rig that doesn't have a preset yet either.
+            target_preset_index = 0
 
         self.state.active_rig_index = target_rig_index
         self.state.active_preset_index = target_preset_index
@@ -370,16 +390,61 @@ class DaemonStateManager:
             size_bytes=size_bytes,
             sha256=sha256,
         )
-        self.state.assets[asset.id] = asset
         # The engine resolves block asset ids off its own copy of this
         # registry (it never reads the daemon's state directly), so a
         # newly-registered asset must be pushed there before any chain
         # referencing it is loaded -- otherwise a real AudioEngineClient's
         # load_preset() fails with "unknown asset id" for every fresh
-        # upload. See audio_engine_client.py.
-        self.audio_engine.register_asset(asset)
+        # upload. See audio_engine_client.py. For a "vst3" asset, the
+        # engine's reply also carries the plugin's own parameter schema
+        # (a throwaway instantiation purely to introspect it) -- captured
+        # onto the Asset record here so it's already in every
+        # state_snapshot/state_changed broadcast, no second round-trip
+        # needed once a rig actually uses the plugin.
+        asset.parameters = self.audio_engine.register_asset(asset)
+        self.state.assets[asset.id] = asset
         self._notify("register_asset")
         return asset
+
+    def set_block_param(
+        self,
+        rig_id: str,
+        preset_id: str,
+        block_id: str,
+        param_key: str,
+        value: float,
+    ) -> Preset:
+        """Live, no-reload parameter tweak: persists into *this preset's*
+        ``block_states[block_id].params`` override -- not the rig block's
+        own default (that stays an ``update_rig`` concern) -- so the same
+        plugin/block can sit at different settings per preset within one
+        rig, the same way recalling a DAW plugin's per-scene state would.
+        Forwarded to the engine only when this rig/preset is the one
+        actually playing; never triggers a full ``load_preset``.
+        """
+        rig = self._get_rig(rig_id)
+        preset = self._get_preset(rig, preset_id)
+        if block_id not in {b.id for b in rig.chain}:
+            raise StateError(
+                "validation_error",
+                f"no block with id {block_id!r} in rig {rig.id!r}",
+            )
+
+        block_state = preset.block_states.setdefault(block_id, PresetBlockState())
+        block_state.params[param_key] = value
+        preset.updated_at = time.time()
+
+        if preset is self.active_preset():
+            self.audio_engine.set_block_param(block_id, param_key, value)
+
+        self._notify("set_block_param")
+        return preset
+
+    def list_block_types(self) -> List[dict]:
+        """Static per-engine-build parameter schema for every native block
+        type -- a pure query, proxied straight to the engine (see
+        audio_engine_client.py); never mutates state or notifies."""
+        return self.audio_engine.list_block_types()
 
     # -- footswitch actions ---------------------------------------------------
 

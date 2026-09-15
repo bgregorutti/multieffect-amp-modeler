@@ -37,6 +37,15 @@ public:
     void process(float* buffer, std::size_t numSamples) override;
     void reset() override;
 
+    // Live gain update (recomputes coefficients immediately) -- for a
+    // preset's boost/cut being tweaked in real time, distinct from
+    // reconstructing the block. See ToneStackBlock, which is built from
+    // three of these.
+    void setGainDb(double gainDb);
+    double gainDb() const { return gainDb_; }
+    // Recognizes "gain_db" -- freq_hz/q are set at construction only for now.
+    bool setLiveParam(const std::string& key, double value) override;
+
     // Exposed for unit testing coefficient correctness / stability directly.
     struct Coefficients {
         double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;  // a0 normalized to 1

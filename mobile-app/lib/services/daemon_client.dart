@@ -43,6 +43,8 @@ abstract class DaemonClientBase {
   Future<Map<String, dynamic>> setFootswitchMapping(
       SetFootswitchMappingCommand cmd);
   Future<Map<String, dynamic>> registerAsset(RegisterAssetCommand cmd);
+  Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd);
+  Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd);
 }
 
 /// Wraps a WebSocket connection to the control daemon.
@@ -75,6 +77,18 @@ class DaemonClient extends DaemonClientBase {
   /// a time from this simple sequential client, so keying on type (rather
   /// than a request id the protocol doesn't have) is sufficient here.
   final Map<String, Completer<Map<String, dynamic>>> _pendingByType = {};
+
+  /// Commands whose `command_ok` has arrived but whose completer is
+  /// deliberately not resolved yet -- see [_onData]'s `CommandOkMessage`
+  /// case for why.
+  final List<MapEntry<Completer<Map<String, dynamic>>, Map<String, dynamic>>>
+      _awaitingBroadcast = [];
+
+  /// Command types the daemon never follows with a `state_changed`
+  /// broadcast (a pure query -- see `list_block_types`'s own docstring:
+  /// "never mutates state or notifies"). Everything else is a mutation and
+  /// is always followed by one on this same connection.
+  static const _queryOnlyCommandTypes = {'list_block_types'};
 
   DaemonClient({
     required this.uri,
@@ -142,8 +156,39 @@ class DaemonClient extends DaemonClientBase {
         _setState(DaemonState.fromJson(state));
       case StateChangedMessage(:final state):
         _setState(DaemonState.fromJson(state));
+        // A mutating command's completer was deliberately held back until
+        // here (see CommandOkMessage below) -- now that [state] reflects
+        // it, callers awaiting that command can safely act on [state]
+        // (e.g. navigate to a screen that reads it) without racing this
+        // broadcast. FIFO, oldest first: on this client's one-in-flight-
+        // per-type usage pattern there is normally at most one entry, but
+        // this stays correct even if that ever briefly isn't true.
+        if (_awaitingBroadcast.isNotEmpty) {
+          final entry = _awaitingBroadcast.removeAt(0);
+          entry.key.complete(entry.value);
+        }
       case CommandOkMessage(:final command, :final result):
-        _pendingByType.remove(command)?.complete(result);
+        final completer = _pendingByType.remove(command);
+        if (completer == null) break;
+        if (_queryOnlyCommandTypes.contains(command)) {
+          // No broadcast will ever follow a pure query -- resolve now.
+          completer.complete(result);
+        } else {
+          // Resolving immediately here would let an `await` on this
+          // command's Future (and whatever it does next, e.g. navigating
+          // to a screen that reads `state`) run before the state_changed
+          // broadcast this same mutation triggers has been processed --
+          // command_ok and that broadcast arrive as two separate WebSocket
+          // messages, and completing a Future only *schedules* its
+          // continuation as a microtask, which (at least on the web
+          // target) reliably runs before the next already-arrived message
+          // is dispatched. Concretely: saving a rig edit and immediately
+          // navigating back could show the *previous* value, because the
+          // pop happened before `state` had actually been updated with the
+          // edit. Held here and resolved from the broadcast case above
+          // instead, once `state` genuinely reflects this command.
+          _awaitingBroadcast.add(MapEntry(completer, result));
+        }
       case ErrorMessage(:final code, :final message, :final inReplyTo):
         // The daemon doesn't currently echo which command an error is a
         // reply to for every error path (e.g. validation errors can arise
@@ -168,6 +213,15 @@ class DaemonClient extends DaemonClientBase {
       }
     }
     _pendingByType.clear();
+    // A command already acknowledged with command_ok but still waiting on
+    // its state_changed (see CommandOkMessage in _onData) would otherwise
+    // hang forever if the connection drops before that broadcast arrives.
+    for (final entry in _awaitingBroadcast) {
+      if (!entry.key.isCompleted) {
+        entry.key.completeError(DaemonCommandError('connection_lost', reason));
+      }
+    }
+    _awaitingBroadcast.clear();
   }
 
   void _send(Map<String, dynamic> json) {
@@ -182,6 +236,11 @@ class DaemonClient extends DaemonClientBase {
       commandTimeout,
       onTimeout: () {
         _pendingByType.remove(cmd.type);
+        // Covers the rare case where command_ok arrived (moving this
+        // completer into _awaitingBroadcast) but the daemon's own
+        // state_changed for it never did -- without this, the entry would
+        // sit there forever even though the caller has already timed out.
+        _awaitingBroadcast.removeWhere((entry) => entry.key == completer);
         throw DaemonCommandError(
           'timeout',
           'no reply to "${cmd.type}" within $commandTimeout',
@@ -233,6 +292,14 @@ class DaemonClient extends DaemonClientBase {
 
   @override
   Future<Map<String, dynamic>> registerAsset(RegisterAssetCommand cmd) =>
+      _sendCommand(cmd);
+
+  @override
+  Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd) =>
+      _sendCommand(cmd);
+
+  @override
+  Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd) =>
       _sendCommand(cmd);
 
   @override

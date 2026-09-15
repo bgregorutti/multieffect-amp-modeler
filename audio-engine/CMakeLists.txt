@@ -24,8 +24,10 @@ find_package(Threads REQUIRED)
 # --- Core library (everything except main.cpp) -------------------------
 add_library(audio_engine_core
   src/preset_model.cpp
+  src/block_type_registry.cpp
   src/gain_block.cpp
   src/eq_block.cpp
+  src/tone_stack_block.cpp
   src/delay_block.cpp
   src/wav_file.cpp
   src/resample.cpp
@@ -149,6 +151,88 @@ if(AUDIO_ENGINE_WITH_REAL_NAM)
   target_link_libraries(nam_render PRIVATE audio_engine_core)
 endif()
 
+# --- VST3 plugin hosting (optional, requires network access to vendor) ---
+# Off by default, same rationale/pattern as AUDIO_ENGINE_WITH_REAL_NAM above:
+# vendors vst3_pluginterfaces (Steinberg VST3 SDK license -- see its own
+# LICENSE.txt; this is the "pluginterfaces" subset only, no GUI/validator
+# tooling, no JUCE, no public.sdk) via CMake FetchContent, pinned to a
+# release tag. See vst3_host.hpp for what "hosting" means here: a
+# hand-written COM-style host talking directly to
+# IPluginFactory/IComponent/IAudioProcessor/IEditController. Off builds keep
+# the "vst3" block type resolvable (vst3_plugin_host_stub.cpp) so a preset
+# referencing one fails with one clear error instead of a link error.
+option(AUDIO_ENGINE_WITH_VST3
+  "Vendor the VST3 SDK's pluginterfaces for real VST3 plugin hosting (requires network access)" OFF)
+if(AUDIO_ENGINE_WITH_VST3)
+  include(FetchContent)
+
+  FetchContent_Declare(
+    vst3_pluginterfaces
+    GIT_REPOSITORY https://github.com/steinbergmedia/vst3_pluginterfaces.git
+    GIT_TAG v3.7.14_build_55
+    SOURCE_SUBDIR not-used
+  )
+  FetchContent_MakeAvailable(vst3_pluginterfaces)
+
+  # vst3_pluginterfaces' own headers #include "pluginterfaces/base/...h" /
+  # "pluginterfaces/vst/...h" -- i.e. they expect to be found under a
+  # directory literally named "pluginterfaces" -- but FetchContent clones
+  # the repo's own root (base/, vst/, gui/, ...) straight into
+  # vst3_pluginterfaces_SOURCE_DIR with no such wrapper folder. A symlink
+  # shim (same idea as NAM_JSON_SHIM_DIR above, just a directory instead of
+  # a generated file) gives the compiler that expected path without
+  # copying the tree.
+  set(VST3_INCLUDE_SHIM_DIR "${CMAKE_BINARY_DIR}/vst3_include_shim")
+  file(MAKE_DIRECTORY "${VST3_INCLUDE_SHIM_DIR}")
+  if(NOT EXISTS "${VST3_INCLUDE_SHIM_DIR}/pluginterfaces")
+    file(CREATE_LINK "${vst3_pluginterfaces_SOURCE_DIR}" "${VST3_INCLUDE_SHIM_DIR}/pluginterfaces" SYMBOLIC)
+  endif()
+
+  # pluginterfaces is "actually a header-only library, but it has some
+  # sources as well which need compilation" (its own CMakeLists.txt's
+  # words) -- we don't run that CMakeLists.txt (it calls
+  # smtg_target_setup_universal_binary(), from vst3sdk's top-level cmake/
+  # modules we don't vendor), so list those few .cpp files ourselves.
+  add_library(vst3_pluginterfaces_core STATIC
+    "${vst3_pluginterfaces_SOURCE_DIR}/base/conststringtable.cpp"
+    "${vst3_pluginterfaces_SOURCE_DIR}/base/coreiids.cpp"
+    "${vst3_pluginterfaces_SOURCE_DIR}/base/funknown.cpp"
+    "${vst3_pluginterfaces_SOURCE_DIR}/base/ustring.cpp"
+  )
+  target_include_directories(vst3_pluginterfaces_core SYSTEM PUBLIC "${VST3_INCLUDE_SHIM_DIR}")
+  target_compile_features(vst3_pluginterfaces_core PUBLIC cxx_std_17)
+
+  target_sources(audio_engine_core PRIVATE src/vst3_plugin_host.cpp)
+  target_link_libraries(audio_engine_core PUBLIC vst3_pluginterfaces_core ${CMAKE_DL_LIBS})
+  target_compile_definitions(audio_engine_core PUBLIC AUDIO_ENGINE_WITH_VST3)
+
+  # In-repo trivial VST3 plugin (gain), built purely from the vendored
+  # pluginterfaces -- lets test_vst3_host.cpp exercise Vst3PluginHost
+  # end-to-end with zero third-party binary dependency, same ethos as
+  # MockFootswitchBackend/NullAudioEngineClient elsewhere in this project.
+  # Real third-party plugins (DISTRHO-family etc.) are for later manual/
+  # hardware validation, not this test.
+  add_library(vst3_test_gain_plugin MODULE tests/vst3_test_plugin/gain_plugin.cpp)
+  target_link_libraries(vst3_test_gain_plugin PRIVATE vst3_pluginterfaces_core)
+  set_target_properties(vst3_test_gain_plugin PROPERTIES PREFIX "" OUTPUT_NAME "vst3_test_gain_plugin")
+
+  # Packaged into a real `.vst3` bundle directory
+  # (Contents/<arch>-linux/*.so), not just a bare .so, so the test loads it
+  # exactly the way it would load a real plugin -- see
+  # resolveModuleSharedLibrary() in vst3_plugin_host.cpp.
+  set(VST3_TEST_PLUGIN_ARCH_DIR "${CMAKE_SYSTEM_PROCESSOR}-linux")
+  set(VST3_TEST_PLUGIN_BUNDLE_DIR "${CMAKE_BINARY_DIR}/vst3_test_plugins/GainTest.vst3")
+  add_custom_command(TARGET vst3_test_gain_plugin POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${VST3_TEST_PLUGIN_BUNDLE_DIR}/Contents/${VST3_TEST_PLUGIN_ARCH_DIR}"
+    COMMAND ${CMAKE_COMMAND} -E copy
+            "$<TARGET_FILE:vst3_test_gain_plugin>"
+            "${VST3_TEST_PLUGIN_BUNDLE_DIR}/Contents/${VST3_TEST_PLUGIN_ARCH_DIR}/vst3_test_gain_plugin.so"
+  )
+else()
+  target_sources(audio_engine_core PRIVATE src/vst3_plugin_host_stub.cpp)
+endif()
+
 # --- Executable ----------------------------------------------------------
 add_executable(audio_engine src/main.cpp)
 target_link_libraries(audio_engine PRIVATE audio_engine_core)
@@ -163,6 +247,7 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     tests/test_preset_model.cpp
     tests/test_gain_block.cpp
     tests/test_eq_block.cpp
+    tests/test_tone_stack_block.cpp
     tests/test_delay_block.cpp
     tests/test_wav_file.cpp
     tests/test_resample.cpp
@@ -185,6 +270,13 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     # match real export shapes -- see test_real_nam_model.cpp.
     target_compile_definitions(audio_engine_tests PRIVATE
       NAM_EXAMPLE_MODELS_DIR="${neural_amp_modeler_core_SOURCE_DIR}/example_models")
+  endif()
+
+  if(AUDIO_ENGINE_WITH_VST3)
+    target_sources(audio_engine_tests PRIVATE tests/test_vst3_host.cpp)
+    target_compile_definitions(audio_engine_tests PRIVATE
+      VST3_TEST_PLUGIN_BUNDLE_DIR="${VST3_TEST_PLUGIN_BUNDLE_DIR}")
+    add_dependencies(audio_engine_tests vst3_test_gain_plugin)
   endif()
 
   include(GoogleTest)

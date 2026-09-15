@@ -135,6 +135,17 @@ const registerAssetFixture = {
       "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 };
 
+const setBlockParamFixture = {
+  "type": "set_block_param",
+  "rig_id": "rig1",
+  "preset_id": "abc123",
+  "block_id": "dist",
+  "param_key": "gain_db",
+  "value": 6.0,
+};
+
+const listBlockTypesFixture = {"type": "list_block_types"};
+
 const footswitchPressFixture = {
   "type": "footswitch_press",
   "switch_index": 0,
