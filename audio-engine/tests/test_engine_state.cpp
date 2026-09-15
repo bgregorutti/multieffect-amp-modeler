@@ -31,6 +31,10 @@ public:
         ADD_FAILURE() << "loadIr should not be called by these tests";
         return nullptr;
     }
+    std::unique_ptr<EffectBlock> loadVst3(const std::string&) override {
+        ADD_FAILURE() << "loadVst3 should not be called by these tests";
+        return nullptr;
+    }
 };
 
 Preset makeGainPreset(double gainDb) {

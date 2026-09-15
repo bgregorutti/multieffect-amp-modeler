@@ -17,6 +17,7 @@
 #include "audio_engine/effect_block.hpp"
 #include "audio_engine/nam_model.hpp"
 #include "audio_engine/preset_model.hpp"
+#include "audio_engine/vst3_host.hpp"
 
 namespace audio_engine {
 
@@ -46,6 +47,15 @@ public:
     // rather than fixed at loader-construction time, so there's exactly
     // one place that owns "what rate the engine runs at".
     virtual std::shared_ptr<IrHandle> loadIr(const std::string& storedPath, double targetSampleRate) = 0;
+
+    // `storedPath` for a "vst3" asset is a `.vst3` bundle directory. Unlike
+    // loadNam/loadIr (which hand back a shared resource that ResourceManager
+    // stores in a single chain-level slot), this returns a ready-to-run
+    // EffectBlock directly: a rig can carry any number of "vst3" blocks, so
+    // there is no single "the VST3 slot" to cache into -- see
+    // ResourceManager::loadPreset's "vst3" case, which pushes the result
+    // straight into `effects` like any other block.
+    virtual std::unique_ptr<EffectBlock> loadVst3(const std::string& storedPath) = 0;
 };
 
 // Reads real files from disk: `storedPath` for a "nam" asset is parsed via
@@ -56,15 +66,17 @@ class FileAssetLoader : public IAssetLoader {
 public:
     std::shared_ptr<INamModel> loadNam(const std::string& storedPath) override;
     std::shared_ptr<IrHandle> loadIr(const std::string& storedPath, double targetSampleRate) override;
+    std::unique_ptr<EffectBlock> loadVst3(const std::string& storedPath) override;
 };
 
 // Builds one EffectBlock from a preset's EffectBlockSpec. Recognized
-// `type` values: "gain", "eq", "delay", "passthrough". An unrecognized
-// type falls back to a PassthroughBlock (fail safe rather than fail
-// closed -- a preset referencing a not-yet-implemented block type still
-// loads and plays, just without that block's processing). The asset-backed
-// types "nam" and "ir" are NOT built here: ResourceManager::loadPreset
-// handles those itself, since they need an IAssetLoader.
+// `type` values: "gain", "volume", "eq", "tone_stack", "delay",
+// "passthrough". An unrecognized type falls back to a PassthroughBlock
+// (fail safe rather than fail closed -- a preset referencing a
+// not-yet-implemented block type still loads and plays, just without that
+// block's processing). The asset-backed types "nam", "ir" and "vst3" are
+// NOT built here: ResourceManager::loadPreset handles those itself, since
+// they need an IAssetLoader.
 std::unique_ptr<EffectBlock> createEffectBlock(const EffectBlockSpec& spec);
 
 // The fully-prepared, ready-to-run resources for one preset: the NAM

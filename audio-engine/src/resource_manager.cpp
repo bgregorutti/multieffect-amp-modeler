@@ -88,6 +88,10 @@ std::shared_ptr<IrHandle> FileAssetLoader::loadIr(const std::string& storedPath,
     return handle;
 }
 
+std::unique_ptr<EffectBlock> FileAssetLoader::loadVst3(const std::string& storedPath) {
+    return std::make_unique<Vst3EffectBlock>(loadVst3Plugin(storedPath));
+}
+
 ResourceManager::ResourceManager(std::shared_ptr<IAssetLoader> loader, double sampleRate)
     : loader_(std::move(loader)), sampleRate_(sampleRate) {}
 
@@ -137,6 +141,18 @@ void ResourceManager::loadPreset(const Preset& preset) {
             if (!chain->ir) continue;
             chain->cabinet = std::make_unique<ConvolutionEngine>(chain->ir->samples);
             chain->processOrder.push_back(chain->cabinet.get());
+            continue;
+        }
+
+        // "vst3" is an ordinary chain position like any effect -- unlike
+        // "nam"/"ir" it can appear any number of times in one rig, so (unlike
+        // those) it has no dedicated EngineChain field and just lands in
+        // `effects` alongside gain/eq/delay blocks.
+        if (blockSpec.type == "vst3") {
+            if (!blockSpec.asset_id.has_value()) continue;
+            const Asset& asset = assets_.at(*blockSpec.asset_id);
+            chain->effects.push_back(loader_->loadVst3(asset.stored_path));
+            chain->processOrder.push_back(chain->effects.back().get());
             continue;
         }
 

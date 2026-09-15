@@ -6,7 +6,7 @@
 //
 //   ResolvedBlock:  id, type, asset_id (nullable), enabled, params
 //                   (params opaque: string -> (double|string|bool))
-//   AssetKind:      "nam" | "ir"
+//   AssetKind:      "nam" | "ir" | "vst3"
 //   Asset:          id, kind, filename, stored_path, size_bytes, sha256, uploaded_at
 //   ResolvedPreset: id, name, rig_id, rig_name, blocks
 //
@@ -71,7 +71,7 @@ struct EffectBlockSpec {
     bool operator==(const EffectBlockSpec&) const = default;
 };
 
-enum class AssetKind { Nam, Ir };
+enum class AssetKind { Nam, Ir, Vst3 };
 
 std::string toString(AssetKind kind);
 AssetKind assetKindFromString(const std::string& s);

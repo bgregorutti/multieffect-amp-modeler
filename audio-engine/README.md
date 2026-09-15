@@ -471,6 +471,121 @@ layered approach as the IR fix, and the existing chain-level clamp in
   generic `std::exception` handler and reports as `internal_error` rather
   than `validation_error`. Not wrong, just less precise than it could be.
 
+## VST3 plugin hosting
+
+Hosts real VST3 effect plugins as ordinary chain blocks (`type: "vst3"`),
+alongside the native gain/eq/delay/tone-stack blocks -- a rig chain can mix
+both freely, in any order, any number of `"vst3"` blocks included (unlike
+`"nam"`/`"ir"`, which each own exactly one dedicated `EngineChain` slot).
+Opt-in, same pattern as `AUDIO_ENGINE_WITH_REAL_NAM`:
+
+```bash
+cmake -S audio-engine -B audio-engine/build-vst3 -DAUDIO_ENGINE_WITH_VST3=ON
+cmake --build audio-engine/build-vst3 -j
+```
+
+Off builds keep `type: "vst3"` resolvable (`vst3_plugin_host_stub.cpp`
+throws one clear "not built with VST3 support" error) rather than a link
+error or a silently-wrong passthrough standing in for a plugin the preset
+actually expects.
+
+**No JUCE, no public.sdk -- a hand-written COM-style host.** Only
+`pluginterfaces` is vendored (via CMake `FetchContent`, pinned to
+`steinbergmedia/vst3_pluginterfaces` tag `v3.7.14_build_55` -- the
+`vst3sdk` repo's own `pluginterfaces/` directory is itself a submodule
+pointing at this separate repo, so it's fetched directly rather than
+pulling all of `vst3sdk` and its other submodules for one subdirectory).
+`vst3_host.hpp`'s `IHostedPlugin`/`loadVst3Plugin()` seam is the same
+"narrow interface + swappable backend" pattern as `INamModel`/
+`IAssetLoader`: `Vst3PluginHost` (`vst3_plugin_host.cpp`, real
+implementation) `dlopen`s a `.vst3` bundle's
+`Contents/<arch>-linux/*.so`, resolves its exported `GetPluginFactory`,
+walks `IPluginFactory` for the first `"Audio Module Class"`, and drives
+`IComponent`/`IAudioProcessor`/`IEditController` directly -- no
+third-party framework, since only the interface headers (plus the four
+`.cpp` files `pluginterfaces` itself needs compiled: `funknown.cpp`,
+`coreiids.cpp`, `conststringtable.cpp`, `ustring.cpp`) are vendored.
+
+**A real gotcha worth documenting:** none of the `Vst`-namespace
+interfaces (`IComponent`, `IAudioProcessor`, `IEditController`, ...) get a
+`DEF_CLASS_IID` definition anywhere in `pluginterfaces` itself -- only the
+base ones (`FUnknown`, `IPluginBase`, `IPluginFactory*`) do, in
+`coreiids.cpp`. Referencing e.g. `IComponent::iid` (the `FUID` static
+member `DECLARE_CLASS_IID` declares but doesn't define without a
+`DEF_CLASS_IID` line somewhere) would link-fail with an undefined
+reference. Fixed by using the header-declared `IComponent_iid` (etc.)
+`TUID` constants instead everywhere an interface id is needed --
+namespace-scope `static`, so every translation unit that includes the
+header gets its own private copy with no linker symbol at all, sidestepping
+the whole `INIT_CLASS_IID`-in-exactly-one-translation-unit dance real VST3
+SDK builds normally need.
+
+**Mono or stereo only.** `Vst3PluginHost` negotiates the plugin's main
+bus arrangement at load time: a mono-in/mono-out plugin runs directly; a
+stereo-in/stereo-out plugin gets the engine's mono signal duplicated to
+L/R on the way in and averaged back to mono on the way out. Any other bus
+shape (a plugin with sidechain/aux busses, a synth with no audio input,
+...) throws a descriptive `std::runtime_error` at load time -- fail loud,
+not a guess about what to do with an unsupported layout.
+
+**Parameter automation goes through a real `IParameterChanges` queue, not
+a shortcut.** `IEditController::setParamNormalized` only updates the
+controller's own UI-facing state per the VST3 spec ("must never pass this
+value-change back to the host... update the GUI element(s) only") -- it
+does not by itself affect what a separate-controller plugin's
+`IAudioProcessor::process()` actually does. `Vst3PluginHost::setParam()`
+therefore does both: calls `setParamNormalized` (state sync) *and* queues
+a point on a host-owned `IParameterChanges`/`IParamValueQueue`
+implementation delivered via `ProcessData::inputParameterChanges` on the
+next `process()` call -- the same mechanism a real DAW's automation lane
+uses. A parameter's plain-units min/max/default (not just its normalized
+`[0,1]` range) come from asking the plugin's own
+`normalizedParamToPlain(id, 0.0)` / `(id, 1.0)` / `(id,
+defaultNormalizedValue)` -- the standard trick a host UI uses to build a
+real-world-unit slider, since `ParameterInfo` itself carries no plain
+min/max fields.
+
+**Real-time-safety-sized blocks.** `IAudioProcessor::setupProcessing`
+requires declaring a `maxSamplesPerBlock` upfront; `Vst3PluginHost` uses a
+generous fixed ceiling (4096 samples) and chunks any larger `process()`
+call into pieces of at most that size, rather than assuming a specific
+engine block size or violating the plugin's declared contract.
+
+**No plugin GUI, no state persistence (yet).** `IEditController::
+createView` is never called (headless host -- see Step 3c's planned mobile
+generic-parameter-UI instead of a native plugin editor) and `setState`/
+`getState` are never called either (a freshly loaded plugin always starts
+at its own defaults; whatever a preset previously tweaked is expected to
+come back via Step 3b's `set_block_param`, not save-state serialization
+-- see the top-level plan).
+
+**Discovery is a filesystem scan, not a phone upload** (planned, Step 3b):
+a `.vst3` bundle on Linux is a *directory*
+(`MyPlugin.vst3/Contents/<arch>-linux/*.so`), which doesn't fit the
+existing single-file `POST /assets/upload` endpoint at all -- getting a
+plugin onto the pedal is an out-of-band install step, not a mobile-app
+upload flow.
+
+**Testing without any third-party plugin binary.** One trivial in-repo
+VST3 plugin (`tests/vst3_test_plugin/gain_plugin.cpp`: a single "Gain"
+parameter, plain range `[0, 2]`x, mono in/out) is built from the same
+vendored `pluginterfaces` and packaged into a real bundle directory
+structure by a CMake post-build step, so `tests/test_vst3_host.cpp`
+exercises `Vst3PluginHost` end to end -- real `dlopen`, real
+`IPluginFactory`/`IComponent`/`IAudioProcessor`/`IEditController` calls --
+with zero external dependency, same ethos as
+`MockFootswitchBackend`/`NullAudioEngineClient` elsewhere in this project.
+Its `GainProcessor` class implements `IComponent` + `IAudioProcessor` +
+`IEditController` via plain multiple inheritance (no virtual inheritance)
+-- the standard VST3 "single component" idiom (public.sdk's own
+`AudioEffect` combines `IComponent`+`IAudioProcessor` the same way) --
+with `queryInterface`/`addRef`/`release` written by hand rather than via
+the single-interface `IMPLEMENT_FUNKNOWN_METHODS` macro, since that only
+branches on one interface id and this class answers for three. Real
+third-party plugins (DISTRHO-family first, since it builds VST3 from the
+same source as its LV2 builds, so an ARM build is more likely to exist or
+be buildable) are for later manual/hardware validation, not this test.
+
 ## Module map
 
 | Module (`include/audio_engine/` + `src/`) | Responsibility |
@@ -487,6 +602,7 @@ layered approach as the IR fix, and the existing chain-level clamp in
 | `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate and truncates to a real-time-safe length (see "Real-time-safe IR length cap") |
 | `nam_model`                  | Real `.nam` JSON metadata parser (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- default when `AUDIO_ENGINE_WITH_REAL_NAM` is off) |
 | `real_nam_model`               | `RealNamModel`: real WaveNet/LSTM inference via vendored NeuralAmpModelerCore, built only when `AUDIO_ENGINE_WITH_REAL_NAM` is on -- see "Real NAM inference" above |
+| `vst3_host`                       | `IHostedPlugin`/`Vst3EffectBlock` (block type `"vst3"`) + `loadVst3Plugin()`; `Vst3PluginHost` (real hosting, built only when `AUDIO_ENGINE_WITH_VST3` is on) or a stub that throws a clear error otherwise -- see "VST3 plugin hosting" above |
 | `preset_switcher`              | Glitch-free crossfade between an "old" and "next" already-prepared processing chain |
 | `resource_manager`                | Owns the one currently-loaded `EngineChain` (NAM + IR + effects); loading a new preset releases the previous one's resources |
 | `engine_state`                      | Dispatches one parsed control-socket command against a `ResourceManager` + bypass/crossfade/active-preset state; `processAudioBlock` runs the current chain over one real-time audio block |
@@ -501,8 +617,8 @@ layered approach as the IR fix, and the existing chain-level clamp in
 `control-daemon/src/control_daemon/models.py`'s `ResolvedPreset`/`Asset`/
 `ResolvedBlock` field-for-field (`id`, `name`, `rig_id`, `rig_name`,
 `blocks: [{id, type, asset_id, enabled, params}]` for `Preset`; `id`,
-`kind` ("nam"|"ir"), `filename`, `stored_path`, `size_bytes`, `sha256`,
-`uploaded_at` for `Asset`), so a resolved-preset JSON blob produced by the
+`kind` ("nam"|"ir"|"vst3"), `filename`, `stored_path`, `size_bytes`,
+`sha256`, `uploaded_at` for `Asset`), so a resolved-preset JSON blob produced by the
 control daemon deserializes here with no translation layer. There is no
 preset-level `nam_asset_id`/`ir_asset_id` -- the daemon models a rig (an
 ordered chain whose amp/cab blocks are pinned) containing presets that

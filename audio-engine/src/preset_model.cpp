@@ -12,6 +12,8 @@ std::string toString(AssetKind kind) {
             return "nam";
         case AssetKind::Ir:
             return "ir";
+        case AssetKind::Vst3:
+            return "vst3";
     }
     throw PresetParseError("unreachable: unknown AssetKind");
 }
@@ -19,7 +21,8 @@ std::string toString(AssetKind kind) {
 AssetKind assetKindFromString(const std::string& s) {
     if (s == "nam") return AssetKind::Nam;
     if (s == "ir") return AssetKind::Ir;
-    throw PresetParseError("invalid asset kind '" + s + "' (expected 'nam' or 'ir')");
+    if (s == "vst3") return AssetKind::Vst3;
+    throw PresetParseError("invalid asset kind '" + s + "' (expected 'nam', 'ir' or 'vst3')");
 }
 
 namespace {
