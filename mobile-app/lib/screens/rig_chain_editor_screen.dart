@@ -158,13 +158,14 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
   /// Type changed in the dropdown: the old asset (if any) almost certainly
   /// doesn't match the new type's kind, and the old params belong to the
   /// old type's schema -- both are reset rather than carried over stale.
-  void _changeBlockType(EffectBlock current, String newType) {
-    _updateBlock(
-      current.copyWith(
-        type: newType,
-        assetId: () => null,
-        params: _defaultParamsFor(newType),
-      ),
+  /// Pure (no `setState` here): the editor sheet applies this to its own
+  /// local draft and forwards the result via `onChanged`, so the sheet's
+  /// displayed content and the parent's `_chain` update from the same call.
+  EffectBlock _applyTypeChange(EffectBlock current, String newType) {
+    return current.copyWith(
+      type: newType,
+      assetId: () => null,
+      params: _defaultParamsFor(newType),
     );
   }
 
@@ -234,7 +235,7 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
                         assets: assets,
                         blockTypes: _blockTypes,
                         onChanged: _updateBlock,
-                        onTypeChanged: (t) => _changeBlockType(block, t),
+                        applyTypeChange: _applyTypeChange,
                         onRemove: () => _removeBlock(block.id),
                       ),
                       if (index < backline.length - 1) const ChainConnector(),
@@ -273,7 +274,8 @@ class _BacklineStageCard extends StatelessWidget {
   final List<Asset> assets;
   final List<BlockTypeDescriptor> blockTypes;
   final ValueChanged<EffectBlock> onChanged;
-  final ValueChanged<String> onTypeChanged;
+  final EffectBlock Function(EffectBlock current, String newType)
+      applyTypeChange;
   final VoidCallback onRemove;
 
   const _BacklineStageCard({
@@ -282,7 +284,7 @@ class _BacklineStageCard extends StatelessWidget {
     required this.assets,
     required this.blockTypes,
     required this.onChanged,
-    required this.onTypeChanged,
+    required this.applyTypeChange,
     required this.onRemove,
   });
 
@@ -356,25 +358,41 @@ class _BacklineStageCard extends StatelessWidget {
     );
   }
 
+  /// The sheet keeps its own [draft], seeded from [block] and updated on
+  /// every field change, so its displayed content always reflects the
+  /// latest edit even though `showModalBottomSheet`'s content lives in a
+  /// separate route subtree that the parent screen's `setState` does not
+  /// rebuild. Without this, a type change followed by any other edit in the
+  /// same still-open sheet (e.g. picking an asset, dragging a param slider)
+  /// would silently overwrite the type change back to its old value, since
+  /// that second edit's `onChanged` would fire from a stale, pre-change
+  /// `block` snapshot. Every change still forwards to the parent's
+  /// [onChanged] immediately, same as before.
   void _openFullEditor(BuildContext context) {
+    var draft = block;
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
-      builder: (sheetContext) => Padding(
-        padding: EdgeInsets.only(
-          left: 16,
-          right: 16,
-          top: 16,
-          bottom: 16 + MediaQuery.of(sheetContext).viewInsets.bottom,
-        ),
-        child: SingleChildScrollView(
-          child: _BlockEditorFields(
-            index: index,
-            block: block,
-            assets: assets,
-            blockTypes: blockTypes,
-            onChanged: onChanged,
-            onTypeChanged: onTypeChanged,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (sheetContext, setSheetState) => Padding(
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 16,
+            bottom: 16 + MediaQuery.of(sheetContext).viewInsets.bottom,
+          ),
+          child: SingleChildScrollView(
+            child: _BlockEditorFields(
+              index: index,
+              block: draft,
+              assets: assets,
+              blockTypes: blockTypes,
+              applyTypeChange: applyTypeChange,
+              onChanged: (updated) {
+                setSheetState(() => draft = updated);
+                onChanged(updated);
+              },
+            ),
           ),
         ),
       ),
@@ -434,7 +452,8 @@ class _BlockEditorFields extends StatelessWidget {
   final List<Asset> assets;
   final List<BlockTypeDescriptor> blockTypes;
   final ValueChanged<EffectBlock> onChanged;
-  final ValueChanged<String> onTypeChanged;
+  final EffectBlock Function(EffectBlock current, String newType)
+      applyTypeChange;
 
   const _BlockEditorFields({
     required this.index,
@@ -442,7 +461,7 @@ class _BlockEditorFields extends StatelessWidget {
     required this.assets,
     required this.blockTypes,
     required this.onChanged,
-    required this.onTypeChanged,
+    required this.applyTypeChange,
   });
 
   /// The backline types, plus this block's own current type if it is
@@ -500,7 +519,9 @@ class _BlockEditorFields extends StatelessWidget {
               DropdownMenuItem(value: type, child: Text(type)),
           ],
           onChanged: (v) {
-            if (v != null && v != block.type) onTypeChanged(v);
+            if (v != null && v != block.type) {
+              onChanged(applyTypeChange(block, v));
+            }
           },
         ),
         if (needsAsset)

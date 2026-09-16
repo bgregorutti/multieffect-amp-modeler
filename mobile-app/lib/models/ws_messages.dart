@@ -254,15 +254,18 @@ class RegisterAssetCommand implements DaemonCommand {
       };
 }
 
-/// Sets (or clears, with `null`) an asset's user-facing label -- purely
-/// cosmetic, doesn't touch `filename`/`stored_path`/anything engine-facing.
-/// See `Asset.displayName`.
+/// Sets an asset's user-facing label -- purely cosmetic, doesn't touch
+/// `filename`/`stored_path`/anything engine-facing. See `Asset.displayName`.
+/// The daemon's `display_name` field on this command is a required string
+/// (there is no "clear it" wire value) -- callers wanting to reset to the
+/// filename should pass the filename itself, same as `register_asset`'s own
+/// default.
 class RenameAssetCommand implements DaemonCommand {
   @override
   String get type => 'rename_asset';
 
   final String assetId;
-  final String? displayName;
+  final String displayName;
 
   const RenameAssetCommand({required this.assetId, required this.displayName});
 

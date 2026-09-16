@@ -64,37 +64,19 @@ class _AssetsScreenState extends State<AssetsScreen> {
   }
 
   Future<void> _rename(Asset asset) async {
-    final controller = TextEditingController(text: asset.displayLabel);
     final newName = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Rename'),
-        content: TextField(
-          key: const Key('rename-asset-input'),
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: 'Name'),
-          onSubmitted: (v) => Navigator.of(context).pop(v),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            key: const Key('confirm-rename-asset'),
-            onPressed: () => Navigator.of(context).pop(controller.text),
-            child: const Text('Save'),
-          ),
-        ],
-      ),
+      builder: (context) => _RenameDialog(initialValue: asset.displayLabel),
     );
     if (newName == null || !mounted) return;
     final trimmed = newName.trim();
+    // The daemon's rename_asset requires a non-empty display_name -- an
+    // emptied field resets to the filename, the same default
+    // register_asset itself uses, rather than sending an unsupported null.
     await widget.controller.client.renameAsset(
       RenameAssetCommand(
         assetId: asset.id,
-        displayName: trimmed.isEmpty ? null : trimmed,
+        displayName: trimmed.isEmpty ? asset.filename : trimmed,
       ),
     );
   }
@@ -183,6 +165,59 @@ class _AssetsScreenState extends State<AssetsScreen> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// The rename dialog's content, as its own `StatefulWidget` so its
+/// `TextEditingController` is disposed by Flutter's normal widget lifecycle
+/// (when this element is actually removed from the tree, after the dialog's
+/// closing animation finishes) rather than by the caller right after
+/// `await showDialog(...)` returns -- that future completes as soon as
+/// `Navigator.pop` is called, while the dialog's exit transition is still
+/// animating and still using the controller, so disposing it there hits a
+/// "TextEditingController used after being disposed" race.
+class _RenameDialog extends StatefulWidget {
+  final String initialValue;
+
+  const _RenameDialog({required this.initialValue});
+
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final TextEditingController _controller =
+      TextEditingController(text: widget.initialValue);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Rename'),
+      content: TextField(
+        key: const Key('rename-asset-input'),
+        controller: _controller,
+        autofocus: true,
+        decoration: const InputDecoration(labelText: 'Name'),
+        onSubmitted: (v) => Navigator.of(context).pop(v),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        TextButton(
+          key: const Key('confirm-rename-asset'),
+          onPressed: () => Navigator.of(context).pop(_controller.text),
+          child: const Text('Save'),
+        ),
+      ],
     );
   }
 }

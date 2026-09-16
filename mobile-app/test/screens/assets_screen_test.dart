@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:mobile_app/models/ws_messages.dart';
 import 'package:mobile_app/screens/assets_screen.dart';
 import 'package:mobile_app/services/asset_upload_service.dart';
 import 'package:mobile_app/state/daemon_state_controller.dart';
@@ -129,5 +130,72 @@ void main() {
       fakeClient.sentCommands.where((c) => c.type == 'register_asset'),
       isEmpty,
     );
+  });
+
+  testWidgets('renaming an asset sends the trimmed name', (tester) async {
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    final controller = DaemonStateController(fakeClient);
+    final uploadService = AssetUploadService(
+      daemonHttpBaseUrl: Uri.parse('http://127.0.0.1:0'),
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: AssetsScreen(
+        controller: controller,
+        uploadService: uploadService,
+        pickFile: (kind) async => null,
+      ),
+    ));
+
+    await tester.tap(find.byKey(const Key('rename-asset-button-nam-1')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('rename-asset-input')),
+      '  My Fender Twin  ',
+    );
+    await tester.tap(find.byKey(const Key('confirm-rename-asset')));
+    await tester.pumpAndSettle();
+
+    final cmd = fakeClient.sentCommands
+        .firstWhere((c) => c.type == 'rename_asset')
+        .command as RenameAssetCommand;
+    expect(cmd.assetId, 'nam-1');
+    expect(cmd.displayName, 'My Fender Twin');
+  });
+
+  testWidgets(
+      'clearing the rename field resets the display name to the filename, '
+      'not null', (tester) async {
+    // Regression test: the daemon's rename_asset requires a non-empty
+    // display_name string -- there's no wire value to "clear" it. Sending
+    // null used to fail daemon-side validation, silently no-op'ing what
+    // looked like a successful rename in the UI.
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    final controller = DaemonStateController(fakeClient);
+    final uploadService = AssetUploadService(
+      daemonHttpBaseUrl: Uri.parse('http://127.0.0.1:0'),
+    );
+
+    await tester.pumpWidget(MaterialApp(
+      home: AssetsScreen(
+        controller: controller,
+        uploadService: uploadService,
+        pickFile: (kind) async => null,
+      ),
+    ));
+
+    await tester.tap(find.byKey(const Key('rename-asset-button-nam-1')));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byKey(const Key('rename-asset-input')),
+      '   ',
+    );
+    await tester.tap(find.byKey(const Key('confirm-rename-asset')));
+    await tester.pumpAndSettle();
+
+    final cmd = fakeClient.sentCommands
+        .firstWhere((c) => c.type == 'rename_asset')
+        .command as RenameAssetCommand;
+    expect(cmd.displayName, 'my_amp.nam');
   });
 }

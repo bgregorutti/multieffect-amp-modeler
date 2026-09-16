@@ -186,6 +186,41 @@ void main() {
     expect(amp.pinned, isTrue);
   });
 
+  testWidgets(
+      'a param edit made right after a type change in the same open sheet '
+      'is not reverted by the stale pre-change block', (tester) async {
+    // Regression test: the editor sheet used to render a snapshot of the
+    // block captured when it was opened, so a type change followed by any
+    // other edit in that same still-open sheet (here, dragging the newly
+    // shown gain slider) fired its onChanged from the stale, pre-change
+    // block and silently reverted the type switch back to "nam".
+    final fakeClient = await pumpEditorWithBlockTypes(tester);
+
+    await openStageEditor(tester, 0);
+    await tester.tap(find.byKey(const Key('block-type-field-0')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('gain').last);
+    await tester.pumpAndSettle();
+
+    final sliderFinder = find.descendant(
+      of: find.byKey(const Key('param-slider-gain_db')),
+      matching: find.byType(Slider),
+    );
+    expect(sliderFinder, findsOneWidget);
+    tester.widget<Slider>(sliderFinder).onChanged!(3.5);
+    await tester.pump();
+
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp = lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.type, 'gain');
+    expect(amp.assetId, isNull);
+    expect(amp.params['gain_db'], 3.5);
+  });
+
   testWidgets('the type list offers backline types only, not effects',
       (tester) async {
     await pumpEditorWithBlockTypes(tester);
