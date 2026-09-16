@@ -120,7 +120,13 @@ class NoiseGate:
         self._envelope = 0.0
         self._is_open = False
         self._hold_counter = 0
-        self._gain = db_to_gain(self.params.range_db)
+        # Deliberately not snapped to a floor here: ``reset`` runs from
+        # ``__init__`` before ``set_params``, so anything computed from
+        # ``range_db`` at this point would be the *default* floor rather than
+        # the configured one, and the gate would then spend a release-time
+        # ramping from one to the other at the start of every render. ``None``
+        # means "snap to whatever the floor is when audio first arrives".
+        self._gain: float | None = None
 
     def set_params(self, **kwargs: Any) -> None:
         valid = {f.name for f in fields(NoiseGateParams)}
@@ -171,7 +177,9 @@ class NoiseGate:
         # expressed as a fixed filter. This is the one model here that is not
         # vectorized -- see the README's note on its cost.
         envelope = self._envelope
-        gain = self._gain
+        # First block after a reset: start already sitting at the configured
+        # floor rather than ramping up to it from a stale default.
+        gain = floor_gain if self._gain is None else self._gain
         is_open = self._is_open
         hold_counter = self._hold_counter
         decay = self._env_decay

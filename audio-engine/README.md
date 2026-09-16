@@ -319,6 +319,85 @@ hard attacks with outlier IRs is preferable to universally reduced
 headroom. A per-IR adaptive threshold is a plausible middle ground but
 wasn't pursued with only two real files to calibrate against.
 
+## Modelled pedal blocks
+
+Three pedals implemented as hand-written DSP rather than NAM captures:
+`big_muff`, `tube_screamer` and `noise_gate` (`pedal_dsp.hpp` plus one header
+per pedal). A `.nam` file bakes in the knob positions it was captured at, and
+most of what a pedal's knobs do is not worth an inference: Volume is a
+multiply, Tone is a linear filter network. Only the gain control reshapes the
+nonlinearity. NAM stays the right tool for the **amp**; for a gate it cannot
+work at all, since gating is time-varying gain rather than a static
+nonlinearity.
+
+Measured on this dev machine, `-O2`, per 256-sample block (5.33 ms budget):
+
+| Block | Cost | Latency |
+|---|---|---|
+| `big_muff` | 0.095 ms — **1.8%** of budget | 16 samples (0.33 ms) |
+| `tube_screamer` | 0.071 ms — **1.3%** | 16 samples (0.33 ms) |
+| `noise_gate` | 0.0012 ms — **0.02%** | 0 — causal, no lookahead |
+
+All three together cost about a quarter of what one NAM inference does (13%
+worst case, above). The latency on the distortion blocks is the anti-aliasing
+oversampler: they run their clipping stages 4x oversampled, without which a
+hard-driven clipper folds its harmonics back as inharmonic aliasing.
+
+### The Python reference, and parity
+
+These are a **port of `vst-python/`**, which is the reference implementation --
+where each pedal's behaviour was designed, measured and argued about, and where
+the circuit constants live in a form that is quick to iterate on against a real
+plugin. That is not a claim anyone has to take on trust:
+`vst-python/tools/export_golden.py` freezes a render from each Python model
+into `tests/golden/pedal_parity.json`, and `tests/test_python_parity.cpp`
+replays the identical input through the C++ block and compares.
+
+Parity is asserted to **1e-6**, not bit-exactness. The Python computes in
+float64 throughout; `EffectBlock`'s buffers are `float`. These blocks keep
+every intermediate in `double` and round once on the way out, so what remains
+is a single float quantization. The oversampler's FIR is checked separately
+against the exported `scipy.signal.firwin` taps, so a divergence in the filter
+*design* reports itself rather than surfacing as a mysteriously wrong waveform.
+
+After any deliberate change to a Python model, regenerate the fixture:
+
+```bash
+cd vst-python && .venv/bin/python tools/export_golden.py \
+    ../audio-engine/tests/golden/pedal_parity.json
+```
+
+### Parameter smoothing, and why it does not break parity
+
+The Python models deliberately have **no** parameter smoothing: they apply
+parameters per block, which is what keeps their renders block-size invariant
+and exactly reproducible. A real-time engine cannot do that -- a gain stepping
+discontinuously mid-buffer clicks audibly.
+
+`ParamSmoother` resolves the two. `snap()` sets current and target to the same
+value and `next()` then returns it unchanged forever, with no epsilon and no
+drift; blocks snap in their constructor, `prepare()` and `reset()`, and only
+`setLiveParam()` ramps. So a preset load renders identically to the reference
+while a slider drag stays click-free. Both halves are tested:
+`PedalParameterSmoothing.LiveChangeConvergesToTheConstructedValue` (smoothing
+changes *when* a value arrives, never *where* it lands),
+`...LiveChangeDoesNotClick`, and `...ResetSnapsInsteadOfRamping`.
+
+The gate needs no smoother: its output gain is already ramped by its own
+attack/release coefficients, and its other parameters feed a state machine
+rather than multiplying the signal.
+
+### A bug the parity test caught
+
+Worth recording, because it is exactly what this test is for. The first parity
+run failed on the gate alone, by 2.2e-6 at sample 9. The cause was in the
+*Python*, not the port: `NoiseGate.reset()` ran from `__init__` before
+`set_params`, so the gate started at the **default** floor rather than the
+configured one and spent a release-time ramping between them at the start of
+every render. The C++ was right. Fixed in the reference (the closed gain is now
+resolved lazily on the first sample), fixture regenerated, and both sides now
+agree.
+
 ## Real NAM inference
 
 Real WaveNet/LSTM amp-model inference, not the identity/gain-passthrough

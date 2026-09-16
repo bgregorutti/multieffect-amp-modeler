@@ -29,6 +29,10 @@ add_library(audio_engine_core
   src/eq_block.cpp
   src/tone_stack_block.cpp
   src/delay_block.cpp
+  src/pedal_dsp.cpp
+  src/big_muff_block.cpp
+  src/tube_screamer_block.cpp
+  src/noise_gate_block.cpp
   src/wav_file.cpp
   src/resample.cpp
   src/convolution.cpp
@@ -249,6 +253,9 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     tests/test_eq_block.cpp
     tests/test_tone_stack_block.cpp
     tests/test_delay_block.cpp
+    tests/test_pedal_dsp.cpp
+    tests/test_pedal_blocks.cpp
+    tests/test_python_parity.cpp
     tests/test_wav_file.cpp
     tests/test_resample.cpp
     tests/test_convolution.cpp
@@ -259,6 +266,10 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     tests/test_control_socket_integration.cpp
   )
   target_link_libraries(audio_engine_tests PRIVATE audio_engine_core GTest::gtest GTest::gtest_main)
+  # Golden vectors exported from the Python reference models -- see
+  # tests/test_python_parity.cpp and vst-python/tools/export_golden.py.
+  target_compile_definitions(audio_engine_tests PRIVATE
+    PEDAL_PARITY_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/tests/golden/pedal_parity.json")
   target_compile_definitions(audio_engine_tests PRIVATE
     AUDIO_ENGINE_EXECUTABLE_PATH="$<TARGET_FILE:audio_engine>")
   add_dependencies(audio_engine_tests audio_engine)

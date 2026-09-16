@@ -46,7 +46,45 @@ std::vector<BlockTypeDescriptor> listNativeBlockTypes() {
         {"mix", "Mix", "", 0.0, 1.0, 0.5, 0},
     };
 
-    return {gain, volume, eq, toneStack, delay};
+    // The modelled pedals. Their knobs are pot positions, so they are
+    // unitless 0..1 (matching the Python reference and the VST3 convention)
+    // rather than the real units delay uses. step_count 1 marks a
+    // two-position switch.
+    BlockTypeDescriptor bigMuff;
+    bigMuff.type = "big_muff";
+    bigMuff.parameters = {
+        {"sustain", "Sustain", "", 0.0, 1.0, 0.7, 0},
+        {"tone", "Tone", "", 0.0, 1.0, 0.5, 0},
+        {"volume", "Volume", "", 0.0, 1.0, 0.5, 0},
+        {"pad_15db", "-15 dB Pad", "", 0.0, 1.0, 0.0, 1},
+        {"bypass", "Bypass", "", 0.0, 1.0, 0.0, 1},
+    };
+
+    BlockTypeDescriptor tubeScreamer;
+    tubeScreamer.type = "tube_screamer";
+    tubeScreamer.parameters = {
+        {"drive", "Drive", "", 0.0, 1.0, 0.5, 0},
+        {"tone", "Tone", "", 0.0, 1.0, 0.5, 0},
+        {"level", "Level", "", 0.0, 1.0, 0.5, 0},
+        {"bypass", "Bypass", "", 0.0, 1.0, 0.0, 1},
+    };
+
+    // Real units here, unlike the two above: a gate's threshold and timings
+    // are absolute quantities a player reasons about directly, not knob
+    // positions.
+    BlockTypeDescriptor noiseGate;
+    noiseGate.type = "noise_gate";
+    noiseGate.parameters = {
+        {"threshold_db", "Threshold", "dB", -90.0, -10.0, -45.0, 0},
+        {"range_db", "Range", "dB", -90.0, 0.0, -60.0, 0},
+        {"attack_ms", "Attack", "ms", 0.1, 50.0, 1.0, 0},
+        {"hold_ms", "Hold", "ms", 0.0, 500.0, 40.0, 0},
+        {"release_ms", "Release", "ms", 1.0, 1000.0, 120.0, 0},
+        {"hysteresis_db", "Hysteresis", "dB", 0.0, 24.0, 6.0, 0},
+        {"bypass", "Bypass", "", 0.0, 1.0, 0.0, 1},
+    };
+
+    return {gain, volume, eq, toneStack, delay, bigMuff, tubeScreamer, noiseGate};
 }
 
 }  // namespace audio_engine

@@ -71,6 +71,7 @@ public:
 
 // Builds one EffectBlock from a preset's EffectBlockSpec. Recognized
 // `type` values: "gain", "volume", "eq", "tone_stack", "delay",
+// "big_muff", "tube_screamer", "noise_gate",
 // "passthrough". An unrecognized type falls back to a PassthroughBlock
 // (fail safe rather than fail closed -- a preset referencing a
 // not-yet-implemented block type still loads and plays, just without that

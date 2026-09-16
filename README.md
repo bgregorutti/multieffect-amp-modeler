@@ -38,6 +38,11 @@ footswitch/       (planned) GPIO event relay running on the Pi, talking to
 display/          (planned) Minimal read-only display client (I2C
                   LCD/OLED), driven by control-daemon broadcasts.
 
+vst-python/       Python DSP pedal models (Big Muff, Tube Screamer, noise
+                  gate): the reference implementation the audio-engine's
+                  C++ pedal blocks are ported from and validated against.
+                  See vst-python/README.md.
+
 docs/             Cross-cutting design notes and open questions.
 
 scripts/          Dev-machine testing tools that don't belong to any one

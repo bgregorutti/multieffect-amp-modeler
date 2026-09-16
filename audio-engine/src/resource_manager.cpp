@@ -3,11 +3,14 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "audio_engine/big_muff_block.hpp"
 #include "audio_engine/delay_block.hpp"
 #include "audio_engine/eq_block.hpp"
 #include "audio_engine/gain_block.hpp"
+#include "audio_engine/noise_gate_block.hpp"
 #include "audio_engine/passthrough_block.hpp"
 #include "audio_engine/tone_stack_block.hpp"
+#include "audio_engine/tube_screamer_block.hpp"
 #include "audio_engine/wav_file.hpp"
 
 #ifdef AUDIO_ENGINE_WITH_REAL_NAM
@@ -59,6 +62,11 @@ std::unique_ptr<EffectBlock> createEffectBlock(const EffectBlockSpec& spec) {
     if (spec.type == "eq") return std::make_unique<EqBlock>(spec.params);
     if (spec.type == "tone_stack") return std::make_unique<ToneStackBlock>(spec.params);
     if (spec.type == "delay") return std::make_unique<DelayBlock>(spec.params);
+    // The modelled pedals -- hand-written DSP rather than NAM captures; see
+    // big_muff_block.hpp for why a capture is the wrong tool for a pedal.
+    if (spec.type == "big_muff") return std::make_unique<BigMuffBlock>(spec.params);
+    if (spec.type == "tube_screamer") return std::make_unique<TubeScreamerBlock>(spec.params);
+    if (spec.type == "noise_gate") return std::make_unique<NoiseGateBlock>(spec.params);
     // "passthrough" and any unrecognized type: fail safe, not fail closed.
     return std::make_unique<PassthroughBlock>();
 }

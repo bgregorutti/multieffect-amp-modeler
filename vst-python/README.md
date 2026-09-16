@@ -191,6 +191,30 @@ gate.process(distorted, sidechain=clean_guitar)
 `--block-size` is honoured, so this exercises the same block-based path the C++
 engine will use rather than a one-shot offline render.
 
+## Parity with the C++ port
+
+These models are the reference for `audio-engine`'s `big_muff`,
+`tube_screamer` and `noise_gate` blocks, and that is enforced rather than
+asserted. `tools/export_golden.py` freezes a render from each model into
+`audio-engine/tests/golden/pedal_parity.json`; `test_python_parity.cpp`
+replays the identical input through the C++ block and compares to **1e-6**
+(the C++ keeps every intermediate in `double` and rounds once into its `float`
+buffer, so that is a single quantization, not a fudge factor).
+
+**After any deliberate change to a model here, regenerate the fixture** --
+otherwise the C++ suite fails, which is the point:
+
+```bash
+.venv/bin/python tools/export_golden.py \
+    ../audio-engine/tests/golden/pedal_parity.json
+```
+
+It has already earned its keep: the first parity run failed on the gate alone,
+and the bug was *here*, not in the port -- `NoiseGate.reset()` runs from
+`__init__` before `set_params`, so the gate started at the default floor
+instead of the configured one and ramped between them at the start of every
+render. The closed gain is now resolved lazily on the first sample.
+
 ## Tuning against a reference
 
 The circuit constants at the top of each model are the tuning surface — stage
@@ -230,7 +254,9 @@ than the hysteresis window on low notes.
 - **No parameter smoothing.** Parameters are applied per block, so moving a
   knob mid-stream will click. Deliberately omitted: smoothing across a block
   would break block-size invariance, which is the property these models exist
-  to guarantee. **The C++ port needs smoothing in the real-time path.**
+  to guarantee. The C++ port *does* smooth, and reconciles the two by snapping
+  on construction/prepare/reset and ramping only on a live change -- see
+  "Parity with the C++ port" below.
 - **Mono only.** All three reject anything but a 1-D block.
 - **The gate runs a per-sample Python loop.** Its envelope and state machine
   are inherently sequential, so unlike the others it is not vectorized. It is
@@ -239,8 +265,8 @@ than the hysteresis window on low notes.
   one-poles blended by the pot, not the interacting RC network with the pot's
   loading. The measured notch lands on the published figure, so it holds where
   it matters.
-- **Only the Big Muff has been checked against a real plugin.** Every Tube
-  Screamer and gate number above is self-measured.
+- **Only the Big Muff has been checked against a real plugin** (NA Big Stuff,
+  in a DAW). Every Tube Screamer and gate number above is self-measured.
 
 ## Open questions
 
