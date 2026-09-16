@@ -48,6 +48,15 @@ IconData blockTypeIcon(String type) {
       return Icons.blur_circular;
     case 'reverb':
       return Icons.waves;
+    // The modelled pedals. Distinct glyphs matter more here than literal ones:
+    // these sit side by side in the chain, and three identical fallback icons
+    // make a row of stage cards unreadable at a glance.
+    case 'big_muff':
+      return Icons.local_fire_department;
+    case 'tube_screamer':
+      return Icons.bolt;
+    case 'noise_gate':
+      return Icons.noise_control_off;
     default:
       return Icons.settings_input_component;
   }

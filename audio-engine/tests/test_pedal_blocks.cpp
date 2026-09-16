@@ -92,6 +92,21 @@ TEST(PedalBlockRegistry, EveryAdvertisedParameterIsLiveSettable) {
     }
 }
 
+// A preset block already carries `enabled`, which the engine honours by
+// skipping the block entirely. Advertising "bypass" as well would put a second
+// off-switch on every pedal card in the app, next to the real toggle -- so the
+// blocks understand the key but the registry must not offer it.
+TEST(PedalBlockRegistry, DoesNotAdvertiseBypassAsAParameter) {
+    for (const auto& descriptor : listNativeBlockTypes()) {
+        for (const auto& parameter : descriptor.parameters) {
+            EXPECT_NE(parameter.key, "bypass")
+                << descriptor.type << " advertises bypass; use the block's `enabled` flag instead";
+        }
+    }
+    // Still understood directly, which is what the bypass tests below rely on.
+    EXPECT_TRUE(makeBlock("big_muff")->setLiveParam("bypass", 1.0));
+}
+
 TEST(PedalBlockFactory, BuildsRealBlocksNotPassthrough) {
     auto signal = sine(220.0, 4096);
     for (const auto& type : kPedalTypes) {

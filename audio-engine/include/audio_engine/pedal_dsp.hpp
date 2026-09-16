@@ -77,12 +77,18 @@ public:
     // Round-trip group delay, in base-rate samples.
     double latencySamples() const;
 
+    // Any `numSamples` is safe: longer buffers are split internally into
+    // kPedalMaxChunk pieces, with filter state carried across the splits, so
+    // the result does not depend on the caller's block size.
+    //
     // `out` must hold numSamples * factor doubles.
     void upsample(const double* in, double* out, std::size_t numSamples) noexcept;
     // `in` holds numSamples * factor doubles; `out` holds numSamples.
     void downsample(const double* in, double* out, std::size_t numSamples) noexcept;
 
 private:
+    void upsampleChunk(const double* in, double* out, std::size_t numSamples) noexcept;
+    void downsampleChunk(const double* in, double* out, std::size_t numSamples) noexcept;
     void filter(const double* in, double* out, std::size_t n, std::vector<double>& history,
                 std::vector<double>& scratch) noexcept;
 

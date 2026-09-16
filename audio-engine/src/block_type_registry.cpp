@@ -50,6 +50,15 @@ std::vector<BlockTypeDescriptor> listNativeBlockTypes() {
     // unitless 0..1 (matching the Python reference and the VST3 convention)
     // rather than the real units delay uses. step_count 1 marks a
     // two-position switch.
+    //
+    // Deliberately NOT listed: "bypass". Each block class understands it (the
+    // Python reference has it, and the block tests use it), but a preset block
+    // already carries an `enabled` flag that the engine honours by skipping
+    // the block entirely -- see EffectBlockSpec::enabled and the `if
+    // (!blockSpec.enabled) continue;` in resource_manager.cpp. Advertising
+    // "bypass" as well would put a second, competing off-switch on every pedal
+    // in the app's UI, next to the real per-block toggle. One off-switch, and
+    // it is `enabled`.
     BlockTypeDescriptor bigMuff;
     bigMuff.type = "big_muff";
     bigMuff.parameters = {
@@ -57,7 +66,6 @@ std::vector<BlockTypeDescriptor> listNativeBlockTypes() {
         {"tone", "Tone", "", 0.0, 1.0, 0.5, 0},
         {"volume", "Volume", "", 0.0, 1.0, 0.5, 0},
         {"pad_15db", "-15 dB Pad", "", 0.0, 1.0, 0.0, 1},
-        {"bypass", "Bypass", "", 0.0, 1.0, 0.0, 1},
     };
 
     BlockTypeDescriptor tubeScreamer;
@@ -66,7 +74,6 @@ std::vector<BlockTypeDescriptor> listNativeBlockTypes() {
         {"drive", "Drive", "", 0.0, 1.0, 0.5, 0},
         {"tone", "Tone", "", 0.0, 1.0, 0.5, 0},
         {"level", "Level", "", 0.0, 1.0, 0.5, 0},
-        {"bypass", "Bypass", "", 0.0, 1.0, 0.0, 1},
     };
 
     // Real units here, unlike the two above: a gate's threshold and timings
@@ -81,7 +88,6 @@ std::vector<BlockTypeDescriptor> listNativeBlockTypes() {
         {"hold_ms", "Hold", "ms", 0.0, 500.0, 40.0, 0},
         {"release_ms", "Release", "ms", 1.0, 1000.0, 120.0, 0},
         {"hysteresis_db", "Hysteresis", "dB", 0.0, 24.0, 6.0, 0},
-        {"bypass", "Bypass", "", 0.0, 1.0, 0.0, 1},
     };
 
     return {gain, volume, eq, toneStack, delay, bigMuff, tubeScreamer, noiseGate};

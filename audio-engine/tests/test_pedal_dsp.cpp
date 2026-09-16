@@ -170,6 +170,46 @@ TEST(OversamplerFilter, FactorOneIsAPassthrough) {
     for (std::size_t i = 0; i < input.size(); ++i) EXPECT_DOUBLE_EQ(output[i], input[i]);
 }
 
+// Regression: the scratch buffers are sized for kPedalMaxChunk, and a single
+// call longer than that used to run straight off the end of them. Being a
+// vector overrun it was undefined behaviour rather than a clean crash -- it
+// surfaced as output that drifted further from the input the longer the
+// buffer ran, and only showed up at all because an unrelated new test shifted
+// the heap layout. Longer calls are now split internally.
+TEST(OversamplerFilter, HandlesBuffersLongerThanItsInternalChunk) {
+    const std::size_t numSamples = kPedalMaxChunk * 4 + 57;  // deliberately not a multiple
+
+    Oversampler oneShot;
+    oneShot.prepare(4);
+    const auto input = sine(700.0, numSamples);
+    std::vector<double> expanded(numSamples * 4);
+    std::vector<double> whole(numSamples);
+    oneShot.upsample(input.data(), expanded.data(), numSamples);
+    oneShot.downsample(expanded.data(), whole.data(), numSamples);
+
+    // Splitting must be exact, so feeding the same signal in small pieces has
+    // to give bit-identical output to one long call.
+    Oversampler piecewise;
+    piecewise.prepare(4);
+    std::vector<double> chunked(numSamples);
+    const std::size_t step = 333;
+    for (std::size_t offset = 0; offset < numSamples; offset += step) {
+        const std::size_t n = std::min(step, numSamples - offset);
+        std::vector<double> scratch(n * 4);
+        piecewise.upsample(input.data() + offset, scratch.data(), n);
+        piecewise.downsample(scratch.data(), chunked.data() + offset, n);
+    }
+
+    for (std::size_t i = 0; i < numSamples; ++i) EXPECT_DOUBLE_EQ(whole[i], chunked[i]);
+
+    // And it is still a faithful round trip right to the end of a long buffer
+    // -- the property the overrun was quietly destroying.
+    const auto delay = static_cast<std::size_t>(oneShot.latencySamples());
+    for (std::size_t i = numSamples / 2; i < numSamples - delay; ++i) {
+        EXPECT_NEAR(whole[i + delay], input[i], 3e-3);
+    }
+}
+
 TEST(OversamplerFilter, TapsSumToUnityAtDc) {
     Oversampler oversampler;
     oversampler.prepare(4);

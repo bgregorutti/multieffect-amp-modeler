@@ -127,6 +127,20 @@ void Oversampler::upsample(const double* in, double* out, std::size_t numSamples
         std::copy(in, in + numSamples, out);
         return;
     }
+    // The scratch buffers are sized for kPedalMaxChunk, so anything longer is
+    // split here rather than trusting the caller to do it. The pedal blocks
+    // already chunk their own buffers, but this class is public and a direct
+    // caller passing a longer block used to run straight off the end of
+    // stuffed_ -- silent heap corruption that happened to look like passband
+    // error. Splitting is exact: both directions carry their filter state
+    // across the boundary.
+    for (std::size_t offset = 0; offset < numSamples; offset += kPedalMaxChunk) {
+        const std::size_t n = std::min(kPedalMaxChunk, numSamples - offset);
+        upsampleChunk(in + offset, out + offset * static_cast<std::size_t>(factor_), n);
+    }
+}
+
+void Oversampler::upsampleChunk(const double* in, double* out, std::size_t numSamples) noexcept {
     const std::size_t expanded = numSamples * static_cast<std::size_t>(factor_);
     std::fill(stuffed_.begin(), stuffed_.begin() + static_cast<std::ptrdiff_t>(expanded), 0.0);
     // Zero-stuffing spreads the energy across `factor` samples, so the
@@ -143,6 +157,13 @@ void Oversampler::downsample(const double* in, double* out, std::size_t numSampl
         std::copy(in, in + numSamples, out);
         return;
     }
+    for (std::size_t offset = 0; offset < numSamples; offset += kPedalMaxChunk) {
+        const std::size_t n = std::min(kPedalMaxChunk, numSamples - offset);
+        downsampleChunk(in + offset * static_cast<std::size_t>(factor_), out + offset, n);
+    }
+}
+
+void Oversampler::downsampleChunk(const double* in, double* out, std::size_t numSamples) noexcept {
     const std::size_t expanded = numSamples * static_cast<std::size_t>(factor_);
     // Filter in place over the oversampled scratch, then keep every factor-th.
     filter(in, stuffed_.data(), expanded, downHistory_, downScratch_);

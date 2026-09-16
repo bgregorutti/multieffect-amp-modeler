@@ -387,6 +387,46 @@ The gate needs no smoother: its output gain is already ramped by its own
 attack/release coefficients, and its other parameters feed a state machine
 rather than multiplying the signal.
 
+### Running these under sanitizers
+
+The pedal DSP is the one part of this tree doing raw pointer arithmetic over
+pre-allocated scratch buffers (the oversampler), so it is worth checking:
+
+```bash
+cmake -S audio-engine -B audio-engine/build-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+cmake --build audio-engine/build-asan -j
+ASAN_OPTIONS=detect_container_overflow=0 ./audio-engine/build-asan/audio_engine_tests
+```
+
+`detect_container_overflow=0` is required and is **not** hiding a bug of ours:
+Homebrew's `libgtest` is not ASan-instrumented, and ASan's container
+annotations only agree when the whole program is. Without the flag the build
+aborts during gtest's own test *discovery*, inside `GTestIsInitialized()`
+copying a `vector<string>` -- no project code on the stack at all.
+Heap-buffer-overflow and every UBSan check stay on, and those are what catch a
+real overrun. Last run: **151/151 clean**.
+
+### A memory bug the sanitizer confirmed
+
+`Oversampler`'s scratch buffers are sized once in `prepare()` for
+`kPedalMaxChunk` samples, which is what keeps `process()` allocation-free in
+the real-time path. The pedal blocks chunk their own buffers to match -- but
+`Oversampler` is public, and a *direct* caller passing a longer buffer ran
+straight off the end of `stuffed_`.
+
+Being a vector overrun this was undefined behaviour rather than a clean crash,
+and it behaved like one: the full suite passed, and the symptom only appeared
+when an unrelated new test shifted the heap layout. It then looked like
+innocuous filter error -- output drifting further from the input the longer the
+buffer ran -- rather than like memory corruption. `upsample`/`downsample` now
+split long calls internally, carrying filter state across the splits so the
+result is identical either way, and
+`OversamplerFilter.HandlesBuffersLongerThanItsInternalChunk` pins it.
+
+The lesson worth keeping: a green suite over UB is not evidence. The
+sanitizer run above is.
+
 ### A bug the parity test caught
 
 Worth recording, because it is exactly what this test is for. The first parity
