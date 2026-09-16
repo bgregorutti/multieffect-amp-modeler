@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_app/models/asset.dart';
+import 'package:mobile_app/models/daemon_state.dart';
 import 'package:mobile_app/models/effect_block.dart';
 import 'package:mobile_app/models/ws_messages.dart';
 import 'package:mobile_app/screens/rig_chain_editor_screen.dart';
@@ -147,16 +148,32 @@ void main() {
     return fakeClient;
   }
 
+  /// Backline stages are filled/tappable cards; the type/asset/params
+  /// fields (`block-type-field-*`, `block-asset-dropdown-*`, etc.) only
+  /// exist once a tap on the card opens its editor sheet.
+  Future<void> openStageEditor(WidgetTester tester, int index) async {
+    await tester.tap(find.byKey(Key('block-card-$index')));
+    await tester.pumpAndSettle();
+  }
+
   testWidgets(
       'changing a block\'s type fills in its schema defaults and clears its '
       'asset', (tester) async {
     final fakeClient = await pumpEditorWithBlockTypes(tester);
 
     // "amp" (index 0) is a nam block with an asset -- switching it to
-    // "gain" must drop the asset and pick up gain's schema default.
+    // "gain" must drop the asset and pick up gain's schema default. It
+    // already has an asset, so tapping it opens the full editor directly
+    // (not the empty-stage asset picker).
+    await openStageEditor(tester, 0);
     await tester.tap(find.byKey(const Key('block-type-field-0')));
     await tester.pumpAndSettle();
     await tester.tap(find.text('gain').last);
+    await tester.pumpAndSettle();
+
+    // Dismiss the editor sheet (tap its scrim) before reaching the AppBar's
+    // save button underneath it.
+    await tester.tapAt(const Offset(10, 10));
     await tester.pumpAndSettle();
 
     await tester.tap(find.byKey(const Key('save-rig-button')));
@@ -169,10 +186,46 @@ void main() {
     expect(amp.pinned, isTrue);
   });
 
+  testWidgets(
+      'a param edit made right after a type change in the same open sheet '
+      'is not reverted by the stale pre-change block', (tester) async {
+    // Regression test: the editor sheet used to render a snapshot of the
+    // block captured when it was opened, so a type change followed by any
+    // other edit in that same still-open sheet (here, dragging the newly
+    // shown gain slider) fired its onChanged from the stale, pre-change
+    // block and silently reverted the type switch back to "nam".
+    final fakeClient = await pumpEditorWithBlockTypes(tester);
+
+    await openStageEditor(tester, 0);
+    await tester.tap(find.byKey(const Key('block-type-field-0')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('gain').last);
+    await tester.pumpAndSettle();
+
+    final sliderFinder = find.descendant(
+      of: find.byKey(const Key('param-slider-gain_db')),
+      matching: find.byType(Slider),
+    );
+    expect(sliderFinder, findsOneWidget);
+    tester.widget<Slider>(sliderFinder).onChanged!(3.5);
+    await tester.pump();
+
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp = lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.type, 'gain');
+    expect(amp.assetId, isNull);
+    expect(amp.params['gain_db'], 3.5);
+  });
+
   testWidgets('the type list offers backline types only, not effects',
       (tester) async {
     await pumpEditorWithBlockTypes(tester);
 
+    await openStageEditor(tester, 0);
     await tester.tap(find.byKey(const Key('block-type-field-0')));
     await tester.pumpAndSettle();
 
@@ -212,10 +265,153 @@ void main() {
     await tester.pumpAndSettle();
 
     // A backline block whose type has no known schema must still be
-    // editable via the fallback key/value editor.
+    // editable via the fallback key/value editor, reached by tapping its
+    // stage card open (it needs no asset, so this opens the full editor
+    // directly, not a picker).
+    await openStageEditor(tester, 0);
     final paramRow = find.byKey(const Key('param-row-decay'));
     await tester.ensureVisible(paramRow);
     await tester.pumpAndSettle();
     expect(paramRow, findsOneWidget);
+  });
+
+  testWidgets(
+      'tapping an empty stage opens a picker; selecting an asset assigns it',
+      (tester) async {
+    // "amp" here has no asset yet -- an empty stage -- while "cab" already
+    // has one, so this exercises the empty-stage picker path specifically
+    // (a filled stage instead opens the full editor -- see the "changing a
+    // block's type" test above).
+    final rig = rigSvt.copyWith(chain: const [
+      EffectBlock(id: 'amp', type: 'nam', pinned: true),
+      EffectBlock(id: 'cab', type: 'ir', assetId: 'ir-1', pinned: true),
+    ]);
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    final controller = DaemonStateController(fakeClient);
+    await tester.pumpWidget(MaterialApp(
+      home: RigChainEditorScreen(controller: controller, rig: rig),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('block-card-0')));
+    await tester.pumpAndSettle();
+
+    // The picker only offers assets of the matching kind (nam, here).
+    expect(find.byKey(const Key('asset-picker-option-nam-1')), findsOneWidget);
+    await tester.tap(find.byKey(const Key('asset-picker-option-nam-1')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp =
+        lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.assetId, 'nam-1');
+  });
+
+  testWidgets(
+      'the asset picker scrolls to reach assets past the first screenful',
+      (tester) async {
+    // Regression test: the picker's options used to sit in an unbounded
+    // Column inside the bottom sheet, so only the first few assets were
+    // laid out at all and the rest were simply unreachable -- not just
+    // "hard to scroll to", but not present in the render tree.
+    final manyNamAssets = {
+      for (var i = 0; i < 20; i++)
+        'nam-$i': Asset(
+          id: 'nam-$i',
+          kind: AssetKind.nam,
+          filename: 'amp_$i.nam',
+          storedPath: '/data/assets/amp_$i.nam',
+          sizeBytes: 1024,
+          uploadedAt: 0,
+        ),
+    };
+    final rig = rigSvt.copyWith(chain: const [
+      EffectBlock(id: 'amp', type: 'nam', pinned: true),
+    ]);
+    final state = DaemonState(
+      rigs: [rig],
+      assets: manyNamAssets,
+      footswitchMapping: sampleState.footswitchMapping,
+      activeRigIndex: 0,
+      activePresetIndex: 0,
+      activeRigId: 'rig-1',
+      activePresetId: 'preset-a',
+      bypass: false,
+      tempoBpm: 120.0,
+    );
+    final fakeClient = FakeDaemonClient(state: state);
+    final controller = DaemonStateController(fakeClient);
+    await tester.pumpWidget(MaterialApp(
+      home: RigChainEditorScreen(controller: controller, rig: rig),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('block-card-0')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('asset-picker-option-nam-19')), findsNothing,
+        reason: 'not yet visible without scrolling');
+
+    final pickerList = find.byKey(const Key('asset-picker-list'));
+    final lastOption = find.byKey(const Key('asset-picker-option-nam-19'));
+    for (var i = 0; i < 15 && lastOption.evaluate().isEmpty; i++) {
+      await tester.drag(pickerList, const Offset(0, -300));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(lastOption, findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('asset-picker-option-nam-19')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp =
+        lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.assetId, 'nam-19');
+  });
+
+  testWidgets(
+      'a schema-known block\'s parameters are edited with sliders, not raw '
+      'text fields', (tester) async {
+    final rig = rigSvt.copyWith(chain: const [
+      EffectBlock(
+          id: 'amp', type: 'gain', pinned: true, params: {'gain_db': -6.0}),
+    ]);
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    fakeClient.nextResult = blockTypesResult;
+    final controller = DaemonStateController(fakeClient);
+    await tester.pumpWidget(MaterialApp(
+      home: RigChainEditorScreen(controller: controller, rig: rig),
+    ));
+    await tester.pumpAndSettle();
+
+    // "gain" needs no asset, so tapping its stage opens the full editor
+    // directly (same as the unrecognized-type case above).
+    await tester.tap(find.byKey(const Key('block-card-0')));
+    await tester.pumpAndSettle();
+
+    final sliderFinder = find.descendant(
+      of: find.byKey(const Key('param-slider-gain_db')),
+      matching: find.byType(Slider),
+    );
+    expect(sliderFinder, findsOneWidget);
+    expect(tester.widget<Slider>(sliderFinder).value, -6.0);
+    expect(find.byKey(const Key('param-value-field-gain_db')), findsNothing,
+        reason: 'schema-known params must not fall back to a raw text field');
+
+    tester.widget<Slider>(sliderFinder).onChanged!(3.5);
+    await tester.pump();
+
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp = lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.params['gain_db'], 3.5);
   });
 }

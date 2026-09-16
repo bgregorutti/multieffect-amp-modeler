@@ -375,6 +375,7 @@ class DaemonStateManager:
         stored_path: str,
         size_bytes: int = 0,
         sha256: Optional[str] = None,
+        display_name: Optional[str] = None,
     ) -> Asset:
         existing = self.find_asset_by_sha256(sha256)
         if existing is not None:
@@ -389,6 +390,12 @@ class DaemonStateManager:
             stored_path=stored_path,
             size_bytes=size_bytes,
             sha256=sha256,
+            # An omitted display_name defaults to the raw filename so the
+            # field is never actually null in stored state -- only
+            # optional on the wire (see RegisterAssetMessage) -- the
+            # mobile picker UI always has *something* human-readable to
+            # show, even before the player bothers to rename it.
+            display_name=display_name if display_name is not None else filename,
         )
         # The engine resolves block asset ids off its own copy of this
         # registry (it never reads the daemon's state directly), so a
@@ -404,6 +411,18 @@ class DaemonStateManager:
         asset.parameters = self.audio_engine.register_asset(asset)
         self.state.assets[asset.id] = asset
         self._notify("register_asset")
+        return asset
+
+    def rename_asset(self, asset_id: str, display_name: str) -> Asset:
+        """Change an already-registered asset's user-facing label.
+
+        Purely a metadata edit -- the file on disk, its checksum and its
+        engine registration are untouched, so this never talks to
+        ``self.audio_engine``.
+        """
+        asset = self._get_asset(asset_id)
+        asset.display_name = display_name
+        self._notify("rename_asset")
         return asset
 
     def set_block_param(
@@ -547,6 +566,12 @@ class DaemonStateManager:
         raise StateError(
             "not_found", f"no preset with id {preset_id!r} in rig {rig.id!r}"
         )
+
+    def _get_asset(self, asset_id: str) -> Asset:
+        asset = self.state.assets.get(asset_id)
+        if asset is None:
+            raise StateError("not_found", f"no asset with id {asset_id!r}")
+        return asset
 
     def _validate_block_states(
         self, rig: Rig, block_states: Optional[Dict[str, PresetBlockState]]

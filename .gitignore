@@ -29,3 +29,6 @@ node_modules/
 # IDE
 .vscode/
 .idea/
+
+# Claude Code agent worktrees (isolated background-agent checkouts)
+/.claude/

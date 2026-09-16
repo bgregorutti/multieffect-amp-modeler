@@ -173,6 +173,15 @@ class Asset(BaseModel):
     size_bytes: int = 0
     sha256: Optional[str] = None
     uploaded_at: float = Field(default_factory=_now)
+    # User-facing label for a mobile picker UI (e.g. "Crunch lampes
+    # vintage") -- distinct from ``filename`` so renaming an asset never
+    # implies touching the file on disk. Optional on the wire
+    # (``register_asset``) but always populated in stored state: the
+    # daemon defaults it to ``filename`` at registration time when omitted
+    # (see ``DaemonStateManager.register_asset``), so this is never
+    # actually ``None`` once an asset exists -- only ``rename_asset``
+    # changes it afterwards.
+    display_name: Optional[str] = None
     # Only ever populated for kind == VST3 (see register_asset) -- a
     # nam/ir asset's "schema" is nothing new, it's just whatever block type
     # it's attached to (see list_block_types instead).

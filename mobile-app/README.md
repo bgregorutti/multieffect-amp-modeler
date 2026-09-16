@@ -67,6 +67,46 @@ every command sent -- instead of a real socket. `DaemonClient` and
 (`dart:io` `HttpServer`/`WebSocketTransformer`), not in-process fakes -- see
 "Protocol-compatibility notes" below for why.
 
+## Signal chain visualization (rig & preset editors)
+
+`RigChainEditorScreen` and `PresetEditorScreen` render a rig's chain as a
+horizontally scrollable strip of Material 3 stage cards connected by arrow
+connectors (`lib/widgets/chain_stage_card.dart`/`chain_connector.dart`) --
+`[Gain] -> [Head] -> [Cab] -> [Effects] -> [EQ] -> [Volume]`-style, closer
+to a DAW's signal-path view than the plain vertical list this used to be.
+Each card shows a generic category icon (`lib/models/asset_category.dart`
+-- plain `IconData` per `AssetKind`/native block type, deliberately not
+product photos or per-asset uploaded images, to sidestep brand/rights
+issues) plus the block's `Asset.displayLabel` (`displayName ?? filename`)
+or type name.
+
+- **Rig editor**: an asset-backed block (`nam`/`ir`/`vst3`) with no
+  `assetId` yet renders as an empty/greyed placeholder card; tapping it
+  opens a bottom-sheet picker of assets filtered to that block's kind
+  (with an escape hatch into the full type/asset editor to change the
+  block's type entirely). Tapping a filled card reopens that same editor
+  (`_BlockEditorFields`) in a bottom sheet instead of an always-visible
+  inline card. A block's own default parameters (`gain_db`, EQ bands,
+  etc. -- what a freshly-created preset starts from) are edited with
+  `Slider`s (`_SchemaParamsEditor`) whenever a schema is known, the same
+  widget style as the "Live controls" sliders described below; only a
+  type this app has no known schema for falls back to the free-text
+  key/value editor (`_ParamsEditor`). Drag-to-reorder and remove stay
+  directly on the card.
+- **Preset editor**: pinned (rig-inherited) blocks render as locked cards
+  (no tap target, just a lock glyph) in the same strip as the switchable
+  effect cards, which keep their enable switch and remove button on the
+  card itself -- one visual language across both screens, matching how
+  the rig screen looks.
+- **Asset renaming**: `AssetsScreen` shows `displayLabel` with a rename
+  affordance (`renameAsset`, wire command `rename_asset`) instead of only
+  the raw uploaded filename, so a picker card can show "Crunch lampes
+  vintage" rather than `marshall_style_01.nam`.
+
+This intentionally does not add new interaction modes beyond tap-to-pick/
+tap-to-edit and drag-to-reorder -- the visual upgrade is meant to make the
+chain easier to scan, not to introduce new steps.
+
 ## Live parameter controls (dynamic per-block schema)
 
 `PresetEditorScreen`'s "Live controls" section renders one real `Slider`
@@ -99,6 +139,12 @@ This is a live per-preset override, distinct from editing a block's own
 *default* parameters (what a freshly-created preset starts from), which
 stays `RigChainEditorScreen`'s generic key/value `_ParamsEditor` -- an
 edit-time, save-gated concern on the rig itself.
+
+A small tertiary-colored dot next to a slider's label (`live-param-
+override-dot`) marks a parameter whose value actually comes from this
+preset's `block_states` override rather than the block/type default --
+answering "how do I tell an overridden knob apart from a default one"
+without a banner or badge, kept as subtle as the rest of this screen.
 
 ## Protocol-compatibility notes
 

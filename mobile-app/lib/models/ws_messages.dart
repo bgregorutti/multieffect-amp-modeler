@@ -254,6 +254,26 @@ class RegisterAssetCommand implements DaemonCommand {
       };
 }
 
+/// Sets an asset's user-facing label -- purely cosmetic, doesn't touch
+/// `filename`/`stored_path`/anything engine-facing. See `Asset.displayName`.
+/// The daemon's `display_name` field on this command is a required string
+/// (there is no "clear it" wire value) -- callers wanting to reset to the
+/// filename should pass the filename itself, same as `register_asset`'s own
+/// default.
+class RenameAssetCommand implements DaemonCommand {
+  @override
+  String get type => 'rename_asset';
+
+  final String assetId;
+  final String displayName;
+
+  const RenameAssetCommand({required this.assetId, required this.displayName});
+
+  @override
+  Map<String, dynamic> toJson() =>
+      {'type': type, 'asset_id': assetId, 'display_name': displayName};
+}
+
 /// Live, no-reload parameter tweak on one block within one preset. Persists
 /// into that preset's `block_states[block_id].params` override (see
 /// `PresetBlockState`) and is forwarded to the engine only when this
