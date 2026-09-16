@@ -301,6 +301,7 @@ class _BacklineStageCard extends StatelessWidget {
     final candidates = assets.where((a) => a.kind == wantedKind).toList();
     showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       builder: (sheetContext) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -316,16 +317,29 @@ class _BacklineStageCard extends StatelessWidget {
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                 child: Text('No matching assets yet -- upload one first.'),
-              ),
-            for (final asset in candidates)
-              ListTile(
-                key: Key('asset-picker-option-${asset.id}'),
-                leading: Icon(assetKindIcon(asset.kind)),
-                title: Text(asset.displayLabel),
-                onTap: () {
-                  onChanged(block.copyWith(assetId: () => asset.id));
-                  Navigator.of(sheetContext).pop();
-                },
+              )
+            else
+              // Flexible, not an unbounded Column, so a long asset list
+              // scrolls within the sheet's bounded height instead of
+              // overflowing past the screen with only the first few items
+              // reachable.
+              Flexible(
+                child: ListView(
+                  key: const Key('asset-picker-list'),
+                  shrinkWrap: true,
+                  children: [
+                    for (final asset in candidates)
+                      ListTile(
+                        key: Key('asset-picker-option-${asset.id}'),
+                        leading: Icon(assetKindIcon(asset.kind)),
+                        title: Text(asset.displayLabel),
+                        onTap: () {
+                          onChanged(block.copyWith(assetId: () => asset.id));
+                          Navigator.of(sheetContext).pop();
+                        },
+                      ),
+                  ],
+                ),
               ),
             TextButton(
               key: Key('open-block-editor-$index'),
@@ -561,12 +575,15 @@ class _AssetDropdown extends StatelessWidget {
   }
 }
 
-/// One labeled numeric field per known parameter (label/unit from the
+/// One labeled slider per known parameter (min/max/step/unit from the
 /// schema, current value from `params` falling back to the descriptor's own
 /// default) -- the schema-driven replacement for `_ParamsEditor` when a
 /// block's type (or, for `vst3`, its selected asset) has a real parameter
 /// schema. No "add param" here: every field this block can have is already
-/// shown.
+/// shown. Sliders, not raw numeric text fields, mirroring the "Live
+/// controls" sliders on the preset screen -- these edit the block's own
+/// *default* value (what a fresh preset starts from) rather than a live
+/// per-preset override.
 class _SchemaParamsEditor extends StatelessWidget {
   final List<BlockParamDescriptor> descriptors;
   final Map<String, Object?> params;
@@ -585,27 +602,65 @@ class _SchemaParamsEditor extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         for (final d in descriptors)
-          Padding(
-            padding: const EdgeInsets.only(top: 4),
-            child: TextFormField(
-              key: Key('param-value-field-${d.key}'),
-              initialValue:
-                  ((params[d.key] as num?)?.toDouble() ?? d.defaultValue).toString(),
-              decoration: InputDecoration(
-                labelText: d.unit.isEmpty ? d.label : '${d.label} (${d.unit})',
-              ),
-              keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true, signed: true),
-              onChanged: (v) {
-                final parsed = double.tryParse(v);
-                if (parsed == null) return;
-                final next = Map<String, Object?>.of(params);
-                next[d.key] = parsed;
-                onChanged(next);
-              },
-            ),
+          _SchemaParamSlider(
+            key: Key('param-slider-${d.key}'),
+            descriptor: d,
+            value: ((params[d.key] as num?)?.toDouble() ?? d.defaultValue)
+                .clamp(d.min, d.max),
+            onChanged: (v) {
+              final next = Map<String, Object?>.of(params);
+              next[d.key] = v;
+              onChanged(next);
+            },
           ),
       ],
+    );
+  }
+}
+
+class _SchemaParamSlider extends StatelessWidget {
+  final BlockParamDescriptor descriptor;
+  final double value;
+  final ValueChanged<double> onChanged;
+
+  const _SchemaParamSlider({
+    super.key,
+    required this.descriptor,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final unitSuffix = descriptor.unit.isEmpty ? '' : ' ${descriptor.unit}';
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 68,
+            child: Text(descriptor.label, overflow: TextOverflow.ellipsis),
+          ),
+          Expanded(
+            child: Slider(
+              key: Key('param-value-slider-${descriptor.key}'),
+              min: descriptor.min,
+              max: descriptor.max,
+              divisions: descriptor.stepCount > 0 ? descriptor.stepCount : null,
+              value: value,
+              onChanged: onChanged,
+            ),
+          ),
+          SizedBox(
+            width: 64,
+            child: Text(
+              '${value.toStringAsFixed(2)}$unitSuffix',
+              textAlign: TextAlign.end,
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

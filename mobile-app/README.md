@@ -85,9 +85,14 @@ or type name.
   opens a bottom-sheet picker of assets filtered to that block's kind
   (with an escape hatch into the full type/asset editor to change the
   block's type entirely). Tapping a filled card reopens that same editor
-  (`_BlockEditorFields`/`_ParamsEditor`) in a bottom sheet instead of an
-  always-visible inline card. Drag-to-reorder and remove stay directly on
-  the card.
+  (`_BlockEditorFields`) in a bottom sheet instead of an always-visible
+  inline card. A block's own default parameters (`gain_db`, EQ bands,
+  etc. -- what a freshly-created preset starts from) are edited with
+  `Slider`s (`_SchemaParamsEditor`) whenever a schema is known, the same
+  widget style as the "Live controls" sliders described below; only a
+  type this app has no known schema for falls back to the free-text
+  key/value editor (`_ParamsEditor`). Drag-to-reorder and remove stay
+  directly on the card.
 - **Preset editor**: pinned (rig-inherited) blocks render as locked cards
   (no tap target, just a lock glyph) in the same strip as the switchable
   effect cards, which keep their enable switch and remove button on the

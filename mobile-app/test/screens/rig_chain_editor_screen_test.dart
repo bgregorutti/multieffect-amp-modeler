@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_app/models/asset.dart';
+import 'package:mobile_app/models/daemon_state.dart';
 import 'package:mobile_app/models/effect_block.dart';
 import 'package:mobile_app/models/ws_messages.dart';
 import 'package:mobile_app/screens/rig_chain_editor_screen.dart';
@@ -271,5 +272,111 @@ void main() {
     final amp =
         lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
     expect(amp.assetId, 'nam-1');
+  });
+
+  testWidgets(
+      'the asset picker scrolls to reach assets past the first screenful',
+      (tester) async {
+    // Regression test: the picker's options used to sit in an unbounded
+    // Column inside the bottom sheet, so only the first few assets were
+    // laid out at all and the rest were simply unreachable -- not just
+    // "hard to scroll to", but not present in the render tree.
+    final manyNamAssets = {
+      for (var i = 0; i < 20; i++)
+        'nam-$i': Asset(
+          id: 'nam-$i',
+          kind: AssetKind.nam,
+          filename: 'amp_$i.nam',
+          storedPath: '/data/assets/amp_$i.nam',
+          sizeBytes: 1024,
+          uploadedAt: 0,
+        ),
+    };
+    final rig = rigSvt.copyWith(chain: const [
+      EffectBlock(id: 'amp', type: 'nam', pinned: true),
+    ]);
+    final state = DaemonState(
+      rigs: [rig],
+      assets: manyNamAssets,
+      footswitchMapping: sampleState.footswitchMapping,
+      activeRigIndex: 0,
+      activePresetIndex: 0,
+      activeRigId: 'rig-1',
+      activePresetId: 'preset-a',
+      bypass: false,
+      tempoBpm: 120.0,
+    );
+    final fakeClient = FakeDaemonClient(state: state);
+    final controller = DaemonStateController(fakeClient);
+    await tester.pumpWidget(MaterialApp(
+      home: RigChainEditorScreen(controller: controller, rig: rig),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('block-card-0')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('asset-picker-option-nam-19')), findsNothing,
+        reason: 'not yet visible without scrolling');
+
+    final pickerList = find.byKey(const Key('asset-picker-list'));
+    final lastOption = find.byKey(const Key('asset-picker-option-nam-19'));
+    for (var i = 0; i < 15 && lastOption.evaluate().isEmpty; i++) {
+      await tester.drag(pickerList, const Offset(0, -300));
+      await tester.pump();
+    }
+    await tester.pumpAndSettle();
+    expect(lastOption, findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('asset-picker-option-nam-19')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp =
+        lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.assetId, 'nam-19');
+  });
+
+  testWidgets(
+      'a schema-known block\'s parameters are edited with sliders, not raw '
+      'text fields', (tester) async {
+    final rig = rigSvt.copyWith(chain: const [
+      EffectBlock(
+          id: 'amp', type: 'gain', pinned: true, params: {'gain_db': -6.0}),
+    ]);
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    fakeClient.nextResult = blockTypesResult;
+    final controller = DaemonStateController(fakeClient);
+    await tester.pumpWidget(MaterialApp(
+      home: RigChainEditorScreen(controller: controller, rig: rig),
+    ));
+    await tester.pumpAndSettle();
+
+    // "gain" needs no asset, so tapping its stage opens the full editor
+    // directly (same as the unrecognized-type case above).
+    await tester.tap(find.byKey(const Key('block-card-0')));
+    await tester.pumpAndSettle();
+
+    final sliderFinder = find.descendant(
+      of: find.byKey(const Key('param-slider-gain_db')),
+      matching: find.byType(Slider),
+    );
+    expect(sliderFinder, findsOneWidget);
+    expect(tester.widget<Slider>(sliderFinder).value, -6.0);
+    expect(find.byKey(const Key('param-value-field-gain_db')), findsNothing,
+        reason: 'schema-known params must not fall back to a raw text field');
+
+    tester.widget<Slider>(sliderFinder).onChanged!(3.5);
+    await tester.pump();
+
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final amp = lastUpdate(fakeClient).chain!.firstWhere((b) => b.id == 'amp');
+    expect(amp.params['gain_db'], 3.5);
   });
 }
