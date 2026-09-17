@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/preset.dart';
 import '../models/rig.dart';
 import '../models/ws_messages.dart';
+import '../services/daemon_client.dart';
 import '../state/daemon_state_controller.dart';
 import 'preset_editor_screen.dart';
 
@@ -44,9 +45,23 @@ class PresetListScreen extends StatelessWidget {
     );
   }
 
-  Future<void> _selectPreset(int index) async {
-    await controller.client
-        .selectPreset(SelectPresetCommand(presetIndex: index));
+  Future<void> _selectPreset(BuildContext context, int index) async {
+    try {
+      await controller.client
+          .selectPreset(SelectPresetCommand(presetIndex: index));
+    } on DaemonCommandError catch (e) {
+      // The daemon reports `engine_error` when the audio engine refused the
+      // chain. The selection itself still stands, so the list will show this
+      // preset as active -- but it is not what is coming out of the pedal,
+      // and without this the two would silently disagree.
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          e.code == 'engine_error' ? 'Not playing: ${e.message}' : e.message,
+        ),
+        duration: const Duration(seconds: 6),
+      ));
+    }
   }
 
   Future<String?> _promptForName(
@@ -154,7 +169,7 @@ class PresetListScreen extends StatelessWidget {
                       ),
                       title: Text(preset.name),
                       subtitle: Text(_effectsSummary(rig, preset)),
-                      onTap: () => _selectPreset(index),
+                      onTap: () => _selectPreset(context, index),
                       trailing: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [

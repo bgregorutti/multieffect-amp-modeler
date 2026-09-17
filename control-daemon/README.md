@@ -19,6 +19,53 @@ configuration-editing commands from them.
 This package is self-contained and fully testable on a normal Linux dev
 machine -- no Raspberry Pi, no real GPIO hardware, no JUCE/Flutter needed.
 
+## Engine asset registry and load failures
+
+Two linked behaviours worth knowing about, because together they used to
+produce a bug that looked like preset corruption.
+
+**The engine's asset registry is in-memory only.** `audio-engine` holds
+registered `.nam`/IR/`.vst3` metadata in a plain map, so a restart of that
+process starts it with none -- while this daemon still has every asset in its
+persisted state and will happily keep sending presets that reference them.
+`register_asset` is otherwise only sent on upload, so before this was fixed an
+engine restart made *every* preset with an amp or cab block fail to load, with:
+
+```
+audio-engine rejected load_preset: preset 'p1' block 'amp' references unknown asset_id 'a1'
+```
+
+permanently, until the user re-uploaded the file. `UnixSocketAudioEngineClient`
+now replays the whole asset registry whenever it establishes a connection
+(`_replay_assets_locked`, driven by `set_asset_provider`), so an engine restart
+self-heals. The daemon supplies the provider in `DaemonStateManager.__init__`.
+
+**A rejection is now distinct from an absent engine.** Fail-open on an
+unreachable engine is deliberate and unchanged -- the daemon is the source of
+truth for preset/bank/footswitch state whether or not anything is listening,
+which is what lets it run on a dev machine with no engine at all. But a
+*rejection* is the opposite situation: the engine is right there and has
+refused, which means it is still playing its previous chain (it validates
+before swapping anything in). That used to be logged and forgotten, so
+`select_preset` reported success, the active index moved, and the app showed a
+preset as live while something else was audible.
+
+Now `_send` raises `AudioEngineRejected` on a refusal, and:
+
+* `_load_active()` records it in `engine_error`, which `state_view()`
+  publishes to every client. It is *not* raised there: `_load_active` runs
+  after every structural edit (`update_rig`, `delete_preset`, reorder, ...),
+  and those edits are valid and already persisted by that point -- raising
+  would wrongly report the edit itself as having failed.
+* `select_preset()` additionally raises `StateError("engine_error", ...)`,
+  since making a preset audible is that command's entire purpose. The
+  selection still stands and is still broadcast, so clients can show which
+  preset *should* be live alongside the reason it is not.
+
+The mobile app surfaces this on the preset list ("Not playing: ..."). Covered
+by `tests/test_state.py` (the `engine_error` group) and
+`tests/test_audio_engine_client.py`.
+
 ## Running it
 
 ```bash

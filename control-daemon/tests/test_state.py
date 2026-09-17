@@ -7,7 +7,7 @@ from typing import List, Optional
 
 import pytest
 
-from control_daemon.audio_engine_client import AudioEngineClient
+from control_daemon.audio_engine_client import AudioEngineClient, AudioEngineRejected
 from control_daemon.models import (
     Asset,
     AssetKind,
@@ -39,7 +39,13 @@ class RecordingAudioEngine(AudioEngineClient):
         # real engine's register_asset reply for a "vst3" asset).
         self.next_register_asset_parameters: Optional[List[BlockParamDescriptor]] = None
 
+        # Test hook: when set, load_preset refuses the way a real engine does
+        # for a preset naming an asset it has never been told about.
+        self.reject_loads_with: Optional[str] = None
+
     def load_preset(self, preset) -> None:
+        if self.reject_loads_with is not None:
+            raise AudioEngineRejected("load_preset", self.reject_loads_with)
         self.loaded_presets.append(preset.id)
         self.loaded_chains.append(
             [(b.type, b.enabled) for b in preset.blocks]
@@ -755,3 +761,103 @@ def test_state_view_active_ids_are_none_when_nothing_selected(manager):
     view = manager.state_view()
     assert view["active_rig_id"] is None
     assert view["active_preset_id"] is None
+
+
+# -- engine load failures must not be silent ---------------------------------
+#
+# The bug these cover: the engine validates a preset's asset references before
+# swapping anything in, so a rejected load leaves it playing its *previous*
+# chain. The daemon used to log that and carry on, which meant select_preset
+# reported success, the active index moved, and the app showed a preset as
+# live while something else was audible -- indistinguishable, from the user's
+# side, from presets having the wrong effects in them.
+
+_REJECTION = "preset 'p1' block 'amp' references unknown asset_id 'a1'"
+
+
+def _rig_with_two_presets(manager):
+    rig = _bass_rig(manager)
+    manager.create_preset(rig.id, name="Clean")
+    manager.create_preset(rig.id, name="Lead")
+    return rig
+
+
+def test_select_preset_raises_when_the_engine_refuses(manager):
+    rig = _rig_with_two_presets(manager)
+    manager.engine.reject_loads_with = _REJECTION
+
+    with pytest.raises(StateError) as excinfo:
+        manager.select_preset(rig_index=0, preset_index=1)
+
+    assert excinfo.value.code == "engine_error"
+    assert "unknown asset_id" in excinfo.value.message
+
+
+def test_selection_still_stands_and_is_broadcast_after_a_refusal(manager):
+    """The user asked for this preset; the UI should show it as the intended
+    one *and* show that it is not actually playing."""
+    rig = _rig_with_two_presets(manager)
+    manager.engine.reject_loads_with = _REJECTION
+
+    with pytest.raises(StateError):
+        manager.select_preset(rig_index=0, preset_index=1)
+
+    assert manager.state.active_preset_index == 1
+    assert "select_preset" in manager.changes
+    view = manager.state_view()
+    assert view["active_preset_id"] == rig.presets[1].id
+    assert view["engine_error"] == _REJECTION
+
+
+def test_engine_error_clears_once_a_load_succeeds(manager):
+    rig = _rig_with_two_presets(manager)
+    manager.engine.reject_loads_with = _REJECTION
+    with pytest.raises(StateError):
+        manager.select_preset(rig_index=0, preset_index=1)
+    assert manager.engine_error is not None
+
+    manager.engine.reject_loads_with = None
+    manager.select_preset(rig_index=0, preset_index=0)
+
+    assert manager.engine_error is None
+    assert manager.state_view()["engine_error"] is None
+
+
+def test_structural_edits_record_the_error_without_failing_the_edit(manager):
+    """A rig edit that the engine then refuses is still a valid, persisted
+    edit -- raising would wrongly report the edit itself as having failed."""
+    rig = _rig_with_two_presets(manager)
+    manager.engine.reject_loads_with = _REJECTION
+
+    manager.update_rig(rig.id, name="Renamed")  # must not raise
+
+    assert manager.state.rigs[0].name == "Renamed"
+    assert manager.engine_error == _REJECTION
+
+
+def test_healthy_state_view_reports_no_engine_error(manager):
+    _rig_with_two_presets(manager)
+    manager.select_preset(rig_index=0, preset_index=0)
+    assert manager.state_view()["engine_error"] is None
+
+
+def test_assets_are_offered_to_the_engine_for_re_registration(manager, tmp_path):
+    """The daemon must hand the engine a way to repopulate its in-memory asset
+    registry after a restart, or presets referencing an asset uploaded before
+    it fail forever."""
+    captured = {}
+
+    class ProviderCapturingEngine(RecordingAudioEngine):
+        def set_asset_provider(self, provider):
+            captured["provider"] = provider
+
+    mgr = DaemonStateManager(
+        store_path=tmp_path / "provider.json", audio_engine=ProviderCapturingEngine()
+    )
+    assert "provider" in captured, "daemon never offered its assets to the engine"
+
+    asset = mgr.register_asset(
+        kind=AssetKind.NAM, filename="amp.nam", stored_path=str(tmp_path / "amp.nam"),
+        size_bytes=10, sha256="x",
+    )
+    assert [a.id for a in captured["provider"]()] == [asset.id]

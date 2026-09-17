@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
-from .audio_engine_client import AudioEngineClient
+from .audio_engine_client import AudioEngineClient, AudioEngineRejected
 from .models import (
     Asset,
     AssetKind,
@@ -80,6 +80,17 @@ class DaemonStateManager:
 
         self.state: DaemonState = load_state(store_path)
 
+        # Set once the engine refuses a chain, cleared once one loads. The
+        # engine keeps playing its previous chain when it rejects a load (it
+        # validates before swapping), so without surfacing this the app would
+        # go on showing a preset as active while something else is audible.
+        self._engine_error: Optional[str] = None
+
+        # The engine's asset registry is in-memory only; this is what lets it
+        # repopulate after a restart instead of failing every load_preset that
+        # references an asset uploaded before it. See set_asset_provider.
+        self.audio_engine.set_asset_provider(lambda: list(self.state.assets.values()))
+
     # -- persistence / notification plumbing --------------------------------
 
     def _persist(self) -> None:
@@ -104,6 +115,9 @@ class DaemonStateManager:
         preset = self.active_preset()
         view["active_rig_id"] = rig.id if rig is not None else None
         view["active_preset_id"] = preset.id if preset is not None else None
+        # Runtime, not persisted: whether what clients see as active is
+        # actually what the engine is playing.
+        view["engine_error"] = self._engine_error
         return view
 
     # -- active position ----------------------------------------------------
@@ -133,10 +147,31 @@ class DaemonStateManager:
 
         A no-op when nothing is selected -- an empty rig list or a rig with
         no presets is a normal first-run state, not an error.
+
+        A rejection is recorded rather than raised here. This is called from
+        every structural edit (update_rig, delete_preset, reorder, ...), and
+        those edits are valid and already persisted by the time we get here --
+        raising would wrongly report the edit as having failed. What is not
+        acceptable is staying quiet, because the engine goes on playing its
+        previous chain: the error lands in ``_engine_error``, which
+        ``state_view`` publishes to every client. ``select_preset`` -- the one
+        command whose whole purpose is "make this preset audible" -- raises on
+        top of that.
         """
         resolved = self.resolved_active()
-        if resolved is not None:
+        if resolved is None:
+            return
+        try:
             self.audio_engine.load_preset(resolved)
+        except AudioEngineRejected as exc:
+            self._engine_error = exc.message
+        else:
+            self._engine_error = None
+
+    @property
+    def engine_error(self) -> Optional[str]:
+        """Why the engine is not playing what the daemon thinks, or None."""
+        return self._engine_error
 
     def _clamp_active(self) -> None:
         """Keep the active indices inside the current rig/preset lists.
@@ -337,6 +372,11 @@ class DaemonStateManager:
         self.state.active_preset_index = target_preset_index
         self._load_active()
         self._notify("select_preset")
+        if self._engine_error is not None:
+            # The selection itself stands (and is broadcast, so clients can
+            # show which preset *should* be live), but the caller asked for
+            # this preset to be playing and it is not.
+            raise StateError("engine_error", self._engine_error)
 
     # -- bypass / footswitch mapping ---------------------------------------
 

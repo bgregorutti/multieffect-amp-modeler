@@ -19,11 +19,29 @@ import socket
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 from .models import Asset, BlockParamDescriptor, ResolvedPreset
 
 logger = logging.getLogger("control_daemon.audio_engine")
+
+
+class AudioEngineRejected(Exception):
+    """The engine was reachable, answered, and said no.
+
+    Deliberately distinct from the engine being *absent*. An unreachable
+    engine is a normal, tolerable state -- the daemon is the source of truth
+    for preset/bank/footswitch state whether or not anything is listening, so
+    those calls stay fail-open. A rejection is the opposite situation: the
+    engine is right there and has refused the command, which means what it is
+    playing no longer matches what the daemon (and the app) believe. That has
+    to reach the user rather than only a log line.
+    """
+
+    def __init__(self, command: str, message: str) -> None:
+        super().__init__(f"audio-engine rejected {command}: {message}")
+        self.command = command
+        self.message = message
 
 
 class AudioEngineClient(ABC):
@@ -64,6 +82,19 @@ class AudioEngineClient(ABC):
         """The engine's static, per-build parameter schema for every
         native block type it recognizes (see audio-engine's
         block_type_registry.hpp) -- empty if the engine is unreachable."""
+
+    def set_asset_provider(self, provider: Callable[[], List[Asset]]) -> None:
+        """Supply the assets to (re)register whenever a connection is made.
+
+        The engine holds its asset registry in memory only, so every restart
+        of that process starts it with none -- while the daemon still has them
+        all in its persisted state and will happily keep sending presets that
+        reference them. Without a replay on connect, every such load_preset
+        fails with "unknown asset_id" until the user re-uploads the file.
+
+        Not abstract: only the socket-backed client has a connection to
+        re-establish, so the default is a no-op."""
+        del provider
 
 
 class NullAudioEngineClient(AudioEngineClient):
@@ -122,6 +153,10 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
         self.timeout = timeout
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
+        self._asset_provider: Optional[Callable[[], List[Asset]]] = None
+
+    def set_asset_provider(self, provider: Callable[[], List[Asset]]) -> None:
+        self._asset_provider = provider
 
     def load_preset(self, preset: ResolvedPreset) -> None:
         self._send({"cmd": "load_preset", "preset": preset.model_dump(mode="json")})
@@ -133,19 +168,7 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
         logger.info("set_tempo(%.2f bpm) -- no-op, engine has no tempo command yet", bpm)
 
     def register_asset(self, asset: Asset) -> Optional[List[BlockParamDescriptor]]:
-        reply = self._send(
-            {
-                "cmd": "register_asset",
-                "asset": {
-                    "id": asset.id,
-                    "kind": asset.kind.value,
-                    "filename": asset.filename,
-                    "stored_path": asset.stored_path,
-                    "size_bytes": asset.size_bytes,
-                    "sha256": asset.sha256,
-                },
-            }
-        )
+        reply = self._send(self._register_asset_command(asset))
         raw_parameters = reply.get("parameters")
         if raw_parameters is None:
             return None
@@ -181,11 +204,15 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
                     reply_line = self._readline_locked(sock)
                     reply = json.loads(reply_line) if reply_line else {}
                     if not reply.get("ok", False):
+                        # Reachable and refusing: the engine is now playing
+                        # something other than what the daemon believes, so
+                        # this must not be swallowed the way an absent engine
+                        # is. See AudioEngineRejected.
+                        message = str(reply.get("message", reply))
                         logger.warning(
-                            "audio-engine rejected %s: %s",
-                            command.get("cmd"),
-                            reply.get("message", reply),
+                            "audio-engine rejected %s: %s", command.get("cmd"), message
                         )
+                        raise AudioEngineRejected(str(command.get("cmd")), message)
                     return reply
                 except OSError as exc:
                     logger.warning(
@@ -209,7 +236,68 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
         sock.settimeout(self.timeout)
         sock.connect(self.socket_path)
         self._sock = sock
+        self._replay_assets_locked(sock)
         return sock
+
+    def _replay_assets_locked(self, sock: socket.socket) -> None:
+        """Re-register every known asset on a newly established connection.
+
+        This is what makes an engine restart self-healing. The engine's asset
+        registry lives in memory, so a fresh process knows about none of them,
+        and a preset referencing one then fails to load *permanently* -- the
+        daemon has no other moment at which it would push them, since
+        register_asset is otherwise only sent on upload.
+
+        Sent directly on the socket rather than through _send(): this runs
+        while the connection lock is already held, and _send() would try to
+        take it again. Failures are logged and skipped rather than raised --
+        a connection that is up is still worth using even if one stale asset
+        will not register."""
+        if self._asset_provider is None:
+            return
+        try:
+            assets = list(self._asset_provider())
+        except Exception:  # pragma: no cover -- a broken provider must not kill the link
+            logger.exception("asset provider failed; skipping re-registration")
+            return
+        if not assets:
+            return
+        registered = 0
+        for asset in assets:
+            try:
+                reply = self._exchange_locked(sock, self._register_asset_command(asset))
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("re-registering asset %s failed: %s", asset.id, exc)
+                continue
+            if reply.get("ok", False):
+                registered += 1
+            else:
+                logger.warning(
+                    "audio-engine refused re-registering asset %s: %s",
+                    asset.id,
+                    reply.get("message", reply),
+                )
+        logger.info("re-registered %d/%d asset(s) with audio-engine", registered, len(assets))
+
+    def _exchange_locked(self, sock: socket.socket, command: dict) -> dict:
+        """One command/reply round trip on an already-held socket."""
+        sock.sendall((json.dumps(command) + "\n").encode("utf-8"))
+        reply_line = self._readline_locked(sock)
+        return json.loads(reply_line) if reply_line else {}
+
+    @staticmethod
+    def _register_asset_command(asset: Asset) -> dict:
+        return {
+            "cmd": "register_asset",
+            "asset": {
+                "id": asset.id,
+                "kind": asset.kind.value,
+                "filename": asset.filename,
+                "stored_path": asset.stored_path,
+                "size_bytes": asset.size_bytes,
+                "sha256": asset.sha256,
+            },
+        }
 
     def _readline_locked(self, sock: socket.socket) -> bytes:
         buf = bytearray()
