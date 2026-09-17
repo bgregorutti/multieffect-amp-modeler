@@ -41,6 +41,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import platform
+import subprocess
 import json
 import urllib.error
 import urllib.parse
@@ -83,9 +85,54 @@ async def register_file_asset(ws: websockets.WebSocketClientProtocol, kind: str,
     }))
     reply = json.loads(await ws.recv())
     if reply["type"] != "command_ok":
-        raise RuntimeError(f"register_asset failed: {reply}")
+        raise AssetRegistrationFailed(
+            Path(meta["filename"]), str(reply.get("message", reply))
+        )
     await ws.recv()  # matching state_changed broadcast
     return reply["result"]["asset"]["id"], True
+
+
+class AssetRegistrationFailed(RuntimeError):
+    """One asset could not be registered.
+
+    Raised per job rather than aborting the run: a folder of plugins where
+    one is unloadable should still register the rest.
+    """
+
+    def __init__(self, path: Path, detail: str, hint: str | None = None) -> None:
+        super().__init__(detail)
+        self.path = path
+        self.detail = detail
+        self.hint = hint
+
+
+def architecture_hint(bundle_path: Path, message: str) -> str | None:
+    """Turn dlopen's "incompatible architecture" wall of text into one line.
+
+    A VST3 is a native binary, so it has to match the *engine's* architecture
+    exactly -- there is no translation layer inside an already-running arm64
+    process. An Intel-only plugin on an Apple Silicon machine simply cannot be
+    loaded, which is a property of the plugin, not a bug to fix here.
+    """
+    if "incompatible architecture" not in message:
+        return None
+    host = platform.machine()
+    binaries = sorted((bundle_path / "Contents" / "MacOS").glob("*"))
+    archs = "unknown"
+    if binaries:
+        try:
+            archs = subprocess.run(
+                ["lipo", "-archs", str(binaries[0])],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip() or "unknown"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return (
+        f"plugin is {archs}, this machine and the audio engine are {host}. "
+        f"A VST3 is loaded into the engine's own process, so the architectures "
+        f"must match -- Rosetta cannot help here. Nothing to fix: use a "
+        f"universal or {host} build of this plugin, or leave it out."
+    )
 
 
 async def register_vst3_asset(
@@ -105,7 +152,10 @@ async def register_vst3_asset(
     }))
     reply = json.loads(await ws.recv())
     if reply["type"] != "command_ok":
-        raise RuntimeError(f"register_asset failed for {bundle_path}: {reply}")
+        message = str(reply.get("message", reply))
+        raise AssetRegistrationFailed(
+            bundle_path, message, architecture_hint(bundle_path, message)
+        )
     await ws.recv()  # matching state_changed broadcast
     asset_id = reply["result"]["asset"]["id"]
     params = reply["result"]["asset"].get("parameters") or []
@@ -155,15 +205,22 @@ async def main_async(args: argparse.Namespace) -> None:
         }
 
         results = []
+        failures: list[AssetRegistrationFailed] = []
         for kind, path in jobs:
             print(f"[upload-assets] {kind:5} {path}")
-            if kind == "vst3":
-                asset_id, is_new = await register_vst3_asset(ws, path, already_registered_by_path)
-                if is_new:
-                    already_registered_by_path[str(path.resolve())] = asset_id
-            else:
-                meta = upload_file_asset(base_url, kind, path)
-                asset_id, is_new = await register_file_asset(ws, kind, meta)
+            try:
+                if kind == "vst3":
+                    asset_id, is_new = await register_vst3_asset(ws, path, already_registered_by_path)
+                    if is_new:
+                        already_registered_by_path[str(path.resolve())] = asset_id
+                else:
+                    meta = upload_file_asset(base_url, kind, path)
+                    asset_id, is_new = await register_file_asset(ws, kind, meta)
+            except AssetRegistrationFailed as failure:
+                # One unusable asset must not cost you the rest of the folder.
+                print(f"    -> SKIPPED: {failure.hint or failure.detail}")
+                failures.append(failure)
+                continue
             status = "registered" if is_new else "reused (already known)"
             print(f"    -> asset {asset_id} ({status})")
             results.append((kind, path.name, asset_id, status))
@@ -172,6 +229,14 @@ async def main_async(args: argparse.Namespace) -> None:
         print(f"[upload-assets] done -- {len(results)} asset(s) available to the app:")
         for kind, filename, asset_id, status in results:
             print(f"  {kind:5} {asset_id}  {filename}  [{status}]")
+
+        if failures:
+            print()
+            print(f"[upload-assets] {len(failures)} asset(s) skipped:")
+            for failure in failures:
+                print(f"  {failure.path.name}")
+                print(f"      {failure.hint or failure.detail}")
+            raise SystemExit(1)
 
 
 def main() -> None:
