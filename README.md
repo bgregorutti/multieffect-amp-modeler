@@ -59,19 +59,24 @@ scripts/          Dev-machine testing tools that don't belong to any one
 
 ## Status
 
-- `control-daemon`: **V1 built and tested** (73 passing tests as of this
+- `control-daemon`: **V1 built and tested** (111 passing tests as of this
   writing; re-run `.venv/bin/pytest -q` for the current count) — see its own
   README for how to run it and the WebSocket protocol reference.
   `AudioEngineClient` now has a real implementation
   (`UnixSocketAudioEngineClient`) wired to audio-engine's control socket
   (`CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`) — see "Audio engine wiring" in
-  control-daemon/README.md.
-- `audio-engine`: **V1 built and tested** (95 passing tests by default;
+  control-daemon/README.md, including asset re-registration on an engine
+  reconnect and `engine_error` surfacing when the engine rejects a load.
+- `audio-engine`: **V1 built and tested** (151 passing tests by default;
   re-run `ctest --test-dir audio-engine/build` for the current count) —
-  real DSP, WAV/IR loading, and preset-switching logic. The engine only
-  ever receives an already-flattened, rig-agnostic chain from the daemon —
-  see "Shared data model" in audio-engine/README.md. Real NAM (WaveNet/LSTM)
-  inference now works, opt-in via
+  real DSP, WAV/IR loading, and preset-switching logic, now including three
+  modelled stompbox pedals (`big_muff`/`tube_screamer`/`noise_gate`, ported
+  from and validated against the Python reference in `vst-python/`) and
+  real VST3 plugin hosting (opt-in via `-DAUDIO_ENGINE_WITH_VST3=ON`, no
+  JUCE) alongside the native block types. The engine only ever receives an
+  already-flattened, rig-agnostic chain from the daemon — see "Shared data
+  model" in audio-engine/README.md. Real NAM (WaveNet/LSTM) inference now
+  works, opt-in via
   `-DAUDIO_ENGINE_WITH_REAL_NAM=ON` (vendors NeuralAmpModelerCore via
   CMake FetchContent, off by default) — see "Real NAM inference" in
   audio-engine/README.md, including measured real-time cost (4-6% of
@@ -89,9 +94,12 @@ scripts/          Dev-machine testing tools that don't belong to any one
   unverified rather than trusting a hardcoded one) — full rig/preset/
   footswitch-mapping editing and asset upload against control-daemon's
   protocol, including the rig/preset split (`RigListScreen`,
-  `RigChainEditorScreen`, `PresetListScreen`, `PresetEditorScreen`). OS
-  file-picker integration is stubbed pending on-device testing (needs a
-  real phone/emulator).
+  `RigChainEditorScreen`, `PresetListScreen`, `PresetEditorScreen`).
+  Adding/removing/reordering chain blocks lives only in the rig editor now
+  (a rig's chain is shared by every preset in it); the preset editor only
+  toggles and tweaks what the rig already has — see "Rigs are boards,
+  presets stomp them" in mobile-app/README.md. OS file-picker integration
+  is stubbed pending on-device testing (needs a real phone/emulator).
 - `footswitch`, `display`: not yet started — real GPIO/I2C hardware is
   needed to build and validate these properly. `next_rig`/`prev_rig`
   (swap the whole backline) and `next_preset`/`prev_preset` (step within

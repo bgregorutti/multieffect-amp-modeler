@@ -29,16 +29,16 @@ ctest --test-dir audio-engine/build            # or: ./audio-engine/build/audio_
 Requires: CMake >= 3.16, a C++20 compiler, and two packages
 (`nlohmann-json`, `gtest`+`gmock`) -- from the normal Ubuntu package mirror
 (`nlohmann-json3-dev`, `libgtest-dev`+`libgmock-dev`) or Homebrew
-(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **116/116
+(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **151/151
 tests passed** (`ctest --test-dir audio-engine/build`), covering every
-module below plus a real-subprocess control-socket integration test. This
-default build needs no network access and no GitHub-hosted dependency --
-see "Real-time audio I/O", "Real NAM inference" and "VST3 plugin hosting"
+module below (the three modelled pedal blocks and their Python-parity golden
+renders included) plus a real-subprocess control-socket integration test.
+This default build needs no network access and no GitHub-hosted dependency
+-- see "Real-time audio I/O", "Real NAM inference" and "VST3 plugin hosting"
 below for the three optional, network-fetching build flags
-(`-DAUDIO_ENGINE_WITH_VST3=ON` alone: **124/124**; see those sections for
-each flag's own count -- re-run `ctest` for the current numbers, including
-for flag combinations, rather than trusting a hardcoded one here, as they
-drift with every test added).
+(`-DAUDIO_ENGINE_WITH_VST3=ON` alone: **159/159**); re-run `ctest` for the
+current per-flag (and flag-combination) counts rather than trusting a
+hardcoded one here, as they drift with every test added.
 
 Run the engine standalone (mostly useful for manual testing against the
 control socket -- see below):
@@ -719,6 +719,10 @@ be buildable) are for later manual/hardware validation, not this test.
 | `eq_block`           | Biquad peaking/shelving EQ (RBJ Audio EQ Cookbook formulas); `setGainDb`/`gainDb()` support live boost/cut updates without reconstructing the block |
 | `tone_stack_block`     | 3-band tone stack (block type `"tone_stack"`, `{bass_db, mid_db, treble_db}` params) composing three `EqBlock`s (low-shelf/peaking/high-shelf) -- tone shaping around a NAM capture isn't part of the captured model itself, see "Rig chain: the gain stages around a NAM capture" below |
 | `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params, all three live-settable via `setLiveParam`) |
+| `pedal_dsp`             | Shared DSP primitives (diode clipping, oversampling, `ParamSmoother`) behind the three modelled pedal blocks, ported from `vst-python/src/pedals/dsp.py` -- see "Modelled pedal blocks" below |
+| `big_muff_block`         | `BigMuffBlock` (block type `"big_muff"`) -- fuzz/distortion, ported from `vst-python/src/pedals/bigmuff.py` |
+| `tube_screamer_block`      | `TubeScreamerBlock` (block type `"tube_screamer"`) -- overdrive, ported from `vst-python/src/pedals/tubescreamer.py` |
+| `noise_gate_block`           | `NoiseGateBlock` (block type `"noise_gate"`) -- ported from `vst-python/src/pedals/noisegate.py` |
 | `block_type_registry`     | Static per-type parameter schema (label/unit/min/max/default) for every native block type -- backs the `list_block_types` command, see "Commands" below |
 | `wav_file`               | Hand-rolled RIFF/WAVE parser (reads PCM16/PCM24/PCM32/float32, mono or downmixed) + writer (PCM16/float32) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |

@@ -42,7 +42,7 @@ self-heals. The daemon supplies the provider in `DaemonStateManager.__init__`.
 
 **A rejection is now distinct from an absent engine.** Fail-open on an
 unreachable engine is deliberate and unchanged -- the daemon is the source of
-truth for preset/bank/footswitch state whether or not anything is listening,
+truth for rig/preset/footswitch state whether or not anything is listening,
 which is what lets it run on a dev machine with no engine at all. But a
 *rejection* is the opposite situation: the engine is right there and has
 refused, which means it is still playing its previous chain (it validates
