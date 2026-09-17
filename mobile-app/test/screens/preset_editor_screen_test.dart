@@ -165,58 +165,35 @@ void main() {
   });
 
   testWidgets(
-      'adding an effect inserts it before the cab, off at rig level, and '
-      'turns it on in this preset', (tester) async {
-    final fakeClient = FakeDaemonClient(state: sampleState);
-    fakeClient.nextResult = {
-      'block_types': [
-        {
-          'type': 'delay',
-          'parameters': [
-            {
-              'key': 'delay_ms',
-              'label': 'Time',
-              'unit': 'ms',
-              'min': 1.0,
-              'max': 2000.0,
-              'default': 300.0,
-              'step_count': 0,
-            },
-          ],
-        },
-        {'type': 'volume', 'parameters': <Map<String, dynamic>>[]},
-      ],
-    };
-    await tester.pumpWidget(MaterialApp(
-      home: PresetEditorScreen(
-        controller: DaemonStateController(fakeClient),
-        rig: rigSvt,
-        preset: presetClean,
-      ),
-    ));
+      'the board is fixed here: no way to add or remove an effect',
+      (tester) async {
+    // The rig is the pedalboard and the preset only stomps its pedals, so
+    // this screen deliberately offers neither. Both live in
+    // RigChainEditorScreen -- see its own test for them.
+    await pumpEditor(tester, preset: presetClean);
+
+    expect(find.byKey(const Key('add-effect-button')), findsNothing);
+    expect(find.byKey(const Key('remove-effect-dist')), findsNothing);
+    expect(find.byKey(const Key('remove-effect-reverb')), findsNothing);
+
+    // What it does offer is a switch per effect.
+    expect(find.byKey(const Key('preset-block-switch-dist')), findsOneWidget);
+    expect(find.byKey(const Key('preset-block-switch-reverb')), findsOneWidget);
+  });
+
+  testWidgets('editing a preset never changes the rig chain', (tester) async {
+    final fakeClient = await pumpEditor(tester, preset: presetClean);
+
+    await tester.tap(find.byKey(const Key('preset-block-switch-dist')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('save-preset-button')));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(const Key('add-effect-button')));
-    await tester.pumpAndSettle();
-    // Backline-only types are not offered as effects.
-    expect(find.byKey(const Key('add-effect-type-volume')), findsNothing);
-    await tester.tap(find.byKey(const Key('add-effect-type-delay')));
-    await tester.pumpAndSettle();
-
-    final rigCmd = fakeClient.sentCommands
-        .lastWhere((c) => c.type == 'update_rig')
-        .command as UpdateRigCommand;
-    final ids = rigCmd.chain!.map((b) => b.id).toList();
-    final delay = rigCmd.chain!.firstWhere((b) => b.type == 'delay');
-    expect(ids.indexOf(delay.id), ids.indexOf('cab') - 1);
-    expect(ids.indexOf('amp'), lessThan(ids.indexOf(delay.id)));
-    expect(delay.pinned, isFalse);
-    expect(delay.enabled, isFalse);
-    expect(delay.params['delay_ms'], 300.0);
-
-    final presetCmd = lastPresetUpdate(fakeClient);
-    expect(presetCmd.presetId, 'preset-a');
-    expect(presetCmd.blockStates![delay.id]!.enabled, isTrue);
+    expect(
+      fakeClient.sentCommands.where((c) => c.type == 'update_rig'),
+      isEmpty,
+      reason: 'a preset edit must not touch the shared board',
+    );
   });
 
   testWidgets('renaming and saving sends the new name', (tester) async {

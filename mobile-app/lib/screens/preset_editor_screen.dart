@@ -2,7 +2,6 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
-import '../models/asset.dart';
 import '../models/asset_category.dart';
 import '../models/block_param_descriptor.dart';
 import '../models/effect_block.dart';
@@ -13,10 +12,6 @@ import '../services/daemon_client.dart';
 import '../state/daemon_state_controller.dart';
 import '../widgets/chain_connector.dart';
 import '../widgets/chain_stage_card.dart';
-
-/// Native block types that belong to the rig's backline rather than being
-/// offered as a preset effect (see `RigChainEditorScreen`).
-const _kBacklineOnlyTypes = {'volume', 'tone_stack'};
 
 /// Edits one preset: its name, which effects it uses, and their live
 /// parameters.
@@ -63,7 +58,6 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
   /// rather than waiting for the round-trip broadcast.
   final Map<String, Map<String, double>> _liveValues = {};
 
-  int _newEffectCounter = 0;
 
   @override
   void initState() {
@@ -190,120 +184,6 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
     )));
   }
 
-  /// Effect types offered by "Add effect": every native type except the
-  /// backline-only ones, plus vst3 when a plugin has been registered.
-  List<String> get _effectTypes => [
-        for (final t in _blockTypes)
-          if (!_kBacklineOnlyTypes.contains(t.type)) t.type,
-        if (widget.controller.state.assets.values
-            .any((a) => a.kind == AssetKind.vst3))
-          'vst3',
-      ];
-
-  Future<void> _addEffect() async {
-    final type = await showDialog<String>(
-      context: context,
-      builder: (context) => SimpleDialog(
-        title: const Text('Add effect'),
-        children: [
-          for (final t in _effectTypes)
-            SimpleDialogOption(
-              key: Key('add-effect-type-$t'),
-              onPressed: () => Navigator.of(context).pop(t),
-              child: Text(t),
-            ),
-        ],
-      ),
-    );
-    if (type == null || !mounted) return;
-
-    String? assetId;
-    var params = <String, Object?>{};
-    if (type == 'vst3') {
-      final plugins = widget.controller.state.assets.values
-          .where((a) => a.kind == AssetKind.vst3)
-          .toList();
-      assetId = await showDialog<String>(
-        context: context,
-        builder: (context) => SimpleDialog(
-          title: const Text('Choose plugin'),
-          children: [
-            for (final a in plugins)
-              SimpleDialogOption(
-                onPressed: () => Navigator.of(context).pop(a.id),
-                child: Text(a.filename),
-              ),
-          ],
-        ),
-      );
-      if (assetId == null || !mounted) return;
-    } else {
-      for (final t in _blockTypes) {
-        if (t.type == type) {
-          params = {for (final p in t.parameters) p.key: p.defaultValue};
-        }
-      }
-    }
-
-    _newEffectCounter++;
-    final effect = EffectBlock(
-      id: 'fx-$type-${DateTime.now().microsecondsSinceEpoch}-$_newEffectCounter',
-      type: type,
-      assetId: assetId,
-      // Off at rig level: presets with no override of their own stay off.
-      enabled: false,
-      params: params,
-    );
-
-    final rig = _rig;
-    final nextRig = rig.copyWith(chain: rig.chainWithEffect(effect));
-    try {
-      await widget.controller.client.updateRig(
-        UpdateRigCommand(rigId: rig.id, chain: nextRig.chain),
-      );
-    } on DaemonCommandError catch (e) {
-      _showError(e);
-      return;
-    }
-    if (!mounted) return;
-    setState(() => _enabledByBlockId[effect.id] = true);
-    await _sendBlockStates(nextRig);
-  }
-
-  Future<void> _removeEffect(EffectBlock block) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Remove ${block.type}?'),
-        content: Text(
-          'This removes it from every preset of rig "${_rig.name}". '
-          'To just turn it off here, use its switch instead.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          TextButton(
-            key: const Key('confirm-remove-effect'),
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Remove'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    final rig = _rig;
-    try {
-      await widget.controller.client.updateRig(UpdateRigCommand(
-        rigId: rig.id,
-        chain: rig.chain.where((b) => b.id != block.id).toList(),
-      ));
-    } on DaemonCommandError catch (e) {
-      _showError(e);
-    }
-  }
-
   void _showError(DaemonCommandError e) {
     if (!mounted) return;
     ScaffoldMessenger.of(context)
@@ -354,21 +234,6 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
       icon: blockTypeIcon(block.type),
       label: block.type,
       subtitle: asset?.displayLabel,
-      corner: SizedBox(
-        width: 28,
-        height: 28,
-        child: IconButton(
-          key: Key('remove-effect-${block.id}'),
-          padding: EdgeInsets.zero,
-          iconSize: 18,
-          style: IconButton.styleFrom(
-            backgroundColor: Theme.of(context).colorScheme.errorContainer,
-            foregroundColor: Theme.of(context).colorScheme.onErrorContainer,
-          ),
-          icon: const Icon(Icons.close),
-          onPressed: () => _removeEffect(block),
-        ),
-      ),
       footer: SwitchListTile(
         key: Key('preset-block-switch-${block.id}'),
         dense: true,
@@ -403,25 +268,13 @@ class _PresetEditorScreenState extends State<PresetEditorScreen> {
             decoration: const InputDecoration(labelText: 'Name'),
           ),
           const SizedBox(height: 24),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text('Signal chain',
-                  style: Theme.of(context).textTheme.titleMedium),
-              TextButton.icon(
-                key: const Key('add-effect-button'),
-                icon: const Icon(Icons.add),
-                label: const Text('Add effect'),
-                onPressed: _effectTypes.isEmpty ? null : _addEffect,
-              ),
-            ],
-          ),
+          Text('Signal chain', style: Theme.of(context).textTheme.titleMedium),
           Padding(
             padding: const EdgeInsets.only(top: 4, bottom: 8),
             child: Text(
-              'The locked stages are part of rig "${rig.name}", shared by '
-              'every preset in it. Use an effect\'s switch to turn it on '
-              'here.',
+              'The board is rig "${rig.name}" and is the same for every '
+              'preset in it. Here you choose which pedals are on, and how '
+              'they are set. To add or remove one, edit the rig.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),

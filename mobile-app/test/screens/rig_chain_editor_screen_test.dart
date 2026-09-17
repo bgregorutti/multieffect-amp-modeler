@@ -11,6 +11,39 @@ import 'fake_daemon_client.dart';
 import 'test_fixtures.dart';
 
 void main() {
+  const blockTypesResult = {
+    'block_types': [
+      {
+        'type': 'gain',
+        'parameters': [
+          {
+            'key': 'gain_db',
+            'label': 'Gain',
+            'unit': 'dB',
+            'min': -60.0,
+            'max': 24.0,
+            'default': 0.0,
+            'step_count': 0,
+          },
+        ],
+      },
+      {
+        'type': 'delay',
+        'parameters': [
+          {
+            'key': 'delay_ms',
+            'label': 'Time',
+            'unit': 'ms',
+            'min': 1.0,
+            'max': 2000.0,
+            'default': 300.0,
+            'step_count': 0,
+          },
+        ],
+      },
+    ],
+  };
+
   Future<FakeDaemonClient> pumpEditor(WidgetTester tester) async {
     final fakeClient = FakeDaemonClient(state: sampleState);
     final controller = DaemonStateController(fakeClient);
@@ -72,15 +105,19 @@ void main() {
   });
 
   testWidgets(
-      'effects are not shown here, but are kept in place when saving',
+      'backline and effects get their own strips, and chain order survives a save',
       (tester) async {
     final fakeClient = await pumpEditor(tester);
 
-    // Only the backline (amp, cab) gets an editor card; dist and reverb
-    // are managed from presets.
+    // The board is built here: the backline (amp, cab) in one strip, the
+    // switchable pedals (dist, reverb) in another. Presets choose which of
+    // the latter are on; they cannot add or remove them.
     expect(find.byKey(const Key('block-card-0')), findsOneWidget);
     expect(find.byKey(const Key('block-card-1')), findsOneWidget);
     expect(find.byKey(const Key('block-card-2')), findsNothing);
+    expect(find.byKey(const Key('effect-card-0')), findsOneWidget);
+    expect(find.byKey(const Key('effect-card-1')), findsOneWidget);
+    expect(find.byKey(const Key('effect-card-2')), findsNothing);
 
     await tester.tap(find.byKey(const Key('save-rig-button')));
     await tester.pumpAndSettle();
@@ -104,6 +141,43 @@ void main() {
     expect(chain.map((b) => b.id), ['amp', 'dist', 'reverb']);
   });
 
+  testWidgets(
+      'adding an effect puts it before the cab, unpinned and off at rig level',
+      (tester) async {
+    // Moved here from the preset editor: the rig is the pedalboard, so this
+    // is where pedals are put on it. "Off at rig level" matters -- adding a
+    // pedal to the board must not switch it on in any existing preset.
+    final fakeClient = FakeDaemonClient(state: sampleState);
+    fakeClient.nextResult = blockTypesResult;
+    await tester.pumpWidget(MaterialApp(
+      home: RigChainEditorScreen(
+        controller: DaemonStateController(fakeClient),
+        rig: rigSvt,
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('add-effect-button')));
+    await tester.pumpAndSettle();
+    // Backline-only types are not offered as effects.
+    expect(find.byKey(const Key('add-effect-type-gain')), findsNothing);
+    await tester.tap(find.byKey(const Key('add-effect-type-delay')));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('save-rig-button')));
+    await tester.pumpAndSettle();
+
+    final chain = lastUpdate(fakeClient).chain!;
+    final delay = chain.firstWhere((b) => b.type == 'delay');
+    final ids = chain.map((b) => b.id).toList();
+    expect(ids.indexOf(delay.id), ids.indexOf('cab') - 1,
+        reason: 'effects sit immediately before the cab');
+    expect(ids.indexOf('amp'), lessThan(ids.indexOf(delay.id)));
+    expect(delay.pinned, isFalse);
+    expect(delay.enabled, isFalse);
+    expect(delay.params['delay_ms'], 300.0);
+  });
+
   testWidgets('renaming the rig sends the new name', (tester) async {
     final fakeClient = await pumpEditor(tester);
 
@@ -116,26 +190,6 @@ void main() {
 
     expect(lastUpdate(fakeClient).name, 'Ampeg SVT II');
   });
-
-  const blockTypesResult = {
-    'block_types': [
-      {
-        'type': 'gain',
-        'parameters': [
-          {
-            'key': 'gain_db',
-            'label': 'Gain',
-            'unit': 'dB',
-            'min': -60.0,
-            'max': 24.0,
-            'default': 0.0,
-            'step_count': 0,
-          },
-        ],
-      },
-      {'type': 'delay', 'parameters': <Map<String, dynamic>>[]},
-    ],
-  };
 
   Future<FakeDaemonClient> pumpEditorWithBlockTypes(WidgetTester tester) async {
     final fakeClient = FakeDaemonClient(state: sampleState);

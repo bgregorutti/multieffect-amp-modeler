@@ -13,6 +13,30 @@ See `control-daemon/README.md` for the authoritative protocol reference.
 Everything in this app's `lib/models/` and `lib/services/daemon_client.dart`
 is a direct translation of that document.
 
+## Rigs are boards, presets stomp them
+
+The split that decides where each control lives:
+
+* **`RigChainEditorScreen` builds the board.** Backline (the always-on stages
+  around the amp capture: gain, amp, cab, tone stack, volume) in one strip,
+  **Effects** -- the switchable pedals -- in another. Adding, removing and
+  reordering either happens *only* here. A pedal added to the board is
+  `enabled: false` at rig level, so putting it on the board does not switch it
+  on in any existing preset.
+* **`PresetEditorScreen` plays the board.** It shows the same chain, fixed, and
+  lets you choose which pedals are on and how they are set. It cannot add or
+  remove a block, because the board belongs to the rig.
+
+This mirrors a real pedalboard, and it is what makes preset switching cheap:
+every preset of a rig has the same blocks loaded, so switching toggles them
+rather than constructing and tearing down DSP (which is what the crossfade work
+in `docs/open-questions.md` #5 depends on).
+
+The earlier arrangement let you add effects from inside a preset. Because the
+chain is shared, an effect added in one preset appeared -- switched off -- in
+every other preset of that rig, which read as a bug rather than as the model
+working. Adding is now where the sharing is.
+
 ## Running it
 
 ```bash

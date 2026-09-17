@@ -12,10 +12,14 @@ import '../state/daemon_state_controller.dart';
 import '../widgets/chain_connector.dart';
 import '../widgets/chain_stage_card.dart';
 
-/// The block types a rig's backline is made of. Effects (delay, eq, vst3,
-/// ...) are added per preset in `PresetEditorScreen`, not here. A block
-/// loaded with some other type is still shown as-is (see `_typeOptions`).
+/// The block types a rig's backline is made of: the always-on stages around
+/// the amp capture. A block loaded with some other type is still shown as-is
+/// (see `_typeOptions`).
 const List<String> _kBacklineTypes = ['gain', 'nam', 'ir', 'tone_stack', 'volume'];
+
+/// Native types that only ever make sense as backline, so they are not
+/// offered when adding an effect.
+const Set<String> _kBacklineOnlyTypes = {'gain', 'nam', 'ir', 'tone_stack', 'volume'};
 
 /// The asset kind a block of [type] should be paired with, or null if it
 /// isn't asset-backed (a native gain/eq/delay/etc. block, or an
@@ -120,6 +124,91 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
 
   List<EffectBlock> get _backline => _chain.where((b) => b.pinned).toList();
 
+  /// The switchable pedals on this rig's board. Every preset of the rig sees
+  /// exactly these and chooses which to switch on -- which is why they are
+  /// chosen here, on the rig, rather than inside any one preset.
+  List<EffectBlock> get _effects => _chain.where((b) => !b.pinned).toList();
+
+  /// Effect types offered by "Add effect": every native type the engine
+  /// reports except the backline-only ones, plus vst3 when a plugin has been
+  /// registered.
+  List<String> get _effectTypes => [
+        for (final t in _blockTypes)
+          if (!_kBacklineOnlyTypes.contains(t.type)) t.type,
+        if (widget.controller.state.assets.values
+            .any((a) => a.kind == AssetKind.vst3))
+          'vst3',
+      ];
+
+  Future<void> _addEffect() async {
+    final type = await showDialog<String>(
+      context: context,
+      builder: (context) => SimpleDialog(
+        title: const Text('Add effect'),
+        children: [
+          for (final t in _effectTypes)
+            SimpleDialogOption(
+              key: Key('add-effect-type-$t'),
+              onPressed: () => Navigator.of(context).pop(t),
+              child: Text(t),
+            ),
+        ],
+      ),
+    );
+    if (type == null || !mounted) return;
+
+    String? assetId;
+    if (type == 'vst3') {
+      final plugins = widget.controller.state.assets.values
+          .where((a) => a.kind == AssetKind.vst3)
+          .toList();
+      assetId = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('Choose plugin'),
+          children: [
+            for (final a in plugins)
+              SimpleDialogOption(
+                onPressed: () => Navigator.of(context).pop(a.id),
+                child: Text(a.filename),
+              ),
+          ],
+        ),
+      );
+      if (assetId == null || !mounted) return;
+    }
+
+    setState(() {
+      // Off at rig level: adding a pedal to the board does not switch it on
+      // in any preset. Each preset opts in.
+      final effect = EffectBlock(
+        id: _newBlockId(),
+        type: type,
+        assetId: assetId,
+        pinned: false,
+        enabled: false,
+        params: _defaultParamsFor(type),
+      );
+      // Before the cab, matching the gain -> amp -> effects -> cab order.
+      final cabIndex = _chain.indexWhere((b) => b.type == 'ir');
+      final next = List.of(_chain);
+      next.insert(cabIndex == -1 ? next.length : cabIndex, effect);
+      _chain = next;
+    });
+  }
+
+  /// Reorders effects among themselves, leaving backline positions alone --
+  /// the mirror of `_reorderBacklineBlocks`.
+  void _reorderEffects(int oldIndex, int newIndex) {
+    setState(() {
+      final effects = _effects;
+      final item = effects.removeAt(oldIndex);
+      effects.insert(newIndex, item);
+      var i = 0;
+      _chain = [for (final b in _chain) b.pinned ? b : effects[i++]];
+    });
+  }
+
   Map<String, Object?> _defaultParamsFor(String type) {
     for (final blockType in _blockTypes) {
       if (blockType.type == type) {
@@ -173,6 +262,7 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
   Widget build(BuildContext context) {
     final assets = widget.controller.state.assets.values.toList();
     final backline = _backline;
+    final effects = _effects;
 
     return Scaffold(
       appBar: AppBar(
@@ -209,8 +299,7 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
           Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Text(
-              'Always on in every preset of this rig. '
-              'Effects are added from each preset. Tap a stage to edit it.',
+              'Always on in every preset of this rig. Tap a stage to edit it.',
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ),
@@ -230,6 +319,7 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       _BacklineStageCard(
+                        keyPrefix: 'block',
                         index: index,
                         block: block,
                         assets: assets,
@@ -245,6 +335,73 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
               },
             ),
           ),
+          const SizedBox(height: 24),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Effects', style: Theme.of(context).textTheme.titleMedium),
+              IconButton(
+                key: const Key('add-effect-button'),
+                icon: const Icon(Icons.add),
+                onPressed: _effectTypes.isEmpty ? null : _addEffect,
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              effects.isEmpty
+                  ? 'The pedals on this rig\'s board. Add them here, then '
+                      'switch them on per preset.'
+                  : 'On the board for every preset of this rig. Each preset '
+                      'chooses which to switch on, and with what settings.',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+          ),
+          if (effects.isEmpty)
+            Padding(
+              key: const Key('no-effects-hint'),
+              padding: const EdgeInsets.symmetric(vertical: 24),
+              child: Center(
+                child: Text(
+                  'No effects on this board yet',
+                  style: Theme.of(context).textTheme.bodyMedium,
+                ),
+              ),
+            )
+          else
+            SizedBox(
+              height: 150,
+              child: ReorderableListView.builder(
+                scrollDirection: Axis.horizontal,
+                buildDefaultDragHandles: false,
+                itemCount: effects.length,
+                onReorderItem: _reorderEffects,
+                itemBuilder: (context, index) {
+                  final block = effects[index];
+                  return Padding(
+                    key: ValueKey('effect-editor-${block.id}'),
+                    padding: const EdgeInsets.symmetric(vertical: 6),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _BacklineStageCard(
+                          keyPrefix: 'effect',
+                          index: index,
+                          block: block,
+                          assets: assets,
+                          blockTypes: _blockTypes,
+                          onChanged: _updateBlock,
+                          applyTypeChange: _applyTypeChange,
+                          onRemove: () => _removeBlock(block.id),
+                        ),
+                        if (index < effects.length - 1) const ChainConnector(),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
         ],
       ),
     );
@@ -269,6 +426,9 @@ class _RigChainEditorScreenState extends State<RigChainEditorScreen> {
 /// to render inline). Also owns the reorder drag handle and remove button,
 /// so removing/reordering a stage never requires opening its editor first.
 class _BacklineStageCard extends StatelessWidget {
+  /// Namespaces this card's key: the backline and effects strips are both
+  /// index-based and would otherwise collide at every position.
+  final String keyPrefix;
   final int index;
   final EffectBlock block;
   final List<Asset> assets;
@@ -279,6 +439,7 @@ class _BacklineStageCard extends StatelessWidget {
   final VoidCallback onRemove;
 
   const _BacklineStageCard({
+    required this.keyPrefix,
     required this.index,
     required this.block,
     required this.assets,
@@ -406,7 +567,7 @@ class _BacklineStageCard extends StatelessWidget {
     final isEmptyStage = wantedKind != null && block.assetId == null;
 
     return ChainStageCard(
-      key: ValueKey('block-card-$index'),
+      key: ValueKey('$keyPrefix-card-$index'),
       icon: blockTypeIcon(block.type),
       label: block.type,
       subtitle: asset?.displayLabel,
@@ -422,7 +583,7 @@ class _BacklineStageCard extends StatelessWidget {
         width: 28,
         height: 28,
         child: IconButton(
-          key: Key('remove-block-button-$index'),
+          key: Key('remove-$keyPrefix-button-$index'),
           padding: EdgeInsets.zero,
           iconSize: 18,
           style: IconButton.styleFrom(
