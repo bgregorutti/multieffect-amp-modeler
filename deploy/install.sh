@@ -218,7 +218,17 @@ else
          "this warning. See deploy/README.md for the older dhcpcd+hostapd path."
   else
     if [[ -z "${WIFI_PASSWORD}" ]]; then
-      WIFI_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16)"
+      # `head -c 16` deliberately stops reading (and closes its end of the
+      # pipe) the instant it has its 16 bytes, which sends `tr` a SIGPIPE
+      # -- entirely normal, and $WIFI_PASSWORD still comes out correct --
+      # but this script's own `pipefail` turns that into the pipeline
+      # "failing" with status 141, which `set -e` then treats as a real
+      # error and kills the whole script right here, silently, before ever
+      # reaching the Wi-Fi AP setup below. `|| true` discards that
+      # meaningless status; a real `tr`/`head` misbehavior would still
+      # leave $WIFI_PASSWORD empty and get caught by the length check
+      # right after this block.
+      WIFI_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 16 || true)"
       GENERATED_PASSWORD="true"
     else
       GENERATED_PASSWORD="false"

@@ -139,10 +139,12 @@ websocat ws://<pi-ip>:8765/ws
 You should get a `state_snapshot` back.
 
 For `audio-engine`'s control socket (only reachable on the Pi itself, it's
-a Unix socket):
+a Unix socket, and owned by `${SERVICE_USER}:${SERVICE_USER}` at mode
+`0770` -- the whole pipeline needs root, not just the `echo`, or you'll get
+"permission denied" from `nc` even though the command "ran"):
 
 ```bash
-echo '{"cmd":"get_state"}' | nc -U /run/multieffect-amp-modeler/audio-engine.sock
+sudo sh -c "echo '{\"cmd\":\"get_state\"}' | nc -U /run/multieffect-amp-modeler/audio-engine.sock"
 ```
 
 Connect a phone to the `MultiEffectPedal` (or whatever `--ssid` you chose)
