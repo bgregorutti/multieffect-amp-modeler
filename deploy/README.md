@@ -244,6 +244,12 @@ working guitar pedal. As of this V1:
   installs the `linux-image-rt-arm64` package if you want to get a head
   start, but does not reboot into it or verify anything for you -- see
   "Real-time kernel" below.
+- **No protection against hard power cuts to the SD card.** If the
+  physical power switch is going to cut power directly (like a real
+  stompbox, no clean shutdown first -- see `docs/open-questions.md` #6),
+  this script does not set up the read-only-root overlay that mitigates
+  it. Presets/banks/assets are already power-cut-safe (atomic writes); the
+  OS partition currently is not.
 
 In short: this deploys the two *processes* correctly and gets them running
 reliably as system services with real (if still partial) functionality
@@ -269,6 +275,35 @@ script says so and continues -- the alternative is
 [Elk Audio OS](https://elk.audio/) (a separate OS image, not an apt
 package; flashing it is a different path from this guide entirely, and
 would replace Raspberry Pi OS rather than layer on top of it).
+
+## Power-cut resilience (not yet automated -- read before wiring a bare power switch)
+
+A pedal's power switch is expected to cut power to the Pi directly, the
+same way unplugging a wall-wart does -- no clean `shutdown` first. See
+`docs/open-questions.md` #6 for the full writeup; in short:
+
+- **Your presets/banks/assets are already safe.** `persistence.py` writes
+  `state.json` via `fsync` + atomic `os.replace`, so a cut mid-save loses at
+  most the last unsaved edit, never a corrupt file.
+- **The OS partition is not.** Enough abrupt power cuts during a
+  systemd/journald/apt write can leave Raspberry Pi OS's root filesystem
+  unbootable, needing a re-flash. This is a real risk for anything power-
+  cycled this often, independent of anything in this repo.
+
+The standard mitigation is Raspberry Pi OS's built-in read-only-root
+overlay (`sudo raspi-config` -> "Overlay Filesystem", or non-interactively
+`sudo raspi-config nonint do_overlayfs 0`), which makes the root filesystem
+immune to power-cut corruption. **This script does not enable it**, on
+purpose: that overlay's writable layer is tmpfs and discarded on every
+reboot, so `${DATA_DIR}` would need to live on its own real, separately
+mounted partition *excluded* from the overlay first -- otherwise every
+preset you save vanishes on the next boot. That's an SD-card partition
+layout decision this guide can't make for you, and isn't something to
+automate without verifying it on real hardware first (see this guide's own
+"honesty check" at the top). If you set this up yourself, verify with
+`mount | grep " / "` after rebooting (expect `overlay`, not the SD card's
+partition) and confirm a saved preset actually survives a hard power cut to
+`${DATA_DIR}`'s own mount before trusting it on a gig.
 
 ## Security notes
 
