@@ -130,6 +130,28 @@ else
 fi
 
 # --------------------------------------------------------------------------
+# 2b. Make sure ${SERVICE_USER} can actually reach ${REPO_DIR}. Following
+#     this guide's own step 3 ("git clone" straight into your home
+#     directory) puts the checkout somewhere a personal account's default
+#     permissions routinely deny to any *other* user -- and the systemd
+#     units below run as the dedicated ${SERVICE_USER}, not you. Left
+#     unfixed, that surfaces as the units failing to start with
+#     status=200/CHDIR (can't enter WorkingDirectory) or status=203/EXEC
+#     (can't even resolve ExecStart) -- a real first deploy hit exactly
+#     this. Grants the minimum needed on each ancestor directory: "search"
+#     (x) only, never "read" -- ${SERVICE_USER} can reach this checkout by
+#     path but still can't list or read anything else of yours.
+# --------------------------------------------------------------------------
+path="${REPO_DIR}"
+while [[ "${path}" != "/" ]]; do
+  if ! sudo -u "${SERVICE_USER}" test -x "${path}" 2>/dev/null; then
+    log "granting ${SERVICE_USER} traversal (o+x, not read) on ${path}"
+    chmod o+x "${path}"
+  fi
+  path="$(dirname "${path}")"
+done
+
+# --------------------------------------------------------------------------
 # 3. Persistent data directory (presets/banks/footswitch-mapping JSON +
 #    uploaded .nam/IR assets). Deliberately OUTSIDE the repo checkout so a
 #    `git pull` / redeploy never touches it.
