@@ -14,6 +14,12 @@ stubbed.
   but whose OS file-picker is currently stubbed.
 - `keyboard_footswitch.py` -- stands in for a physical footswitch relay.
   Right arrow = next preset, left arrow = previous preset.
+- `upload_assets.py` -- bulk-uploads/registers `.nam`/IR `.wav`/`.vst3`
+  files (or a whole folder of them) against a running control-daemon, then
+  stops -- no preset created, just makes the assets available to the app's
+  picker. Also the documented way to load a pack onto a real Pi over SSH
+  once the mobile app's file-picker is stubbed: see
+  `deploy/README.md`'s "Loading NAM/IR/VST3 asset packs".
 
 ## Full walkthrough: guitar in, hear the effects chain, before any hardware
 

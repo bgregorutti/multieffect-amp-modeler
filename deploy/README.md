@@ -163,6 +163,46 @@ After it comes back up, `systemctl status multieffect-control-daemon` and
 doing anything -- both units are `enable`d, and the AP connection profile
 has `autoconnect yes`.
 
+## Loading NAM/IR/VST3 asset packs
+
+Copying a `.nam`/`.wav` file straight into `${DATA_DIR}/assets` (see
+"Reference" below) does **not** make it usable: the daemon only knows
+about an asset once it's *registered* in its JSON state (id, checksum,
+display name -- see `control-daemon/README.md`'s state model), which
+never happens as a side effect of a file merely existing on disk. The
+mobile app's own upload flow does this registration for you, but until
+its OS file-picker is wired up (see `mobile-app/README.md`), the
+supported way to bulk-load a pack from the command line is
+`scripts/upload_assets.py` -- it streams each file through the same
+HTTP-upload + WebSocket-register calls the app makes, so whatever it
+registers shows up in the app's asset picker immediately, no daemon
+restart needed.
+
+Run it over SSH, directly on the Pi (the daemon's own venv already has
+everything the script needs):
+
+```bash
+ssh <username>@<hostname>.local
+cd multieffect-amp-modeler
+scp -r "you@yourmac:/path/to/your/NAM-IR-pack" /tmp/pack   # get the files onto the Pi first
+control-daemon/.venv/bin/python3 scripts/upload_assets.py --dir /tmp/pack
+rm -rf /tmp/pack                                            # daemon has its own copy now
+```
+
+Or skip the two-hop copy and run it from your dev machine instead, pointed
+at the Pi over the network -- the script only needs to *reach* the daemon,
+not run on the same box:
+
+```bash
+python3 scripts/upload_assets.py --host <pi-ip> --dir "/path/to/your/NAM-IR-pack"
+```
+
+Both forms accept `--nam`/`--ir`/`--vst3` for individual files instead of
+`--dir` for a whole folder, are safe to re-run (content-deduped by
+checksum, so registering the same pack twice is a no-op), and skip
+individual unusable files rather than aborting the whole run -- see the
+script's own `--help` for the full picture, including `.vst3` bundles.
+
 ## Redeploying after code changes
 
 ```bash

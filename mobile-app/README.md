@@ -251,11 +251,12 @@ implemented and covered by `flutter test`.
 
 ## Known limitations / follow-ups
 
-- The daemon host/port is currently a compile-time constant
-  (`kDefaultDaemonHost`/`kDefaultDaemonPort` in `main.dart`, defaulting to
-  `127.0.0.1:8765`). A real deployment will want a settings screen (backed
-  by e.g. `shared_preferences`) to point the app at the pedal's actual
-  address -- out of scope for this first pass.
+- The daemon host/port is a runtime setting (gear icon on the Status tab,
+  `SettingsScreen` + `DaemonEndpointStore`), persisted via
+  `shared_preferences` and applied immediately on save -- no rebuild
+  needed. `kDefaultDaemonHost`/`kDefaultDaemonPort` in `main.dart` (still
+  overridable at build time via `--dart-define`) are only the first-launch
+  fallback, before anything has been saved.
 - `DaemonClient` does not currently auto-reconnect after a dropped
   connection; `status` correctly reflects `disconnected`/`error`, and
   `ConnectionScreen` offers a manual "Connect" button, but automatic

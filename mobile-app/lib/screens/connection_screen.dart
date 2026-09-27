@@ -1,14 +1,25 @@
 import 'package:flutter/material.dart';
 
 import '../services/daemon_client.dart';
+import '../services/daemon_endpoint_store.dart';
 import '../state/daemon_state_controller.dart';
+import 'settings_screen.dart';
 
 /// The phone-side mirror of what an onboard display would show: connection
-/// state, the active rig and preset, bypass, and tempo.
+/// state, the active rig and preset, bypass, and tempo. Also the entry
+/// point to the Settings screen, since "where's my daemon" belongs next to
+/// "am I connected to it".
 class ConnectionScreen extends StatelessWidget {
   final DaemonStateController controller;
+  final DaemonEndpoint currentEndpoint;
+  final ValueChanged<DaemonEndpoint> onSaveEndpoint;
 
-  const ConnectionScreen({super.key, required this.controller});
+  const ConnectionScreen({
+    super.key,
+    required this.controller,
+    required this.currentEndpoint,
+    required this.onSaveEndpoint,
+  });
 
   String _statusLabel(ConnectionStatus status) {
     switch (status) {
@@ -39,7 +50,24 @@ class ConnectionScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Pedal Status')),
+      appBar: AppBar(
+        title: const Text('Pedal Status'),
+        actions: [
+          IconButton(
+            key: const Key('open-settings-button'),
+            icon: const Icon(Icons.settings),
+            tooltip: 'Daemon connection settings',
+            onPressed: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (context) => SettingsScreen(
+                  currentEndpoint: currentEndpoint,
+                  onSave: onSaveEndpoint,
+                ),
+              ));
+            },
+          ),
+        ],
+      ),
       body: ListenableBuilder(
         listenable: controller,
         builder: (context, _) {
