@@ -75,9 +75,33 @@ personal access token -- `git clone` works the same either way.)
 
 ## 4. Configure and run the install script
 
+**If you're SSH'd in over the Pi's own Wi-Fi radio (not Ethernet), this
+script will disconnect you partway through, on purpose.** Unless
+`--skip-ap`, step 7 switches `wlan0` from being a Wi-Fi *client* on your
+home network into *being* the AP itself -- and that's the same radio your
+SSH session is riding on, so it drops the instant the switch happens. This
+is expected, not a failure, but it also means anything the script still
+had left to log (notably a generated Wi-Fi password, if you leave
+`WIFI_PASSWORD` blank) never reaches your terminal. Two ways to avoid the
+surprise:
+
+- Plug in Ethernet first, so the SSH session survives Wi-Fi switching to
+  AP mode -- you'll want this for redeploys later anyway (see
+  "Redeploying after code changes" below).
+- Or run the script inside `tmux`/`screen`, so a dropped SSH session
+  doesn't kill it partway through -- reattach afterward to see the rest of
+  the output.
+
+Either way, set an explicit `WIFI_PASSWORD` in `deploy/config.env` (rather
+than leaving it blank) so you're never dependent on catching that one log
+line live -- and re-runs stay idempotent instead of silently rotating the
+password. If you already lost it: `sudo nmcli -s -g
+802-11-wireless-security.psk connection show multieffect-ap` shows the
+live PSK (`-s` is required -- nmcli redacts it by default).
+
 ```bash
 cp deploy/config.env.example deploy/config.env
-nano deploy/config.env        # set WIFI_SSID, WIFI_COUNTRY at minimum
+nano deploy/config.env        # set WIFI_SSID, WIFI_PASSWORD, WIFI_COUNTRY
 sudo ./deploy/install.sh
 ```
 
