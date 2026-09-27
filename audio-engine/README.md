@@ -29,13 +29,16 @@ ctest --test-dir audio-engine/build            # or: ./audio-engine/build/audio_
 Requires: CMake >= 3.16, a C++20 compiler, and two packages
 (`nlohmann-json`, `gtest`+`gmock`) -- from the normal Ubuntu package mirror
 (`nlohmann-json3-dev`, `libgtest-dev`+`libgmock-dev`) or Homebrew
-(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **88/88
+(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **151/151
 tests passed** (`ctest --test-dir audio-engine/build`), covering every
-module below plus a real-subprocess control-socket integration test. This
-default build needs no network access and no GitHub-hosted dependency --
-see "Real-time audio I/O" and "Real NAM inference" below for the two
-optional, network-fetching build flags (**93/93 tests** with real NAM
-inference on).
+module below (the three modelled pedal blocks and their Python-parity golden
+renders included) plus a real-subprocess control-socket integration test.
+This default build needs no network access and no GitHub-hosted dependency
+-- see "Real-time audio I/O", "Real NAM inference" and "VST3 plugin hosting"
+below for the three optional, network-fetching build flags
+(`-DAUDIO_ENGINE_WITH_VST3=ON` alone: **159/159**); re-run `ctest` for the
+current per-flag (and flag-combination) counts rather than trusting a
+hardcoded one here, as they drift with every test added.
 
 Run the engine standalone (mostly useful for manual testing against the
 control socket -- see below):
@@ -88,6 +91,18 @@ thread-safe (same mutex) but not glitch-free; expect an audible click.
 Wiring `PresetSwitcher` into the real-time path is the natural next step
 once you're validating audio through real hardware, not attempted here to
 keep this change scoped to "get real signal flowing."
+
+It's worse than a click in one respect: `ResourceManager::loadPreset`
+rebuilds the *entire* chain on every `load_preset` -- re-reading and
+re-preparing the `.nam` model, re-reading/resampling/normalizing the IR,
+re-`dlopen`ing any VST3 -- and `handleCommand` holds the same mutex
+`processAudioBlock` needs for that whole time. There's no reuse between
+consecutive presets of the same rig (disabled blocks aren't even
+constructed), so the daemon's rig/preset split -- designed so an in-rig
+preset switch only flips enable flags -- buys nothing here yet. Building
+every block of the chain once per rig and applying a preset as enable/param
+changes on the live chain is the engine-side half of that design; see
+`docs/open-questions.md` #5.
 
 **macOS microphone permission.** The very first time you run `--audio`,
 opening the input device can trigger (or silently block on, if run
@@ -716,6 +731,10 @@ be buildable) are for later manual/hardware validation, not this test.
 | `eq_block`           | Biquad peaking/shelving EQ (RBJ Audio EQ Cookbook formulas); `setGainDb`/`gainDb()` support live boost/cut updates without reconstructing the block |
 | `tone_stack_block`     | 3-band tone stack (block type `"tone_stack"`, `{bass_db, mid_db, treble_db}` params) composing three `EqBlock`s (low-shelf/peaking/high-shelf) -- tone shaping around a NAM capture isn't part of the captured model itself, see "Rig chain: the gain stages around a NAM capture" below |
 | `delay_block`         | Feedback delay line (`delay_ms`/`feedback`/`mix` params, all three live-settable via `setLiveParam`) |
+| `pedal_dsp`             | Shared DSP primitives (diode clipping, oversampling, `ParamSmoother`) behind the three modelled pedal blocks, ported from `vst-python/src/pedals/dsp.py` -- see "Modelled pedal blocks" below |
+| `big_muff_block`         | `BigMuffBlock` (block type `"big_muff"`) -- fuzz/distortion, ported from `vst-python/src/pedals/bigmuff.py` |
+| `tube_screamer_block`      | `TubeScreamerBlock` (block type `"tube_screamer"`) -- overdrive, ported from `vst-python/src/pedals/tubescreamer.py` |
+| `noise_gate_block`           | `NoiseGateBlock` (block type `"noise_gate"`) -- ported from `vst-python/src/pedals/noisegate.py` |
 | `block_type_registry`     | Static per-type parameter schema (label/unit/min/max/default) for every native block type -- backs the `list_block_types` command, see "Commands" below |
 | `wav_file`               | Hand-rolled RIFF/WAVE parser (reads PCM16/PCM24/PCM32/float32, mono or downmixed) + writer (PCM16/float32) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
@@ -809,12 +828,12 @@ command-specific extra fields.
 
 ### Commands
 
-**`load_preset`** -- loads and applies a full preset (see "Shared data
-model" above for the exact `preset` shape; `nam_asset_id`/`ir_asset_id`
-must already have been registered via `register_asset`, below, or be
-`null`):
+**`load_preset`** -- loads and applies a full (already rig-resolved)
+preset (see "Shared data model" above for the exact `preset` shape; each
+block's `asset_id`, if any, must already have been registered via
+`register_asset`, below, or be `null`):
 ```json
-{"cmd": "load_preset", "preset": {"id": "p1", "name": "Ambient Swell", "blocks": [{"type": "gain", "enabled": true, "params": {"gain_db": 3.0}}], "nam_asset_id": null, "ir_asset_id": null}}
+{"cmd": "load_preset", "preset": {"id": "p1", "name": "Ambient Swell", "rig_id": "rig1", "rig_name": "Ampeg SVT", "blocks": [{"id": "gain1", "type": "gain", "asset_id": null, "enabled": true, "params": {"gain_db": 3.0}}]}}
 ```
 ```json
 {"ok": true, "cmd": "load_preset", "preset_id": "p1"}
@@ -1022,7 +1041,9 @@ passing.**
 - **Crossfading a preset switch in the real-time path** -- see "Known gap"
   under "Real-time audio I/O" above; `PresetSwitcher` itself is built and
   tested, just not wired into `EngineState` yet.
-- **Loading actual third-party LV2/VST3 plugin binaries.**
+- **Loading LV2 plugin binaries.** (VST3 hosting shipped -- see "VST3
+  plugin hosting" above -- but only VST3; an LV2 host would be a separate,
+  unimplemented effort.)
 - **FFT-based/partitioned convolution performance optimization** -- see
   deviation #3 above; naive convolution is correct but not real-time-fast
   at production IR lengths.

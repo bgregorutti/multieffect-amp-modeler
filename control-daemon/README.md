@@ -1,8 +1,8 @@
 # control-daemon
 
 The control daemon for the DIY AI guitar multi-effects pedal. It is the
-single source of truth for "which preset is active" and for all
-preset/bank/footswitch configuration:
+single source of truth for "which rig/preset is active" and for all
+rig/preset/footswitch configuration:
 
 ```
 Mobile app (Flutter) <--WebSocket--> Control daemon <--drives--> Audio engine (JUCE/C++ plugin host)
@@ -42,7 +42,7 @@ self-heals. The daemon supplies the provider in `DaemonStateManager.__init__`.
 
 **A rejection is now distinct from an absent engine.** Fail-open on an
 unreachable engine is deliberate and unchanged -- the daemon is the source of
-truth for preset/bank/footswitch state whether or not anything is listening,
+truth for rig/preset/footswitch state whether or not anything is listening,
 which is what lets it run on a dev machine with no engine at all. But a
 *rejection* is the opposite situation: the engine is right there and has
 refused, which means it is still playing its previous chain (it validates
@@ -152,19 +152,60 @@ keep this property and re-run that test/benchmark.
 ```
 
 Covers: software debounce (bouncy input + held-press cases), atomic
-persistence round-trip, preset/bank CRUD + selection transitions,
-footswitch mapping -> state change (including next/prev bank wraparound and
-tap-tempo BPM estimation), role-based command rejection, a full WebSocket
-integration test (app creates + selects a preset, a display-role connection
-observes the broadcasts), the GPIO mock backend + debounce integration, the
-`gpiozero` "not available on this platform" guard, and the upload memory
-benchmark above.
+persistence round-trip (including the v1-\>v2 schema migration from the old
+flat-preset shape, see "Rigs and presets" below), rig/preset CRUD + selection
+transitions, footswitch mapping -> state change (including next/prev rig
+wraparound and tap-tempo BPM estimation), role-based command rejection, a
+full WebSocket integration test (app creates a rig + preset and selects it,
+a display-role connection observes the broadcasts), the GPIO mock backend +
+debounce integration, the `gpiozero` "not available on this platform" guard,
+asset dedup-by-checksum, live block-param updates, asset rename, and the
+upload memory benchmark above. 101 tests passing as of this writing
+(`pytest -q`); re-run to get the current count rather than trusting this
+number as it drifts.
+
+## Rigs and presets
+
+A **rig** is a backline: one ordered signal chain (`Rig.chain`) whose amp
+and cab blocks are marked `pinned` (always on, never toggled by a preset),
+plus whatever effects sit around them. A **preset** belongs to one rig
+(`Rig.presets`) and only records which of that rig's *non-pinned* blocks are
+enabled (`Preset.block_states`, keyed by block id) -- it never carries its
+own amp/cab reference. The active position is `(active_rig_index,
+active_preset_index)` rather than a bare preset id, since presets live
+inside rigs and two rigs can each have a preset named "Solo".
+
+This split is meant to be a real-time property, not just nicer modelling:
+stepping presets within a rig should only flip per-block enable flags, so
+it's fast and click-free on the audio thread. Stepping rigs is the
+expensive path (a different amp/cab means the engine reloads a NAM model and
+re-partitions an IR) -- the footswitch mapping reflects this with separate
+`next_rig`/`prev_rig` vs. `next_preset`/`prev_preset` actions, and
+preset-stepping deliberately never crosses into another rig (see
+`FootswitchAction` below). The daemon side of this is complete, but the
+engine doesn't exploit it yet: every `load_preset` rebuilds the full chain,
+amp and cab included -- see `docs/open-questions.md` #5.
+
+Asset references (`asset_id`) live on individual blocks, not on the preset
+or rig as a whole -- an amp block points at a `.nam` asset, a cab block at
+an IR -- so chain order is explicit, more than one IR is possible in a
+chain, and a future block type (e.g. a VST3 host) needs no new special
+case. This replaced an earlier (schema v1) design where every preset was a
+standalone chain carrying its own `nam_asset_id`/`ir_asset_id`; `models.py`'s
+`_migrate_v1_to_v2` upgrades an old on-disk store by turning each v1 preset
+into its own v2 rig automatically on load.
+
+The audio engine is kept ignorant of all of this: the daemon flattens a
+rig+preset pair into a `ResolvedPreset` (see `resolve_preset` in
+`models.py`) -- the exact, already-resolved chain to play -- before sending
+it over the control socket. See `audio-engine/README.md`'s "Shared data
+model" for the engine-side shape.
 
 ## Architecture / module map
 
 | Module                    | Responsibility |
 |----------------------------|----------------|
-| `models.py`                 | Pydantic models: `Preset`, `Bank`, `Asset`, footswitch actions, the versioned `DaemonState` |
+| `models.py`                 | Pydantic models: `Rig`, `Preset`, `PresetBlockState`, `EffectBlock`, `Asset`, `ResolvedPreset`/`resolve_preset`, footswitch actions, the versioned `DaemonState`, the v1->v2 migration |
 | `persistence.py`             | Atomic JSON load/save (temp file + `os.replace`) |
 | `debounce.py`                 | Software debounce utility (clock-injectable, unit tested in isolation) |
 | `gpio.py`                       | `FootswitchInputBackend` ABC, `MockFootswitchBackend`, `GpioZeroFootswitchBackend` (lazy import), `FootswitchInputController` (wires debounce on top of a backend) |
@@ -217,11 +258,12 @@ before the resulting broadcast copy on that same connection.
 ```json
 {"type": "state_changed", "reason": "select_preset", "state": { "...": "full DaemonState" }}
 ```
-`reason` is one of: `create_preset`, `update_preset`, `delete_preset`,
-`select_preset`, `create_bank`, `update_bank`, `reorder_banks`,
-`set_bypass`, `set_footswitch_mapping`, `register_asset`, `rename_asset`,
-`footswitch_next_bank`, `footswitch_prev_bank`, `footswitch_next_preset`,
-`footswitch_prev_preset`, `tap_tempo`.
+`reason` is one of: `create_rig`, `update_rig`, `delete_rig`,
+`reorder_rigs`, `create_preset`, `update_preset`, `delete_preset`,
+`select_preset`, `set_bypass`, `set_footswitch_mapping`, `register_asset`,
+`rename_asset`, `set_block_param`, `footswitch_next_rig`,
+`footswitch_prev_rig`, `footswitch_next_preset`, `footswitch_prev_preset`,
+`tap_tempo`.
 
 **`command_ok`** -- direct reply to the sender of a successful command:
 ```json
@@ -238,27 +280,38 @@ before the resulting broadcast copy on that same connection.
 ### Client -> server: app-only commands
 
 ```jsonc
-// Create a preset
-{"type": "create_preset", "name": "Ambient Swell", "blocks": [{"type": "reverb", "enabled": true, "params": {"decay": 4.2}}], "nam_asset_id": null, "ir_asset_id": null}
+// Create a rig: an ordered chain, amp/cab blocks marked pinned (always on)
+{
+  "type": "create_rig",
+  "name": "Ampeg SVT",
+  "chain": [
+    {"id": "amp", "type": "nam", "asset_id": "nam1", "pinned": true, "enabled": true, "params": {}},
+    {"id": "dist", "type": "distortion", "asset_id": null, "pinned": false, "enabled": false, "params": {"drive": 0.4}},
+    {"id": "cab", "type": "ir", "asset_id": "ir1", "pinned": true, "enabled": true, "params": {}}
+  ]
+}
+
+// Update a rig (any field omitted is left unchanged; sending `chain` replaces it wholesale)
+{"type": "update_rig", "rig_id": "rig1", "name": "Ampeg SVT v2"}
+
+// Delete a rig (and every preset inside it)
+{"type": "delete_rig", "rig_id": "rig1"}
+
+// Reorder rigs: every existing rig id, in the new order
+{"type": "reorder_rigs", "rig_ids": ["rig2", "rig1"]}
+
+// Create a preset inside a rig -- block_states only covers non-pinned blocks
+{"type": "create_preset", "rig_id": "rig1", "name": "Solo", "block_states": {"dist": {"enabled": true, "params": {}}}}
 
 // Update a preset (any field omitted is left unchanged)
-{"type": "update_preset", "preset_id": "abc123", "name": "Ambient Swell v2"}
+{"type": "update_preset", "rig_id": "rig1", "preset_id": "abc123", "name": "Solo v2"}
 
 // Delete a preset
-{"type": "delete_preset", "preset_id": "abc123"}
+{"type": "delete_preset", "rig_id": "rig1", "preset_id": "abc123"}
 
-// Select by preset id, OR by (bank_index, slot) -- not both
-{"type": "select_preset", "preset_id": "abc123"}
-{"type": "select_preset", "bank_index": 0, "slot": 2}
-
-// Create a bank (num_slots defaults to 4)
-{"type": "create_bank", "name": "Live Set 1", "num_slots": 4}
-
-// Update a bank's name and/or its slot -> preset_id assignments
-{"type": "update_bank", "bank_id": "bank1", "slots": ["abc123", null, null, null]}
-
-// Reorder banks: every existing bank id, in the new order
-{"type": "reorder_banks", "bank_ids": ["bank2", "bank1"]}
+// Move the active position. Either index alone selects within the other's current value.
+{"type": "select_preset", "rig_index": 0, "preset_index": 1}
+{"type": "select_preset", "preset_index": 2}
 
 // Global bypass
 {"type": "set_bypass", "bypass": true}
@@ -267,13 +320,13 @@ before the resulting broadcast copy on that same connection.
 {
   "type": "set_footswitch_mapping",
   "mapping": {
-    "0": {"type": "select_slot", "slot": 0},
-    "1": {"type": "select_slot", "slot": 1},
-    "2": {"type": "next_bank"},
-    "3": {"type": "toggle_bypass"},
-    "4": {"type": "tap_tempo"},
-    "5": {"type": "next_preset"},
-    "6": {"type": "prev_preset"}
+    "0": {"type": "next_rig"},
+    "1": {"type": "prev_rig"},
+    "2": {"type": "next_preset"},
+    "3": {"type": "prev_preset"},
+    "4": {"type": "select_preset", "index": 0},
+    "5": {"type": "toggle_bypass"},
+    "6": {"type": "tap_tempo"}
   }
 }
 
@@ -314,19 +367,22 @@ before the resulting broadcast copy on that same connection.
 ```
 
 The daemon looks up `switch_index` in the current footswitch mapping and
-applies the mapped action (`select_slot`, `next_bank`, `prev_bank`,
-`toggle_bypass`, `next_preset`, `prev_preset`, or `tap_tempo`). A press on
+applies the mapped action (`next_rig`, `prev_rig`, `next_preset`,
+`prev_preset`, `select_preset`, `toggle_bypass`, or `tap_tempo`). A press on
 an unmapped switch is a silent no-op. This is intentionally the *only*
 thing a footswitch-role connection can send -- all editing happens in the
 app.
 
-`next_preset`/`prev_preset` step through every *assigned* slot across all
-banks, in bank order then slot order, skipping empty slots and wrapping
-around -- unlike `next_bank`/`prev_bank` (which keep the same slot index
-and can land on an empty one), this always lands on a real preset if one
-exists anywhere. Meant for a minimal footswitch (or `scripts/
-keyboard_footswitch.py`, see its docstring) that wants to browse the whole
-preset list with just two switches instead of one per slot.
+`next_preset`/`prev_preset` step through the *current rig's* presets only,
+wrapping around -- unlike `next_rig`/`prev_rig` (which swap the whole
+backline, including its amp/cab, and reset to that rig's first preset).
+Presets deliberately never step across a rig boundary: a preset's block ids
+only mean anything against its own rig's chain, so a footswitch press that
+silently swapped the amp mid-song would be a bug, not a feature. `rig`
+changes are the expensive path (NAM model reload + IR re-partitioning);
+`preset` changes within a rig are designed to only flip enable flags --
+though until the engine side of that lands (`docs/open-questions.md` #5),
+both currently go through the same full `load_preset` rebuild.
 
 ### HTTP: uploading a `.nam`/IR binary
 
@@ -359,16 +415,36 @@ command path, with one state manager as the only writer -- HTTP is used
 purely for the dumb byte transfer, never as a second, parallel way to
 mutate state.
 
+**Duplicate uploads are rejected by content, not filename.** The same IR
+pack routinely gets uploaded under different names (or the same name gets
+reused for unrelated content), so the upload endpoint computes the SHA-256
+as it streams and, once the body is fully written, checks it against every
+already-registered asset (`DaemonStateManager.find_asset_by_sha256`). A
+match deletes the just-written duplicate file and responds `409` instead of
+handing back a second set of metadata for the same bytes:
+```json
+{"error": "duplicate_asset", "message": "identical content already registered as asset nam1 (my_amp.nam)", "existing_asset_id": "nam1"}
+```
+The caller (e.g. `scripts/load_test_preset.py`) is expected to reuse
+`existing_asset_id` rather than treat this as a failure -- pointing two
+rigs at the same cab IR is normal use, not an error.
+
 ## Design notes / deliberate deviations
 
 * **Preset serialization format: plain JSON.** The spec flags this as an
   open question. JSON was chosen for human-inspectability, diffability, and
   because it is trivial for the not-yet-built mobile app to also parse
   directly if useful. The on-disk schema carries a top-level `"version"`
-  field (`models.SCHEMA_VERSION`); `persistence.load_state` raises a clear
-  error for an unrecognized version rather than silently misinterpreting
-  it, as a placeholder for a real migration step once the schema changes.
-* **Binary asset upload over HTTP, not WS** -- see above.
+  field (`models.SCHEMA_VERSION`, currently `2`); `persistence.load_state`
+  raises a clear error for an unrecognized version rather than silently
+  misinterpreting it. This is no longer just a placeholder: the rig/preset
+  restructuring (see "Rigs and presets" above) was exactly the kind of
+  breaking schema change this was built for, and `_migrate_v1_to_v2`
+  upgrades an old flat-preset store on load.
+* **Binary asset upload over HTTP, not WS** -- see above, including
+  content-checksum dedup.
+* **Asset dedup is by content, not filename** -- see "Duplicate uploads are
+  rejected by content, not filename" above.
 * **Footswitch mapping is a full replace, not a merge.** `set_footswitch_mapping`
   replaces the entire mapping; the app is expected to always hold (and
   send) its complete desired mapping, so there is no daemon-side diffing of
@@ -381,15 +457,17 @@ mutate state.
   own direct `command_ok`. This keeps one broadcast code path uniform for
   every role and every trigger (app edit, footswitch press, or a future
   second app instance).
-* **Selecting an empty bank slot clears the active preset** rather than
-  erroring -- pressing a footswitch mapped to an empty slot, or the app
-  selecting one, is a valid "nothing here" state, not a validation failure.
+* **`select_preset` rejects an out-of-range index rather than clamping or
+  landing on nothing.** Unlike the old bank/slot model (which had explicit
+  empty slots), a rig's `presets` list has no "empty" positions -- every
+  index either names a real preset or is invalid -- so an out-of-range
+  `rig_index`/`preset_index` is a `validation_error`, not a silent no-op.
 * **Tap-tempo taps are not persisted to disk.** Every other mutation is
   persisted immediately (atomic JSON write), but a rapid series of
   footswitch tap-tempo presses deliberately only updates in-memory state
   and broadcasts it -- persisting every single tap would be needless
   storage wear for a transient performance value that nobody needs restored
-  after a restart, unlike presets/banks/footswitch-mapping configuration.
+  after a restart, unlike rigs/presets/footswitch-mapping configuration.
 * **Two footswitch-input ingress paths, one convergence point.** Requirement
   6 (GPIO abstraction + software debounce) is implemented as a fully
   standalone, unit-tested unit (`gpio.py` + `debounce.py`,

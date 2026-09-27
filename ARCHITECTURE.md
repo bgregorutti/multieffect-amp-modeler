@@ -19,8 +19,8 @@
 └─────────────────┘
 ```
 
-The **control daemon** is the single source of truth for "which preset is
-active" and for all preset/bank/footswitch-mapping configuration. It
+The **control daemon** is the single source of truth for "which rig/preset
+is active" and for all rig/preset/footswitch-mapping configuration. It
 notifies every connected client (footswitch relay, mobile app, display) on
 every state change, so all interfaces stay consistent — including changes
 triggered by the footswitch itself. This is why it's built and tested first:
@@ -31,14 +31,63 @@ client of its API, so the API contract is the thing worth stabilizing early.
 
 | Component | Language/Stack | Status |
 |---|---|---|
-| Control daemon | Python, FastAPI, WebSockets | V1 built + tested (`control-daemon/`) |
-| Audio engine | C++20, CMake (JUCE deferred) | V1 built + tested (`audio-engine/`); not wired to control-daemon yet |
-| Mobile app | Flutter | V1 built + tested (`mobile-app/`) |
-| Footswitch relay | Python/C, GPIO (Pi) | Not started |
-| Onboard display | I2C LCD/OLED, driven by daemon broadcasts | Not started |
+| Control daemon | Python, FastAPI, WebSockets | V1 built and tested (`control-daemon/`) |
+| Audio engine | C++20, PortAudio (JUCE deferred, see audio-engine/README.md) | V1 built and tested (`audio-engine/`) |
+| Pedal DSP reference | Python (`vst-python/`) | Reference implementation the C++ pedal blocks are ported from and validated against -- not what runs on the Pi |
+| Mobile app | Flutter | V1 built and tested (`mobile-app/`) |
+| Footswitch relay | Python/C, GPIO (Pi) | Not started -- needs real hardware, see root README "Status" |
+| Onboard display | I2C LCD/OLED, driven by daemon broadcasts | Not started -- needs real hardware, see root README "Status" |
 | Deployment | Bash + systemd + NetworkManager | Script + guide written (`deploy/`); not yet run on real hardware |
 
+See the root [`README.md`](./README.md) "Status" section for current test
+counts and per-component detail; this table is deliberately just a
+one-line-per-component snapshot, not the source of truth for numbers.
+
 ## Design decisions
+
+- **Presets are scoped to a rig, not standalone.** A rig owns one ordered
+  chain whose amp and cab blocks are `pinned` (always on); a preset only
+  records which of that rig's other blocks are enabled. This replaced an
+  earlier design where each preset carried its own amp/cab reference
+  directly, which left chain order undefined, allowed only one IR, and gave
+  no way to bypass the cab alone. The split is meant to be a real-time
+  property, not just modelling: stepping presets within a rig should only
+  flip enable flags (fast, click-free), while stepping rigs reloads the NAM
+  model and re-partitions the IR (the expensive, between-songs path) — the
+  footswitch mapping follows this exactly (`next_rig`/`prev_rig` vs.
+  `next_preset`/`prev_preset`, the latter never crossing a rig boundary).
+  The audio engine is kept ignorant of the split: the daemon flattens
+  rig + preset into a `ResolvedPreset` and sends the exact chain to play.
+  **Not yet realised in the engine:** `ResourceManager::loadPreset`
+  rebuilds the whole chain on every `load_preset` — re-reading the `.nam`
+  and IR from disk even when only an effect toggled — while holding the
+  lock the audio callback needs, so today an in-rig preset switch costs the
+  same as a rig switch. The data model and daemon side are done; the engine
+  side is tracked in `docs/open-questions.md` #5.
+  See "Rigs and presets" in `control-daemon/README.md` and "Shared data
+  model" in `audio-engine/README.md`.
+
+- **Pedal effects are hand-written DSP, not NAM captures.** A `.nam` file
+  freezes the knob positions it was captured at and spends a neural
+  inference to reproduce what is often just a multiply (volume) or a
+  one-pole filter (tone); only the nonlinear clipping stage is genuinely
+  worth modelling that way, and even then a NAM capture can't move once
+  trained, which conflicts with the mobile app's per-block live parameter
+  editing. Each modelled pedal (`big_muff`, `tube_screamer`, `noise_gate`)
+  is designed and measured first in Python (`vst-python/`), then ported to
+  a C++ `EffectBlock` and validated against golden renders from the Python
+  reference (`audio-engine/tests/test_python_parity.cpp`). See
+  `vst-python/README.md` and "Modelled pedal blocks" in
+  `audio-engine/README.md`.
+
+- **VST3 plugins can be hosted as chain blocks, without JUCE.** A rig's
+  chain can include any number of `type: "vst3"` blocks alongside the
+  native ones, loaded via a hand-written COM-style host against vendored
+  `pluginterfaces` only (opt-in, `-DAUDIO_ENGINE_WITH_VST3=ON`). This
+  reverses this project's earlier "LV2/VST3 hosting is out of scope"
+  stance for VST3 specifically, once it became clear a full host doesn't
+  need JUCE or `public.sdk` — see "VST3 plugin hosting" in
+  `audio-engine/README.md`.
 
 - **Preset serialization format: JSON.** Versioned schema (top-level
   `"version"` field) so the on-disk format can evolve. Atomic writes
@@ -69,8 +118,8 @@ client of its API, so the API contract is the thing worth stabilizing early.
   engine present. See `control-daemon/src/control_daemon/gpio.py`
   (`FootswitchInputBackend`, with a `MockFootswitchBackend` for dev/tests)
   and `control-daemon/src/control_daemon/audio_engine_client.py`
-  (`AudioEngineClient`, with a `NullAudioEngineClient` placeholder until the
-  real JUCE-based engine exists).
+  (`AudioEngineClient`: `NullAudioEngineClient` when no engine socket is
+  configured, `UnixSocketAudioEngineClient` to drive a real `audio-engine`).
 
 - **Client roles are distinguished on WebSocket connect** (`app`,
   `footswitch`, `display`) via a `hello` message. Footswitch/display
@@ -92,7 +141,7 @@ client of its API, so the API contract is the thing worth stabilizing early.
   from-scratch AP needs. See `deploy/README.md` for the older-OS fallback
   recipe. Persistent data (`/var/lib/multieffect-amp-modeler/`) lives
   outside the git checkout so a redeploy (`git pull` + re-run) never
-  touches presets/banks/uploaded assets.
+  touches rigs/presets/uploaded assets.
 
 ## Resource constraints
 
@@ -130,18 +179,24 @@ interface, real GPIO, or a real JUCE build to be developed and tested:
   events to exercise the debounce logic deterministically, with a real
   `gpiozero`/`RPi.GPIO`-backed implementation swapped in only on the actual
   Pi.
-- The (not yet built) audio engine is behind an `AudioEngineClient`
-  interface with a `NullAudioEngineClient` the daemon uses until a real
-  engine exists, so preset-selection logic is fully testable without any
-  audio hardware or JUCE toolchain in this environment.
-- The same pattern should extend to the audio engine and footswitch relay
-  when they're built: keep hardware access behind a narrow interface with a
-  software fake, so the logic around it stays testable on a plain Linux dev
-  machine/CI runner.
+- The audio engine sits behind an `AudioEngineClient` interface; the daemon
+  defaults to `NullAudioEngineClient` (every call just logged) so
+  preset-selection logic is fully testable without any audio hardware, and
+  `UnixSocketAudioEngineClient` drives a real `audio-engine` process the
+  same way once one is running — see "Audio engine wiring" in
+  `control-daemon/README.md`.
+- The audio engine itself follows the same pattern one level down:
+  `IAudioIoBackend`/`PortAudioBackend` gate the real-time device, and
+  `INamModel`/`IHostedPlugin` gate NAM inference and VST3 hosting, each
+  off by default behind its own build flag with the control-socket and DSP
+  logic fully testable without it. The footswitch relay isn't built yet;
+  it should follow the same "narrow interface + software fake" pattern
+  once real GPIO hardware exists to build it against.
 
 ## Open questions
 
 Tracked in [`docs/open-questions.md`](./docs/open-questions.md) as they get
 resolved (Pi 4 vs 5, USB audio interface choice, crossfade/preloading
 strategy for glitch-free preset switching, whether the onboard display ships
-in V1, etc.).
+in V1, power-cut resilience for a pedal that gets switched off like a
+stompbox rather than shut down).
