@@ -46,7 +46,7 @@ json EngineState::makeError(EngineErrorCode code, const std::string& message) co
 }
 
 json EngineState::handleCommand(const json& command) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> commandLock(commandMutex_);
 
     if (!command.is_object()) {
         return makeError(EngineErrorCode::ValidationError, "command must be a JSON object");
@@ -86,8 +86,17 @@ json EngineState::handleLoadPreset(const json& command) {
         return makeError(EngineErrorCode::ValidationError, "load_preset requires an object field 'preset'");
     }
     Preset preset = presetIt->get<Preset>();  // throws PresetParseError on malformed shape
-    resourceManager_.loadPreset(preset);      // throws std::runtime_error for unknown asset ids
-    currentPresetId_ = preset.id;
+    // The slow part -- reading/preparing a new amp or cab -- happens here,
+    // with the audio thread still playing the current chain.
+    auto chain = resourceManager_.buildChain(preset);  // throws for unknown asset ids / load failures
+    std::unique_ptr<EngineChain> previous;
+    {
+        std::lock_guard<std::mutex> audioLock(mutex_);
+        previous = resourceManager_.installChain(std::move(chain));
+        currentPresetId_ = preset.id;
+    }
+    // `previous` is destroyed here, after the audio lock is released, so
+    // freeing an amp/cab the new chain didn't reuse never stalls audio.
     return json{{"ok", true}, {"cmd", "load_preset"}, {"preset_id", preset.id}};
 }
 
@@ -96,7 +105,10 @@ json EngineState::handleSetBypass(const json& command) {
     if (it == command.end() || !it->is_boolean()) {
         return makeError(EngineErrorCode::ValidationError, "set_bypass requires a boolean field 'bypass'");
     }
-    bypass_ = it->get<bool>();
+    {
+        std::lock_guard<std::mutex> audioLock(mutex_);
+        bypass_ = it->get<bool>();
+    }
     return json{{"ok", true}, {"cmd", "set_bypass"}, {"bypass", bypass_}};
 }
 
@@ -109,7 +121,10 @@ json EngineState::handleCrossfadeMs(const json& command) {
     if (value < 0) {
         return makeError(EngineErrorCode::ValidationError, "crossfade_ms 'value' must be >= 0");
     }
-    crossfadeMs_ = static_cast<int>(value);
+    {
+        std::lock_guard<std::mutex> audioLock(mutex_);
+        crossfadeMs_ = static_cast<int>(value);
+    }
     return json{{"ok", true}, {"cmd", "crossfade_ms"}, {"value", crossfadeMs_}};
 }
 
@@ -160,6 +175,7 @@ json EngineState::handleSetBlockParam(const json& command) {
     std::string paramKey = keyIt->get<std::string>();
     double value = valueIt->get<double>();
 
+    std::lock_guard<std::mutex> audioLock(mutex_);  // mutates a block the audio thread is running
     EngineChain* chain = resourceManager_.currentChain();
     if (chain == nullptr) {
         return makeError(EngineErrorCode::NotFound, "no preset is currently loaded");

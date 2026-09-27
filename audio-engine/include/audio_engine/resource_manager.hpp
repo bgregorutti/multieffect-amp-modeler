@@ -92,8 +92,17 @@ struct EngineChain {
     std::string presetId;
     std::shared_ptr<INamModel> namModel;         // null if no enabled "nam" block with an asset
     std::shared_ptr<IrHandle> ir;                 // null if no enabled "ir" block with an asset
-    std::unique_ptr<ConvolutionEngine> cabinet;   // built from ir->samples; null iff ir is null
+    // Shared rather than unique so the next chain can take over the same
+    // running instance (see ResourceManager::buildChain) -- its convolution
+    // history carries straight across a preset switch.
+    std::shared_ptr<ConvolutionEngine> cabinet;   // built from ir->samples; null iff ir is null
     std::vector<std::unique_ptr<EffectBlock>> effects;  // non-amp/cab blocks, in preset order
+
+    // Which asset `namModel`/`ir` were loaded from (asset id + stored path),
+    // empty when not loaded. The next buildChain() compares against these to
+    // decide whether it can reuse the amp/cab instead of reading them again.
+    std::string namAssetKey;
+    std::string irAssetKey;
 
     // Every block to run, in the preset's own order (amp and cab
     // included). Non-owning: each pointer aliases `namModel`, `cabinet` or
@@ -131,19 +140,36 @@ public:
     void registerAsset(const Asset& asset);
     const std::map<std::string, Asset>& assets() const { return assets_; }
 
-    // Builds a brand new EngineChain for `preset` (loading the assets its
-    // blocks reference and constructing its effect blocks, in the
-    // preset's own order), then atomically replaces the current chain. The old
-    // chain's shared_ptrs are dropped as part of this call, so if nothing
-    // else is holding a reference (the expected steady-state case), its
-    // NAM model / IR resources are released synchronously, before this
-    // call returns.
+    // Builds a new EngineChain for `preset`, in the preset's own block
+    // order, without installing it. The amp and cab are the expensive part
+    // (disk read, NAM prepare/prewarm, IR resample + normalize), so when the
+    // current chain already has the same "nam"/"ir" asset loaded, the new
+    // chain shares that running instance instead of loading it again --
+    // which is what makes a preset switch within a rig cheap: same amp, same
+    // cab, only the effect blocks are rebuilt. A different asset (a rig
+    // change, or a preset picking another amp channel) is loaded fresh.
+    // Every freshly built block is prepare()d here; reused ones are not, so
+    // their running state carries across the switch.
     //
-    // Throws PresetParseError (via preset validation) is not done here --
-    // callers pass an already-parsed Preset; throws a descriptive
-    // std::runtime_error if any block (enabled or not) carries an
-    // asset_id that is not a registered asset id, in which case the
-    // currently loaded chain is left untouched.
+    // Never touches the current chain, so it can run without holding the
+    // lock the audio thread takes -- the audio thread only ever calls
+    // process() on the objects this shares, and only through one chain at a
+    // time. Callers must still serialize buildChain/installChain/
+    // registerAsset against each other.
+    //
+    // Throws a descriptive std::runtime_error if any block (enabled or not)
+    // carries an asset_id that is not a registered asset id, or if loading
+    // an asset fails; the current chain is unaffected either way.
+    std::unique_ptr<EngineChain> buildChain(const Preset& preset) const;
+
+    // Makes `chain` current and hands back the previous one, so the caller
+    // chooses where its resources (an amp/cab nothing reuses, VST3
+    // instances) get destroyed -- e.g. after releasing the audio lock.
+    std::unique_ptr<EngineChain> installChain(std::unique_ptr<EngineChain> chain);
+
+    // buildChain + installChain, dropping the previous chain before
+    // returning: anything it held that the new chain doesn't reuse is
+    // released synchronously -- see test_resource_manager.cpp.
     void loadPreset(const Preset& preset);
 
     // The currently active chain, or nullptr if nothing has been loaded

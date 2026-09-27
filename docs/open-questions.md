@@ -37,18 +37,21 @@ next preset while the current one plays. The control daemon's
 `AudioEngineClient` interface (`load_preset`, etc.) is written so either
 strategy can be implemented behind it without changing the daemon.
 
-Where it stands: `PresetSwitcher` (equal-power crossfade between two
-already-prepared chains) is built and tested but not wired into the
-real-time path. More fundamentally, the rig/preset split (see
-`ARCHITECTURE.md`) was introduced precisely so that switching presets
-*within* a rig needs no loading at all -- the amp, cab and every effect are
-the same blocks, only their enable flags and params differ -- but the engine
-doesn't exploit it yet: `ResourceManager::loadPreset` rebuilds the whole
-chain on every `load_preset`, re-reading the `.nam` and IR from disk, while
-holding the mutex the audio callback needs. So the likely shape of the answer
-is two-tier: in-rig preset changes applied in place to a chain built once per
-rig (no load, nothing to crossfade beyond per-param smoothing), and rig changes
-built off the audio thread then crossfaded with `PresetSwitcher`.
+Where it stands:
+
+- **Done:** the amp and cab are loaded on a rig change and kept running
+  across preset changes within the rig (`ResourceManager::buildChain` reuses
+  them when the asset is unchanged -- no disk read, no re-prepare), and
+  loading no longer holds the mutex the audio callback needs, so the audio
+  keeps playing the previous chain until the new one is swapped in.
+- **Open:** effect blocks are still rebuilt on every preset switch, so their
+  state resets (a delay tail is cut, a gate restarts) and toggling one is
+  an instant on/off rather than a short fade; `"vst3"` blocks reload.
+  Building every block of a rig once and applying a preset as enable/param
+  changes in place (with a short per-block bypass fade) would close that.
+- **Open:** `PresetSwitcher` (equal-power crossfade between two
+  already-prepared chains) is built and tested but not wired in, so a rig
+  change still switches hard at the swap.
 
 ## 6. Power-cut resilience (the Pi will be switched on/off like a stompbox, not gracefully shut down)
 

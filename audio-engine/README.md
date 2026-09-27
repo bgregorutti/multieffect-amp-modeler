@@ -29,14 +29,14 @@ ctest --test-dir audio-engine/build            # or: ./audio-engine/build/audio_
 Requires: CMake >= 3.16, a C++20 compiler, and two packages
 (`nlohmann-json`, `gtest`+`gmock`) -- from the normal Ubuntu package mirror
 (`nlohmann-json3-dev`, `libgtest-dev`+`libgmock-dev`) or Homebrew
-(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **151/151
+(`nlohmann-json`, `googletest`) on macOS, not from GitHub. Last run: **158/158
 tests passed** (`ctest --test-dir audio-engine/build`), covering every
 module below (the three modelled pedal blocks and their Python-parity golden
 renders included) plus a real-subprocess control-socket integration test.
 This default build needs no network access and no GitHub-hosted dependency
 -- see "Real-time audio I/O", "Real NAM inference" and "VST3 plugin hosting"
 below for the three optional, network-fetching build flags
-(`-DAUDIO_ENGINE_WITH_VST3=ON` alone: **159/159**); re-run `ctest` for the
+(`-DAUDIO_ENGINE_WITH_VST3=ON -DAUDIO_ENGINE_WITH_REAL_NAM=ON`: **174/174**); re-run `ctest` for the
 current per-flag (and flag-combination) counts rather than trusting a
 hardcoded one here, as they drift with every test added.
 
@@ -87,21 +87,26 @@ race a concurrent audio block -- see `tests/test_engine_state.cpp`.
 tested standalone, but `EngineState::handleLoadPreset` still swaps
 `ResourceManager`'s chain synchronously rather than handing old+new to a
 `PresetSwitcher` -- so a preset switch while `--audio` is running is
-thread-safe (same mutex) but not glitch-free; expect an audible click.
+thread-safe but not glitch-free; expect an audible click.
 Wiring `PresetSwitcher` into the real-time path is the natural next step
 once you're validating audio through real hardware, not attempted here to
 keep this change scoped to "get real signal flowing."
 
-It's worse than a click in one respect: `ResourceManager::loadPreset`
-rebuilds the *entire* chain on every `load_preset` -- re-reading and
-re-preparing the `.nam` model, re-reading/resampling/normalizing the IR,
-re-`dlopen`ing any VST3 -- and `handleCommand` holds the same mutex
-`processAudioBlock` needs for that whole time. There's no reuse between
-consecutive presets of the same rig (disabled blocks aren't even
-constructed), so the daemon's rig/preset split -- designed so an in-rig
-preset switch only flips enable flags -- buys nothing here yet. Building
-every block of the chain once per rig and applying a preset as enable/param
-changes on the live chain is the engine-side half of that design; see
+**What a preset switch reloads.** `ResourceManager::buildChain` compares
+the new chain's `"nam"` and `"ir"` assets (asset id + stored path) with the
+ones currently playing: the same amp or cab is carried over as the same
+running instance -- not read from disk, not `prepare()`d again, so its state
+continues across the switch -- and only a different one is loaded. So a
+preset switch within a rig (same amp and cab, different effects on) reads
+nothing from disk, while a rig change loads its amp and cab. Loading happens
+before `EngineState` takes the audio mutex, which it holds only to swap the
+new chain in; the previous chain is destroyed after the mutex is released
+(see `EngineStateAudio.AudioKeepsRunningWhileANewAmpLoads`).
+
+Still rebuilt on every switch: the effect blocks (gain/EQ/pedals/delay --
+built in memory, no disk, but a delay tail or gate state restarts) and any
+`"vst3"` block, which is reloaded. An amp or cab that drops out of the chain
+isn't kept around either, so switching it back on is a fresh load. See
 `docs/open-questions.md` #5.
 
 **macOS microphone permission.** The very first time you run `--audio`,
@@ -743,7 +748,7 @@ be buildable) are for later manual/hardware validation, not this test.
 | `real_nam_model`               | `RealNamModel`: real WaveNet/LSTM inference via vendored NeuralAmpModelerCore, built only when `AUDIO_ENGINE_WITH_REAL_NAM` is on -- see "Real NAM inference" above |
 | `vst3_host`                       | `IHostedPlugin`/`Vst3EffectBlock` (block type `"vst3"`) + `loadVst3Plugin()`; `Vst3PluginHost` (real hosting, built only when `AUDIO_ENGINE_WITH_VST3` is on) or a stub that throws a clear error otherwise -- see "VST3 plugin hosting" above |
 | `preset_switcher`              | Glitch-free crossfade between an "old" and "next" already-prepared processing chain |
-| `resource_manager`                | Owns the one currently-loaded `EngineChain` (NAM + IR + effects); loading a new preset releases the previous one's resources |
+| `resource_manager`                | Owns the one currently-loaded `EngineChain` (NAM + IR + effects); building the next chain reuses the running amp/cab when their asset is unchanged, and installing it releases whatever the previous chain held that wasn't reused |
 | `engine_state`                      | Dispatches one parsed control-socket command against a `ResourceManager` + bypass/crossfade/active-preset state; `processAudioBlock` runs the current chain over one real-time audio block |
 | `control_socket`                      | Unix domain socket server: newline-delimited JSON in, newline-delimited JSON reply out |
 | `audio_io_backend`                      | `IAudioIoBackend` interface + `AudioCallback`/`AudioIoConfig` -- the real-time-audio-device seam (see "Real-time audio I/O" below) |
@@ -1013,7 +1018,10 @@ simulations in parallel explicitly out of scope for V1 -- so exactly one
 model + one IR should ever be resident. `ResourceManager::loadPreset`
 replaces the current `EngineChain` (a single `std::unique_ptr`) wholesale;
 the previous chain's `shared_ptr<INamModel>`/`shared_ptr<IrHandle>` are
-dropped as part of that replacement.
+dropped as part of that replacement -- unless the new chain reuses the same
+amp or cab, in which case that one instance simply carries over (still one
+resident). While a rig change is loading, the incoming amp/cab briefly
+coexist with the outgoing ones until the swap.
 
 This isn't just asserted by inspection: `tests/test_resource_manager.cpp`
 (`LoadingSequentialPresetsReleasesPreviousResources`) uses an

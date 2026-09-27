@@ -67,7 +67,7 @@ scripts/          Dev-machine testing tools that don't belong to any one
   (`CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`) — see "Audio engine wiring" in
   control-daemon/README.md, including asset re-registration on an engine
   reconnect and `engine_error` surfacing when the engine rejects a load.
-- `audio-engine`: **V1 built and tested** (151 passing tests by default;
+- `audio-engine`: **V1 built and tested** (158 passing tests by default;
   re-run `ctest --test-dir audio-engine/build` for the current count) —
   real DSP, WAV/IR loading, and preset-switching logic, now including three
   modelled stompbox pedals (`big_muff`/`tube_screamer`/`noise_gate`, ported
@@ -86,9 +86,10 @@ scripts/          Dev-machine testing tools that don't belong to any one
   audio-engine/README.md; what the Raspberry Pi build itself uses
   (PortAudio again, ALSA, or JUCE) is still open, but `IAudioIoBackend`
   means that's a new backend behind an existing interface, not a rewrite.
-  Crossfade-on-switch is not yet wired into the real-time path, and every
-  preset switch -- even within a rig -- currently rebuilds the whole chain,
-  amp and cab included (known gaps, see audio-engine/README.md and
+  A preset switch within a rig keeps the loaded amp and cab (only a rig
+  change loads them), and loading never blocks the audio thread;
+  crossfade-on-switch is not yet wired in and effect blocks are still
+  rebuilt on each switch (see audio-engine/README.md and
   docs/open-questions.md #5).
 - `mobile-app`: **V1 built and tested** (passing via `flutter test`,
   `flutter analyze` clean as of this writing — this environment has no

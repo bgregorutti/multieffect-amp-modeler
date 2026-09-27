@@ -58,12 +58,13 @@ one-line-per-component snapshot, not the source of truth for numbers.
   `next_preset`/`prev_preset`, the latter never crossing a rig boundary).
   The audio engine is kept ignorant of the split: the daemon flattens
   rig + preset into a `ResolvedPreset` and sends the exact chain to play.
-  **Not yet realised in the engine:** `ResourceManager::loadPreset`
-  rebuilds the whole chain on every `load_preset` — re-reading the `.nam`
-  and IR from disk even when only an effect toggled — while holding the
-  lock the audio callback needs, so today an in-rig preset switch costs the
-  same as a rig switch. The data model and daemon side are done; the engine
-  side is tracked in `docs/open-questions.md` #5.
+  In the engine: when a new chain uses the same `.nam` and IR as the one
+  playing, `ResourceManager::buildChain` keeps that running amp and cab
+  instead of reading them again, and any loading happens without holding
+  the lock the audio callback needs. Effect blocks are still rebuilt on
+  each preset switch (cheap, no disk, but their state such as a delay tail
+  resets), VST3 blocks still reload, and there's no crossfade yet — see
+  `docs/open-questions.md` #5.
   See "Rigs and presets" in `control-daemon/README.md` and "Shared data
   model" in `audio-engine/README.md`.
 

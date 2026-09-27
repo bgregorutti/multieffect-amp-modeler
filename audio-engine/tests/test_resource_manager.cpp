@@ -26,10 +26,13 @@ struct CountingNamModel : public INamModel {
     ~CountingNamModel() override { --live_; }
 
     const NamModelMetadata& metadata() const override { return metadata_; }
-    void prepare(double) override {}
+    void prepare(double) override {
+        if (prepareCount) ++*prepareCount;
+    }
     void process(float*, std::size_t) override {}
 
     std::atomic<int>& live_;
+    std::atomic<int>* prepareCount = nullptr;
     NamModelMetadata metadata_;
 };
 
@@ -68,9 +71,12 @@ public:
     std::atomic<int> totalIrLoaded{0};
     std::atomic<int> liveVst3Count{0};
     std::atomic<int> totalVst3Loaded{0};
+    std::atomic<int> namPrepareCount{0};
 
     std::shared_ptr<INamModel> loadNam(const std::string&) override {
-        return std::make_shared<CountingNamModel>(liveNamCount, totalNamLoaded);
+        auto model = std::make_shared<CountingNamModel>(liveNamCount, totalNamLoaded);
+        model->prepareCount = &namPrepareCount;
+        return model;
     }
     std::shared_ptr<IrHandle> loadIr(const std::string&, double) override {
         return std::make_shared<CountingIrHandle>(liveIrCount, totalIrLoaded);
@@ -607,4 +613,136 @@ TEST(ResourceManager, CreateEffectBlockFallsBackToPassthroughForUnknownType) {
     std::vector<float> expected = buf;
     block->process(buf);
     EXPECT_EQ(buf, expected);
+}
+
+// --- Reusing the amp and cab across preset switches ---------------------
+
+namespace {
+
+Asset makeAsset(const std::string& id, AssetKind kind) {
+    Asset a;
+    a.id = id;
+    a.kind = kind;
+    a.filename = id;
+    a.stored_path = "/fake/" + id;
+    return a;
+}
+
+// Two presets of one rig: same amp and cab, a distortion that only the
+// second one switches on -- exactly what the daemon sends when stepping
+// presets within a rig.
+Preset makeRigPreset(const std::string& id, const std::string& namAssetId, const std::string& irAssetId,
+                     bool distOn) {
+    Preset p;
+    p.id = id;
+    p.name = id;
+    p.rig_id = "rig1";
+    p.rig_name = "Rig 1";
+    p.blocks.push_back(makeBlock("amp", "nam", namAssetId));
+    p.blocks.push_back(makeBlock("dist", "tube_screamer", std::nullopt, distOn));
+    p.blocks.push_back(makeBlock("cab", "ir", irAssetId));
+    return p;
+}
+
+}  // namespace
+
+TEST(ResourceManager, PresetSwitchWithSameAmpAndCabReadsNoAssetsAgain) {
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+    manager.registerAsset(makeAsset("nam1", AssetKind::Nam));
+    manager.registerAsset(makeAsset("ir1", AssetKind::Ir));
+
+    manager.loadPreset(makeRigPreset("clean", "nam1", "ir1", /*distOn=*/false));
+    EngineChain* first = manager.currentChain();
+    INamModel* amp = first->namModel.get();
+    ConvolutionEngine* cab = first->cabinet.get();
+    EXPECT_EQ(first->blocksById.count("dist"), 0u);
+
+    manager.loadPreset(makeRigPreset("drive", "nam1", "ir1", /*distOn=*/true));
+    EngineChain* second = manager.currentChain();
+
+    EXPECT_EQ(loader->totalNamLoaded.load(), 1) << "the amp was read again on a preset switch";
+    EXPECT_EQ(loader->totalIrLoaded.load(), 1) << "the cab was read again on a preset switch";
+    EXPECT_EQ(second->namModel.get(), amp) << "not the same running amp instance";
+    EXPECT_EQ(second->cabinet.get(), cab) << "not the same running cab instance";
+    EXPECT_EQ(loader->liveNamCount.load(), 1);
+    EXPECT_EQ(loader->liveIrCount.load(), 1);
+
+    // The effect side did change: the distortion is now in the chain, in
+    // the preset's order between amp and cab.
+    ASSERT_EQ(second->processOrder.size(), 3u);
+    EXPECT_EQ(second->processOrder[0], amp);
+    EXPECT_EQ(second->processOrder[1], second->blocksById.at("dist"));
+    EXPECT_EQ(second->processOrder[2], cab);
+}
+
+TEST(ResourceManager, ReusedAmpIsNotPreparedAgain) {
+    // prepare() on a real NAM model resets and prewarms it (~10-15ms) --
+    // doing that on every preset switch would both cost time and cut the
+    // amp's running state.
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+    manager.registerAsset(makeAsset("nam1", AssetKind::Nam));
+    manager.registerAsset(makeAsset("ir1", AssetKind::Ir));
+
+    manager.loadPreset(makeRigPreset("a", "nam1", "ir1", false));
+    EXPECT_EQ(loader->namPrepareCount.load(), 1);
+    manager.loadPreset(makeRigPreset("b", "nam1", "ir1", true));
+    manager.loadPreset(makeRigPreset("c", "nam1", "ir1", false));
+    EXPECT_EQ(loader->namPrepareCount.load(), 1);
+}
+
+TEST(ResourceManager, ChangingOnlyTheAmpReloadsOnlyTheAmp) {
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+    manager.registerAsset(makeAsset("nam1", AssetKind::Nam));
+    manager.registerAsset(makeAsset("nam2", AssetKind::Nam));
+    manager.registerAsset(makeAsset("ir1", AssetKind::Ir));
+
+    manager.loadPreset(makeRigPreset("a", "nam1", "ir1", false));
+    ConvolutionEngine* cab = manager.currentChain()->cabinet.get();
+    manager.loadPreset(makeRigPreset("b", "nam2", "ir1", false));
+
+    EXPECT_EQ(loader->totalNamLoaded.load(), 2);
+    EXPECT_EQ(loader->totalIrLoaded.load(), 1);
+    EXPECT_EQ(manager.currentChain()->cabinet.get(), cab);
+    EXPECT_EQ(loader->liveNamCount.load(), 1) << "the previous amp was not released";
+}
+
+TEST(ResourceManager, DroppingTheCabFromTheChainReleasesIt) {
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+    manager.registerAsset(makeAsset("nam1", AssetKind::Nam));
+    manager.registerAsset(makeAsset("ir1", AssetKind::Ir));
+
+    manager.loadPreset(makeRigPreset("a", "nam1", "ir1", false));
+    Preset noCab = makeRigPreset("b", "nam1", "ir1", false);
+    noCab.blocks.back().enabled = false;
+    manager.loadPreset(noCab);
+
+    EXPECT_EQ(manager.currentChain()->cabinet, nullptr);
+    EXPECT_EQ(loader->liveIrCount.load(), 0);
+
+    // Switching it back on is a fresh load -- there's no cache of assets
+    // that aren't in the current chain.
+    manager.loadPreset(makeRigPreset("c", "nam1", "ir1", false));
+    EXPECT_EQ(loader->totalIrLoaded.load(), 2);
+    EXPECT_EQ(loader->totalNamLoaded.load(), 1);
+}
+
+TEST(ResourceManager, BuildChainLeavesTheCurrentChainInPlace) {
+    auto loader = std::make_shared<CountingAssetLoader>();
+    ResourceManager manager(loader);
+    manager.registerAsset(makeAsset("nam1", AssetKind::Nam));
+    manager.registerAsset(makeAsset("ir1", AssetKind::Ir));
+    manager.loadPreset(makeRigPreset("a", "nam1", "ir1", false));
+
+    auto next = manager.buildChain(makeRigPreset("b", "nam1", "ir1", true));
+    EXPECT_EQ(manager.currentChain()->presetId, "a");
+    EXPECT_EQ(next->presetId, "b");
+
+    auto previous = manager.installChain(std::move(next));
+    EXPECT_EQ(manager.currentChain()->presetId, "b");
+    ASSERT_NE(previous, nullptr);
+    EXPECT_EQ(previous->presetId, "a");
 }

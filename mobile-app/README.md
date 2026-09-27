@@ -30,9 +30,9 @@ The split that decides where each control lives:
 
 This mirrors a real pedalboard, and it is what lets preset switching be
 cheap: every preset of a rig has the same blocks, so switching can toggle them
-rather than construct and tear down DSP. The engine doesn't take advantage of
-that yet -- it still rebuilds the whole chain on every switch -- which is the
-work tracked in `docs/open-questions.md` #5.
+rather than reload the amp and cab. The engine does this today for the amp
+and cab (kept running across a preset switch); effect blocks are still
+rebuilt on each switch -- see `docs/open-questions.md` #5.
 
 The earlier arrangement let you add effects from inside a preset. Because the
 chain is shared, an effect added in one preset appeared -- switched off -- in

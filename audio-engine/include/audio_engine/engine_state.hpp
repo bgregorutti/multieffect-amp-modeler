@@ -31,19 +31,24 @@ public:
     // {"ok": true, "cmd": ..., ...} or {"ok": false, "code": ..., "message": ...}.
     // Never throws: any exception from preset parsing / resource loading
     // is caught and turned into an "ok": false reply.
+    //
+    // Commands are serialized against each other (one socket thread per
+    // connection can call this concurrently), but only take the audio lock
+    // for the moment they touch what processAudioBlock reads. In particular
+    // load_preset builds the new chain -- disk reads, NAM prepare -- without
+    // it, then takes it just to swap the chain in.
     nlohmann::json handleCommand(const nlohmann::json& command);
 
     // Runs the currently loaded chain over `buffer` in place (`numSamples`
     // valid samples), or leaves it untouched (passthrough) if bypassed or
     // if no preset has been loaded yet. Meant to be called once per block
-    // from a real-time audio callback (see IAudioIoBackend/main.cpp) --
-    // takes the same mutex as handleCommand so a control-socket command
-    // (e.g. load_preset) can never race a concurrent audio block. Real-time
-    // caveat: EngineChain::process performs no allocation/I/O, but this
-    // mutex lock is not itself real-time-safe (a command could in theory
-    // hold it briefly); acceptable for dev/test use on a normal OS
-    // scheduler, flagged here rather than hidden -- see README.md "Known
-    // limitations" for the production follow-up (a lock-free handoff).
+    // from a real-time audio callback (see IAudioIoBackend/main.cpp). Takes
+    // the audio mutex, which commands hold only briefly (a pointer swap, a
+    // flag, one live param) so a control-socket command can never race a
+    // concurrent audio block. Real-time caveat: EngineChain::process
+    // performs no allocation/I/O, but this mutex lock is not itself
+    // real-time-safe; acceptable on a normal OS scheduler, flagged here
+    // rather than hidden -- a lock-free handoff is the production follow-up.
     void processAudioBlock(float* buffer, std::size_t numSamples);
 
     // --- introspection, used by get_state and directly by tests ---
@@ -63,6 +68,9 @@ private:
     nlohmann::json handleListBlockTypes() const;
     nlohmann::json handleGetState() const;
 
+    // commandMutex_ serializes handleCommand; mutex_ guards what the audio
+    // thread reads (the current chain, bypass_) and is always taken second.
+    std::mutex commandMutex_;
     mutable std::mutex mutex_;
     ResourceManager resourceManager_;
     bool bypass_ = false;

@@ -105,17 +105,26 @@ ResourceManager::ResourceManager(std::shared_ptr<IAssetLoader> loader, double sa
 
 void ResourceManager::registerAsset(const Asset& asset) { assets_[asset.id] = asset; }
 
-void ResourceManager::loadPreset(const Preset& preset) {
+namespace {
+
+// Identity of a loaded asset: the id alone isn't enough if an id is ever
+// re-registered pointing at a different file.
+std::string assetKey(const Asset& asset) { return asset.id + '\n' + asset.stored_path; }
+
+}  // namespace
+
+std::unique_ptr<EngineChain> ResourceManager::buildChain(const Preset& preset) const {
     auto chain = std::make_unique<EngineChain>();
     chain->presetId = preset.id;
+    const EngineChain* previous = current_.get();
 
     // Asset references live on the blocks now (the daemon's ResolvedBlock
     // carries its own asset_id), so validate every one of them up front --
     // including blocks that are currently disabled, since a preset that
     // names an asset the engine was never told about is a desync with the
     // daemon regardless of whether that block happens to be switched on.
-    // Doing it before any loading also means an unknown id leaves the
-    // previously loaded chain untouched rather than half-replaced.
+    // Doing it before any loading also means an unknown id fails before
+    // any disk work is done.
     for (const auto& blockSpec : preset.blocks) {
         if (!blockSpec.asset_id.has_value()) continue;
         if (assets_.find(*blockSpec.asset_id) == assets_.end()) {
@@ -149,8 +158,15 @@ void ResourceManager::loadPreset(const Preset& preset) {
                                           "block -- only one amp channel may be active at a time");
             }
             const Asset& asset = assets_.at(*blockSpec.asset_id);
-            chain->namModel = loader_->loadNam(asset.stored_path);
+            const std::string key = assetKey(asset);
+            if (previous != nullptr && previous->namModel && previous->namAssetKey == key) {
+                chain->namModel = previous->namModel;  // same amp: keep it running, no reload
+            } else {
+                chain->namModel = loader_->loadNam(asset.stored_path);
+                if (chain->namModel) chain->namModel->prepare(sampleRate_);
+            }
             if (chain->namModel) {
+                chain->namAssetKey = key;
                 chain->processOrder.push_back(chain->namModel.get());
                 chain->blocksById[blockSpec.id] = chain->namModel.get();
             }
@@ -165,9 +181,17 @@ void ResourceManager::loadPreset(const Preset& preset) {
                                           "block -- only one cabinet may be active at a time");
             }
             const Asset& asset = assets_.at(*blockSpec.asset_id);
-            chain->ir = loader_->loadIr(asset.stored_path, sampleRate_);
-            if (!chain->ir) continue;
-            chain->cabinet = std::make_unique<ConvolutionEngine>(chain->ir->samples);
+            const std::string key = assetKey(asset);
+            if (previous != nullptr && previous->cabinet && previous->irAssetKey == key) {
+                chain->ir = previous->ir;  // same cab: keep it running, no reload
+                chain->cabinet = previous->cabinet;
+            } else {
+                chain->ir = loader_->loadIr(asset.stored_path, sampleRate_);
+                if (!chain->ir) continue;
+                chain->cabinet = std::make_shared<ConvolutionEngine>(chain->ir->samples);
+                chain->cabinet->prepare(sampleRate_);
+            }
+            chain->irAssetKey = key;
             chain->processOrder.push_back(chain->cabinet.get());
             chain->blocksById[blockSpec.id] = chain->cabinet.get();
             continue;
@@ -176,28 +200,29 @@ void ResourceManager::loadPreset(const Preset& preset) {
         // "vst3" is an ordinary chain position like any effect -- unlike
         // "nam"/"ir" it can appear any number of times in one rig, so (unlike
         // those) it has no dedicated EngineChain field and just lands in
-        // `effects` alongside gain/eq/delay blocks.
+        // `effects` alongside gain/eq/delay blocks. Not reused across chains
+        // yet: a preset switch reloads it.
         if (blockSpec.type == "vst3") {
             if (!blockSpec.asset_id.has_value()) continue;
             const Asset& asset = assets_.at(*blockSpec.asset_id);
             chain->effects.push_back(loader_->loadVst3(asset.stored_path));
-            chain->processOrder.push_back(chain->effects.back().get());
-            chain->blocksById[blockSpec.id] = chain->effects.back().get();
-            continue;
+        } else {
+            chain->effects.push_back(createEffectBlock(blockSpec));
         }
-
-        chain->effects.push_back(createEffectBlock(blockSpec));
-        chain->processOrder.push_back(chain->effects.back().get());
-        chain->blocksById[blockSpec.id] = chain->effects.back().get();
+        EffectBlock* block = chain->effects.back().get();
+        block->prepare(sampleRate_);
+        chain->processOrder.push_back(block);
+        chain->blocksById[blockSpec.id] = block;
     }
 
-    chain->prepare(sampleRate_);
-
-    // Replacing this pointer drops the old chain's shared_ptrs (namModel,
-    // ir) here; if nothing else holds a reference, their destructors run
-    // synchronously, before this call returns -- see
-    // test_resource_manager.cpp.
-    current_ = std::move(chain);
+    return chain;
 }
+
+std::unique_ptr<EngineChain> ResourceManager::installChain(std::unique_ptr<EngineChain> chain) {
+    std::swap(current_, chain);
+    return chain;
+}
+
+void ResourceManager::loadPreset(const Preset& preset) { installChain(buildChain(preset)); }
 
 }  // namespace audio_engine

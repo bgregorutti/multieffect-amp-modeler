@@ -182,9 +182,10 @@ expensive path (a different amp/cab means the engine reloads a NAM model and
 re-partitions an IR) -- the footswitch mapping reflects this with separate
 `next_rig`/`prev_rig` vs. `next_preset`/`prev_preset` actions, and
 preset-stepping deliberately never crosses into another rig (see
-`FootswitchAction` below). The daemon side of this is complete, but the
-engine doesn't exploit it yet: every `load_preset` rebuilds the full chain,
-amp and cab included -- see `docs/open-questions.md` #5.
+`FootswitchAction` below). The daemon still sends a full `load_preset` for
+either; the engine keeps the running amp and cab when they're unchanged, so
+an in-rig switch reads nothing from disk -- see "What a preset switch
+reloads" in `audio-engine/README.md`.
 
 Asset references (`asset_id`) live on individual blocks, not on the preset
 or rig as a whole -- an amp block points at a `.nam` asset, a cab block at
@@ -380,9 +381,8 @@ Presets deliberately never step across a rig boundary: a preset's block ids
 only mean anything against its own rig's chain, so a footswitch press that
 silently swapped the amp mid-song would be a bug, not a feature. `rig`
 changes are the expensive path (NAM model reload + IR re-partitioning);
-`preset` changes within a rig are designed to only flip enable flags --
-though until the engine side of that lands (`docs/open-questions.md` #5),
-both currently go through the same full `load_preset` rebuild.
+`preset` changes within a rig keep the loaded amp and cab and only
+rebuild the effect blocks.
 
 ### HTTP: uploading a `.nam`/IR binary
 
