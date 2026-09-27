@@ -28,6 +28,12 @@ WIFI_IFACE="wlan0"
 SKIP_AP="false"
 ENABLE_RT_KERNEL="false"
 SKIP_BUILD="false"
+# NetworkManager profile name for the pedal's own AP. Also the name this
+# script borrows the radio back from when it needs internet (see step 0b).
+AP_CON_NAME="multieffect-ap"
+# Client Wi-Fi profile to borrow the radio for when the AP has it and we
+# need internet. Empty = auto-detect (any Wi-Fi profile that isn't the AP).
+CLIENT_WIFI=""
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -49,6 +55,15 @@ Options:
                            broadcast. No default -- set it explicitly, or
                            pre-set it yourself via 'raspi-config'.
   --wifi-iface IFACE      Wi-Fi interface to turn into an AP (default: ${WIFI_IFACE})
+  --client-wifi NAME      NetworkManager profile for the *client* Wi-Fi
+                           network (your home/dev network). When the pedal's
+                           AP already holds the radio and there's no
+                           internet, this script borrows the radio for that
+                           network to install packages, then hands it back.
+                           Default: auto-detect any Wi-Fi profile that isn't
+                           the AP's. Disconnects you mid-run if you're on
+                           the AP -- it re-execs itself detached so that's
+                           safe; see deploy/README.md.
   --skip-ap               Don't touch Wi-Fi/NetworkManager at all (use this
                            if you're managing networking yourself, or
                            testing this script on a non-Pi machine).
@@ -79,9 +94,14 @@ if [[ -f "${REPO_DIR}/deploy/config.env" ]]; then
   source "${REPO_DIR}/deploy/config.env"
 fi
 
+# Kept verbatim so step 0b can re-exec this script detached with the same
+# options it was originally invoked with.
+ORIGINAL_ARGS=("$@")
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ssid) WIFI_SSID="$2"; shift 2 ;;
+    --client-wifi) CLIENT_WIFI="$2"; shift 2 ;;
     --wifi-password) WIFI_PASSWORD="$2"; shift 2 ;;
     --wifi-country) WIFI_COUNTRY="$2"; shift 2 ;;
     --wifi-iface) WIFI_IFACE="$2"; shift 2 ;;
@@ -105,6 +125,118 @@ case "$ARCH" in
 esac
 
 log "repo directory: ${REPO_DIR}"
+
+# --------------------------------------------------------------------------
+# 0b. Internet access vs. the pedal's own Wi-Fi AP
+#
+#     Once step 7 has turned ${WIFI_IFACE} into the pedal's AP, that AP has
+#     no uplink of its own, so the Pi has no internet -- and the profile's
+#     `autoconnect yes` means it re-claims the radio on every boot. A
+#     redeploy then can't apt-get anything, and on a Pi whose Ethernet isn't
+#     working there's no second way in either: you're down to a keyboard and
+#     a monitor. (A real deploy hit exactly that.) So borrow the radio back
+#     for the client Wi-Fi network while packages are needed, then hand it
+#     straight back.
+#
+#     Two hazards this has to survive:
+#       * Dropping the AP kills any SSH session running over it -- very
+#         likely *this* one. Bash would take SIGHUP mid-apt-get and the AP
+#         would never come back. So re-exec detached under systemd first,
+#         where losing the connection is harmless.
+#       * Anything can fail between "AP down" and "AP back up", so restoring
+#         it is an EXIT/HUP/INT/TERM trap, not just a line at the end of
+#         step 7.
+# --------------------------------------------------------------------------
+AP_BORROWED="false"
+
+have_internet() {
+  # DNS resolution stands in for "apt can work". It fails in exactly the
+  # state we care about: the AP's own dnsmasq answers on the pedal network
+  # but has no upstream to forward to.
+  timeout 5 getent hosts deb.debian.org >/dev/null 2>&1
+}
+
+ap_is_active() {
+  nmcli -t -f NAME connection show --active 2>/dev/null \
+    | grep -qx "${AP_CON_NAME}"
+}
+
+detect_client_wifi() {
+  # Any Wi-Fi profile that isn't ours; on a Pi set up per deploy/README.md
+  # step 1 that's the home/dev network the imager configured.
+  nmcli -t -f NAME,TYPE connection show 2>/dev/null \
+    | awk -F: -v ap="${AP_CON_NAME}" \
+        '$2 == "802-11-wireless" && $1 != ap { print $1; exit }'
+}
+
+restore_ap() {
+  [[ "${AP_BORROWED}" == "true" ]] || return 0
+  AP_BORROWED="false"
+  log "handing ${WIFI_IFACE} back to the AP '${WIFI_SSID}'"
+  nmcli connection up "${AP_CON_NAME}" >/dev/null 2>&1 \
+    || warn "could not bring '${AP_CON_NAME}' back up -- run" \
+            "'sudo nmcli connection up ${AP_CON_NAME}' from a console."
+}
+
+# Idempotent (guarded on AP_BORROWED), so running from both a signal trap and
+# the EXIT trap is harmless. The signal traps exit deliberately rather than
+# letting bash resume: carrying on with the AP restored but the internet gone
+# would just fail the next apt-get halfway through anyway.
+trap restore_ap EXIT
+trap 'restore_ap; die "interrupted (SIGHUP) -- AP restored, nothing further applied"' HUP
+trap 'restore_ap; die "interrupted (SIGINT) -- AP restored, nothing further applied"' INT
+trap 'restore_ap; die "interrupted (SIGTERM) -- AP restored, nothing further applied"' TERM
+
+if command -v nmcli >/dev/null 2>&1 && ap_is_active && ! have_internet; then
+  [[ -n "${CLIENT_WIFI}" ]] || CLIENT_WIFI="$(detect_client_wifi)"
+
+  if [[ -z "${CLIENT_WIFI}" ]]; then
+    warn "the AP '${WIFI_SSID}' is holding ${WIFI_IFACE} and there is no" \
+         "internet, but no client Wi-Fi profile was found to borrow it for." \
+         "Package installs below will likely fail -- pass --client-wifi NAME," \
+         "or connect Ethernet."
+  else
+    # Re-exec detached before touching the radio, so losing the connection
+    # this is running over can't abandon the update half-applied.
+    if [[ -z "${INSTALL_DETACHED:-}" ]] && command -v systemd-run >/dev/null 2>&1; then
+      log "-------------------------------------------------------------"
+      log "This run needs internet, so it must take ${WIFI_IFACE} away from"
+      log "the AP '${WIFI_SSID}' for a few minutes. THAT WILL DISCONNECT YOU"
+      log "if you are connected over the AP right now."
+      log ""
+      log "Re-running detached as a systemd unit so your disconnection"
+      log "cannot kill the update midway. The AP is restored at the end"
+      log "automatically, even if a step fails in between."
+      log ""
+      log "  watch progress : journalctl -u multieffect-install -f"
+      log "  then reconnect : rejoin '${WIFI_SSID}' in a minute or two"
+      log "-------------------------------------------------------------"
+      exec systemd-run \
+        --unit=multieffect-install \
+        --collect \
+        --description="multieffect-amp-modeler install/redeploy" \
+        --property=WorkingDirectory="${REPO_DIR}" \
+        --setenv=INSTALL_DETACHED=1 \
+        "${BASH_SOURCE[0]}" "${ORIGINAL_ARGS[@]}"
+    fi
+
+    log "no internet and AP '${WIFI_SSID}' holds ${WIFI_IFACE}: borrowing it" \
+        "for client Wi-Fi '${CLIENT_WIFI}'"
+    nmcli connection down "${AP_CON_NAME}" >/dev/null 2>&1 || true
+    # Set before `up` so a failure there still restores the AP via the trap.
+    AP_BORROWED="true"
+    nmcli connection up "${CLIENT_WIFI}" >/dev/null 2>&1 \
+      || warn "could not activate client Wi-Fi '${CLIENT_WIFI}'"
+
+    for _ in $(seq 1 20); do
+      have_internet && break
+      sleep 2
+    done
+    have_internet \
+      || warn "still no internet after switching to '${CLIENT_WIFI}' --" \
+              "package installs may fail. The AP will be restored regardless."
+  fi
+fi
 
 # --------------------------------------------------------------------------
 # 1. System packages
@@ -256,20 +388,23 @@ else
     rfkill unblock wifi || true
 
     log "configuring Wi-Fi AP '${WIFI_SSID}' on ${WIFI_IFACE} via NetworkManager"
-    nmcli connection delete multieffect-ap >/dev/null 2>&1 || true
+    nmcli connection delete "${AP_CON_NAME}" >/dev/null 2>&1 || true
     nmcli connection add \
       type wifi \
       ifname "${WIFI_IFACE}" \
-      con-name multieffect-ap \
+      con-name "${AP_CON_NAME}" \
       autoconnect yes \
       ssid "${WIFI_SSID}"
-    nmcli connection modify multieffect-ap \
+    nmcli connection modify "${AP_CON_NAME}" \
       mode ap \
       802-11-wireless.band bg \
       ipv4.method shared \
       wifi-sec.key-mgmt wpa-psk \
       wifi-sec.psk "${WIFI_PASSWORD}"
-    nmcli connection up multieffect-ap
+    nmcli connection up "${AP_CON_NAME}"
+    # Step 7 has just (re)created and activated the AP itself, so there's
+    # nothing left for the step-0b trap to restore on the way out.
+    AP_BORROWED="false"
 
     log "Wi-Fi AP is up: SSID '${WIFI_SSID}'"
     if [[ "${GENERATED_PASSWORD}" == "true" ]]; then

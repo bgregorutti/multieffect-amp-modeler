@@ -92,6 +92,11 @@ surprise:
   doesn't kill it partway through -- reattach afterward to see the rest of
   the output.
 
+On *later* re-runs (when the AP already exists and owns the radio) the
+script detaches itself automatically for exactly this reason -- see
+"Redeploying after code changes". It's only this first run, which still has
+a working uplink when it starts, where you have to think about it yourself.
+
 Either way, set an explicit `WIFI_PASSWORD` in `deploy/config.env` (rather
 than leaving it blank) so you're never dependent on catching that one log
 line live -- and re-runs stay idempotent instead of silently rotating the
@@ -238,6 +243,30 @@ cd multieffect-amp-modeler
 git pull
 sudo ./deploy/install.sh --skip-ap    # skip-ap: no need to touch networking again
 ```
+
+**You will be disconnected partway through, and that's expected.** Once the
+pedal's AP owns the Wi-Fi radio, the Pi has no internet of its own — the AP
+serves its own network, it doesn't uplink anywhere — so a redeploy that needs
+packages has nowhere to fetch them from. `install.sh` handles this itself
+(step 0b): if the AP is active and there's no internet, it borrows the radio
+back for your client Wi-Fi network, does its work, and hands it straight back
+to the AP at the end.
+
+Three things make that safe to run while you're connected over the AP:
+
+- **It re-execs itself detached** as a transient systemd unit before touching
+  the radio, so your connection dropping can't kill the update halfway.
+  Follow along with `journalctl -u multieffect-install -f`, and rejoin the
+  pedal's Wi-Fi a minute or two later.
+- **Restoring the AP is a trap**, not just the last line — if a build fails,
+  or the run is interrupted, the AP still comes back. You don't get stranded
+  with no AP *and* no SSH.
+- **The client network is auto-detected** (any Wi-Fi profile that isn't the
+  AP's). If the Pi knows more than one, name it: `--client-wifi NAME`, or set
+  `CLIENT_WIFI` in `deploy/config.env`. `nmcli connection show` lists them.
+
+If the Pi has working Ethernet, none of this triggers — there's already an
+uplink, so the AP is left alone entirely and your SSH session survives.
 
 ## Uninstalling
 
