@@ -17,11 +17,18 @@ RestartSec=2
 # Hardening. The engine only ever READS uploaded .nam/IR files (never
 # writes into __DATA_DIR__ -- the control daemon owns writing there), so
 # this gets ReadOnlyPaths rather than control-daemon's ReadWritePaths.
+# ProtectHome=true (rather than "read-only") would make /home -- and this
+# checkout, if it lives under a user's home directory as deploy/README.md's
+# own "git clone" step puts it -- entirely invisible to this service, not
+# just unwritable: WorkingDirectory/ExecStart above would fail to resolve
+# at all (systemd status=203/EXEC), not merely refuse to write. "read-only"
+# still denies writes under /home, which is all the hardening intent here
+# actually needs.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadOnlyPaths=__DATA_DIR__
-ProtectHome=true
+ProtectHome=read-only
 
 [Install]
 WantedBy=multi-user.target
