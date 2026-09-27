@@ -9,11 +9,22 @@ import 'screens/connection_screen.dart';
 import 'screens/footswitch_mapping_screen.dart';
 import 'screens/preset_list_screen.dart';
 
-/// Default daemon location. Real deployments will want this configurable
-/// (e.g. a settings screen backed by shared_preferences) -- out of scope for
-/// this first pass, called out in the README.
-const kDefaultDaemonHost = '127.0.0.1';
-const kDefaultDaemonPort = 8765;
+/// Where the control daemon lives, overridable at build time:
+///
+///     flutter build apk --dart-define=DAEMON_HOST=192.168.1.42
+///
+/// The 127.0.0.1 default only works when the app and the daemon run on the
+/// same machine -- true for `flutter run -d chrome`/`-d web-server` on a dev
+/// box, but never on a phone, where 127.0.0.1 is the phone itself. Point it
+/// at the pedal's LAN address instead; the daemon already binds 0.0.0.0.
+///
+/// This is still build-time, so changing networks means rebuilding. A
+/// settings screen backed by shared_preferences is the real fix -- see the
+/// README's "Known limitations".
+const kDefaultDaemonHost =
+    String.fromEnvironment('DAEMON_HOST', defaultValue: '127.0.0.1');
+const kDefaultDaemonPort =
+    int.fromEnvironment('DAEMON_PORT', defaultValue: 8765);
 
 void main() {
   runApp(MultiEffectApp(

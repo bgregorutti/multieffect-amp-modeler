@@ -66,5 +66,21 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<!-- The pedal's control daemon is a LAN device speaking plain ws:// and
+	     http:// with no certificate to present, so there is no TLS to
+	     require. App Transport Security blocks cleartext by default.
+	     NSAllowsLocalNetworking permits it for local addresses only, which
+	     is strictly narrower than NSAllowsArbitraryLoads: connections to
+	     public hosts must still be HTTPS. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- Required from iOS 14: without it the first connection to a LAN
+	     address triggers a permission prompt with no explanation, and is
+	     denied outright if the string is missing. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Connects to your pedal on the local network to edit rigs and presets.</string>
 </dict>
 </plist>

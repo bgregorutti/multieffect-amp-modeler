@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The pedal's control daemon speaks plain ws:// and http:// on the local
+  network - it is an embedded device on your own LAN with no certificate to
+  present, so there is no TLS to require. Android 9 (API 28) blocks cleartext
+  by default, which would make every connection fail with no useful error.
+
+  This permits cleartext app-wide. Narrowing it to private address ranges is
+  not expressible here: <domain> matches hostnames, not CIDR blocks, and the
+  pedal's address is a bare IP that varies per network - so there is no fixed
+  host to name. The app only ever talks to the address it was built with
+  (DAEMON_HOST in lib/main.dart).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true"/>
+</network-security-config>

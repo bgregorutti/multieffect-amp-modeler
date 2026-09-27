@@ -1,8 +1,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The app is a remote control for the pedal's control daemon, reached
+         over the local network. Flutter only puts this permission in the
+         debug/profile manifests (for hot reload), so without it here a
+         release build installs fine and then silently fails every connection. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <application
         android:label="mobile_app"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config">
         <activity
             android:name=".MainActivity"
             android:exported="true"
