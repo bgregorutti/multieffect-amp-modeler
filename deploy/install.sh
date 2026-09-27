@@ -112,10 +112,18 @@ log "repo directory: ${REPO_DIR}"
 log "apt-get update && install build/runtime dependencies"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
+# dnsmasq-base is only a *Recommends* of network-manager, not a hard
+# dependency, so --no-install-recommends below skips it -- silently
+# breaking step 7's Wi-Fi AP: NetworkManager's ipv4.method=shared spawns
+# dnsmasq itself to actually hand out DHCP leases to connected clients,
+# so without it the AP still accepts Wi-Fi connections (WPA2 handshake
+# succeeds, nmcli shows "connected") but never gives a joining phone/laptop
+# an IP address at all. Stock Raspberry Pi OS images ship it regardless;
+# a minimal Debian install (this script's other target) does not.
 apt-get install -y --no-install-recommends \
   python3 python3-venv python3-pip \
   build-essential cmake pkg-config nlohmann-json3-dev \
-  network-manager \
+  network-manager dnsmasq-base \
   ca-certificates curl
 
 # --------------------------------------------------------------------------
