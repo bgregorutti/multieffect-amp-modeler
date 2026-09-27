@@ -238,8 +238,25 @@ script's own `--help` for the full picture, including `.vst3` bundles.
 
 ## Redeploying after code changes
 
+On a pedal whose AP owns the Wi-Fi radio, let the script do the `git pull`
+too -- run by hand it has no internet to reach the remote with (see below):
+
 ```bash
 cd multieffect-amp-modeler
+sudo ./deploy/install.sh --pull main --skip-ap    # name whichever branch you deploy
+```
+
+It asks before dropping the AP (pass `-y`/`--yes` to skip the prompt, which
+is also required when there's no terminal to ask on). The pull runs as the
+checkout's owner rather than root -- so git's dubious-ownership check doesn't
+trip and you don't end up with root-owned files -- refuses rather than
+clobbering uncommitted changes, and uses `--ff-only` so a diverged branch
+fails loudly instead of growing a merge commit.
+
+If the Pi already has an uplink (working Ethernet), the plain two-step form
+is fine too, since `git pull` can reach the network on its own:
+
+```bash
 git pull
 sudo ./deploy/install.sh --skip-ap    # skip-ap: no need to touch networking again
 ```
@@ -252,8 +269,11 @@ packages has nowhere to fetch them from. `install.sh` handles this itself
 back for your client Wi-Fi network, does its work, and hands it straight back
 to the AP at the end.
 
-Three things make that safe to run while you're connected over the AP:
+Four things make that safe to run while you're connected over the AP:
 
+- **It asks first.** The confirmation comes before anything changes, so
+  declining is a true no-op. It has to be asked *before* the detach below,
+  since that's the last moment there's still a terminal to ask on.
 - **It re-execs itself detached** as a transient systemd unit before touching
   the radio, so your connection dropping can't kill the update halfway.
   Follow along with `journalctl -u multieffect-install -f`, and rejoin the

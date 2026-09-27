@@ -34,6 +34,11 @@ AP_CON_NAME="multieffect-ap"
 # Client Wi-Fi profile to borrow the radio for when the AP has it and we
 # need internet. Empty = auto-detect (any Wi-Fi profile that isn't the AP).
 CLIENT_WIFI=""
+# Branch to fast-forward the checkout to before building (--pull BRANCH).
+# Empty = don't touch the checkout at all.
+PULL_BRANCH=""
+# Skip the interactive "this will disconnect you" confirmation (-y/--yes).
+ASSUME_YES="false"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -64,6 +69,16 @@ Options:
                            the AP's. Disconnects you mid-run if you're on
                            the AP -- it re-execs itself detached so that's
                            safe; see deploy/README.md.
+  --pull BRANCH           Fast-forward this checkout to origin/BRANCH before
+                           building, run as the checkout's owner (not root).
+                           Happens *after* the radio has been borrowed above,
+                           so this is the one-command way to update a pedal
+                           whose AP owns the Wi-Fi: a 'git pull' you run by
+                           hand beforehand has no internet to use. Refuses
+                           rather than clobbering uncommitted changes, and
+                           never creates a merge commit (--ff-only).
+  -y, --yes               Don't ask before dropping the AP (which disconnects
+                           you). Required when there's no terminal to ask on.
   --skip-ap               Don't touch Wi-Fi/NetworkManager at all (use this
                            if you're managing networking yourself, or
                            testing this script on a non-Pi machine).
@@ -102,6 +117,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --ssid) WIFI_SSID="$2"; shift 2 ;;
     --client-wifi) CLIENT_WIFI="$2"; shift 2 ;;
+    --pull)
+      [[ $# -ge 2 && "$2" != --* ]] \
+        || die "--pull requires a branch name, e.g. --pull main"
+      PULL_BRANCH="$2"; shift 2 ;;
+    -y|--yes) ASSUME_YES="true"; shift ;;
     --wifi-password) WIFI_PASSWORD="$2"; shift 2 ;;
     --wifi-country) WIFI_COUNTRY="$2"; shift 2 ;;
     --wifi-iface) WIFI_IFACE="$2"; shift 2 ;;
@@ -211,6 +231,24 @@ if command -v nmcli >/dev/null 2>&1 && ap_is_active && ! have_internet; then
       log "  watch progress : journalctl -u multieffect-install -f"
       log "  then reconnect : rejoin '${WIFI_SSID}' in a minute or two"
       log "-------------------------------------------------------------"
+
+      # Asked here, before the detach, because this is the last moment there
+      # is still a terminal to ask on -- and before anything has changed, so
+      # declining is a true no-op.
+      if [[ "${ASSUME_YES}" != "true" ]]; then
+        if [[ -t 0 ]]; then
+          printf '[deploy] Drop the AP and continue? [y/N] '
+          read -r REPLY_CONFIRM || REPLY_CONFIRM=""
+          case "${REPLY_CONFIRM}" in
+            y|Y|yes|YES) ;;
+            *) die "aborted at your request -- nothing changed, AP untouched." ;;
+          esac
+        else
+          die "this run needs to drop the AP '${WIFI_SSID}' but has no" \
+              "terminal to confirm on. Re-run with --yes to allow it."
+        fi
+      fi
+
       exec systemd-run \
         --unit=multieffect-install \
         --collect \
@@ -235,6 +273,63 @@ if command -v nmcli >/dev/null 2>&1 && ap_is_active && ! have_internet; then
     have_internet \
       || warn "still no internet after switching to '${CLIENT_WIFI}' --" \
               "package installs may fail. The AP will be restored regardless."
+  fi
+fi
+
+# --------------------------------------------------------------------------
+# 0c. Optional: fast-forward the checkout itself (--pull BRANCH)
+#
+#     Deliberately *after* step 0b: on a pedal whose AP owns the radio there
+#     is no internet until 0b has borrowed it back, so a `git pull` you run
+#     by hand beforehand can't reach the remote at all. Doing it here makes
+#     "update this pedal to the latest commit" a single command.
+#
+#     Runs as the checkout's owner rather than as root: root would both trip
+#     git's dubious-ownership check on a repo owned by someone else, and
+#     leave root-owned files behind that the owner's next `git pull` can't
+#     touch.
+# --------------------------------------------------------------------------
+if [[ -n "${PULL_BRANCH}" ]]; then
+  command -v git >/dev/null 2>&1 || die "--pull needs git installed"
+  REPO_OWNER="$(stat -c '%U' "${REPO_DIR}")"
+
+  git_as_owner() { sudo -u "${REPO_OWNER}" git -C "${REPO_DIR}" "$@"; }
+
+  # Refuse rather than silently discarding work in progress. deploy/config.env
+  # is gitignored, so a configured pedal is not "dirty" by virtue of that.
+  if [[ -n "$(git_as_owner status --porcelain)" ]]; then
+    die "the checkout at ${REPO_DIR} has uncommitted changes; --pull won't" \
+        "clobber them. Commit/stash them (as ${REPO_OWNER}), or re-run" \
+        "without --pull to build exactly what's there now."
+  fi
+
+  INSTALLER_BEFORE="$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')"
+
+  log "fetching origin as ${REPO_OWNER}"
+  git_as_owner fetch --prune origin \
+    || die "git fetch failed -- no internet, or the remote needs credentials" \
+           "this non-interactive run can't supply (an SSH key with a" \
+           "passphrase won't work here; an https remote or an agent-less key" \
+           "will)."
+
+  git_as_owner rev-parse --verify --quiet "refs/remotes/origin/${PULL_BRANCH}" >/dev/null \
+    || die "origin has no branch '${PULL_BRANCH}'"
+
+  log "fast-forwarding to origin/${PULL_BRANCH}"
+  git_as_owner checkout "${PULL_BRANCH}" \
+    || die "could not check out '${PULL_BRANCH}'"
+  # --ff-only: a deploy should never invent a merge commit, and should fail
+  # loudly if the local branch has diverged from the remote.
+  git_as_owner merge --ff-only "origin/${PULL_BRANCH}" \
+    || die "'${PULL_BRANCH}' has diverged from origin/${PULL_BRANCH} --" \
+           "resolve it by hand (as ${REPO_OWNER}); refusing to merge here."
+
+  log "now at $(git_as_owner log --oneline -1)"
+
+  if [[ "$(sha256sum "${BASH_SOURCE[0]}" | awk '{print $1}')" != "${INSTALLER_BEFORE}" ]]; then
+    warn "that pull changed deploy/install.sh itself, but this run is still" \
+         "executing the version it started with. Re-run install.sh to apply" \
+         "the new one."
   fi
 fi
 
