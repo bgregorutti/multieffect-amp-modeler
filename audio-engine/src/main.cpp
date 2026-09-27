@@ -1,6 +1,8 @@
 // Audio engine process entry point.
 //
 // Usage: audio_engine <control-socket-path> [--audio] [--block-size N]
+//                     [--device NAME]
+//        audio_engine --list-devices
 //
 // Starts the control socket server (see control_socket.hpp) bound to the
 // given Unix domain socket path and blocks forever, dispatching incoming
@@ -19,12 +21,19 @@
 // --block-size N overrides AudioIoConfig's default (64 samples, ~1.33ms
 // @ 48kHz) -- go higher if you hear crackling/dropouts, lower if your
 // machine has headroom and you want even less latency.
+//
+// --device NAME picks the audio interface by a case-insensitive substring
+// of its name instead of using the OS default. Required on a Pi, whose
+// ALSA default device is the onboard bcm2835 with no capture side at all
+// -- see AudioIoConfig::device. --list-devices prints the names to choose
+// from and exits; it needs no control socket, so it can be run on its own.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <csignal>
 #include <iostream>
+#include <string>
 #include <thread>
 
 #include "audio_engine/control_socket.hpp"
@@ -41,8 +50,27 @@ void handleSignal(int) { g_stopRequested.store(true); }
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Handled before the usage check below: --list-devices is a pure
+    // diagnostic that opens no socket and starts no engine, so requiring a
+    // socket path alongside it would be needless ceremony -- on a headless
+    // pedal this is the first thing you run after plugging an interface in.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--list-devices") {
+#ifdef AUDIO_ENGINE_WITH_PORTAUDIO
+            std::cout << audio_engine::PortAudioBackend::describeDevices();
+            return 0;
+#else
+            std::cerr << "audio-engine: --list-devices requires a build with "
+                         "-DAUDIO_ENGINE_WITH_PORTAUDIO=ON\n";
+            return 2;
+#endif
+        }
+    }
+
     if (argc < 2) {
-        std::cerr << "usage: " << argv[0] << " <control-socket-path> [--audio]\n";
+        std::cerr << "usage: " << argv[0]
+                  << " <control-socket-path> [--audio] [--block-size N] [--device NAME]\n"
+                  << "       " << argv[0] << " --list-devices\n";
         return 2;
     }
     const std::string socketPath = argv[1];
@@ -51,12 +79,15 @@ int main(int argc, char** argv) {
     // unconditionally below so a plain build still accepts (and ignores)
     // the flag rather than rejecting it as unrecognized.
     [[maybe_unused]] std::size_t blockSizeOverride = 0;  // 0 == use AudioIoConfig's default
+    [[maybe_unused]] std::string deviceName;              // empty == use the OS default device
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--audio") {
             wantAudio = true;
         } else if (arg == "--block-size" && i + 1 < argc) {
             blockSizeOverride = static_cast<std::size_t>(std::strtoul(argv[++i], nullptr, 10));
+        } else if (arg == "--device" && i + 1 < argc) {
+            deviceName = argv[++i];
         }
     }
 
@@ -86,6 +117,7 @@ int main(int argc, char** argv) {
         if (blockSizeOverride > 0) {
             config.blockSize = blockSizeOverride;
         }
+        config.device = deviceName;
         try {
             audioBackend.start(config, [&engineState](float* buffer, std::size_t numSamples) {
                 engineState.processAudioBlock(buffer, numSamples);
@@ -95,7 +127,8 @@ int main(int argc, char** argv) {
             server.stop();
             return 1;
         }
-        std::cerr << "audio-engine: streaming default audio device (sample rate "
+        std::cerr << "audio-engine: streaming input \"" << audioBackend.inputDeviceName()
+                  << "\" -> output \"" << audioBackend.outputDeviceName() << "\" (sample rate "
                   << config.sampleRate << " Hz, block size " << config.blockSize << ")\n";
         std::cerr << "audio-engine: negotiated latency: input "
                   << (audioBackend.inputLatencySeconds() * 1000.0) << " ms, output "

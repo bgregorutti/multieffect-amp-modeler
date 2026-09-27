@@ -64,10 +64,31 @@ cmake --build audio-engine/build-audio -j
 ./audio-engine/build-audio/audio_engine /tmp/audio_engine.sock --audio
 ```
 
-Set your external interface as the system default input/output device
-first (macOS: Audio MIDI Setup) -- device selection is deliberately just
-"the OS default" for now, not a name/index flag (see
-`portaudio_backend.hpp`).
+### Choosing the device
+
+With no `--device`, the engine opens whatever the OS currently calls the
+default input/output device -- on macOS, set your external interface as the
+system default first (Audio MIDI Setup). That is usually the right default
+on a dev machine and the wrong one on a Pi, where ALSA's default is the
+onboard bcm2835: it is **output-only**, so the engine fails to open an
+input and exits. Name the interface instead:
+
+```bash
+./audio-engine/build/audio_engine --list-devices     # no socket needed
+./audio-engine/build/audio_engine /tmp/ae.sock --audio --device "USB Audio"
+```
+
+`--device` takes a case-insensitive *substring* of the device name and
+matches the first device that also has the channels being asked for (so a
+playback-only device can't be picked up as the input). A substring rather
+than a card index on purpose: USB card numbering isn't stable across
+reboots, and this pedal is power-cut rather than shut down, so it has to
+come up correctly every time. On a deployed pedal this is set once via
+`deploy/install.sh --audio-device NAME` (or `AUDIO_DEVICE` in
+`deploy/config.env`), which bakes it into the systemd unit.
+
+When it can't match, the error lists every device it did see, which is
+normally enough to fix it without a second round-trip to the Pi.
 
 **Seam, not a hard dependency.** `IAudioIoBackend` (`audio_io_backend.hpp`)
 is the interface; `PortAudioBackend` is one implementation of it, built
@@ -245,10 +266,11 @@ time rather than played back as-is:
   here. See `tests/test_resample.cpp` and
   `Convolution.LoadsImpulseResponseFromWavFileResamplingToTargetRate`.
 * **NAM models**: metadata parsing records `sample_rate`, but nothing
-  reads it yet -- inference itself is stubbed (see deviation #2 below), so
-  there is no real forward pass to feed at the wrong rate today. A real
-  `INamModel` implementation will need to resample its input the same way
-  once inference exists.
+  reads it yet. Real inference now exists (`RealNamModel`, see "Real NAM
+  inference" below and deviation #2), so this *is* a live gap rather than a
+  moot one: a model captured at 44.1kHz driven at 48kHz runs its forward
+  pass at the wrong rate, which shifts its frequency response rather than
+  failing. Resampling the input per-model is a real follow-up.
 * **The live device** (`PortAudioBackend`, via `--audio`): opened at
   `EngineState::sampleRate()` (48kHz) directly -- if your audio interface
   can't run at 48kHz at all, `Pa_OpenStream` fails outright with a clear

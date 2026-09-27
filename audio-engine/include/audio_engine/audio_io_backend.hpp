@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <functional>
+#include <string>
 
 namespace audio_engine {
 
@@ -36,16 +37,34 @@ struct AudioIoConfig {
     // keep up (more OS scheduling jitter matters more at smaller blocks
     // on a general-purpose, non-RTOS scheduler) or wants to go lower.
     std::size_t blockSize = 64;
+
+    // Case-insensitive substring of the audio device's name to open for
+    // both capture and playback (e.g. "Scarlett", "USB Audio"). Empty --
+    // the default -- means "whatever the OS currently calls the default
+    // device", which is the right answer on a dev machine where you pick
+    // your interface in the OS's own sound settings.
+    //
+    // It is NOT the right answer on a Pi: ALSA's default device there is
+    // the onboard bcm2835, which has no capture side at all, so a USB
+    // interface has to be named explicitly or start() fails with "no
+    // default input audio device found". Matched as a name substring
+    // rather than taken as a card index on purpose -- USB card numbering
+    // isn't stable across boots, and a pedal has to come up correctly
+    // every single time it's switched on. See `audio_engine
+    // --list-devices` for the available names.
+    std::string device;
 };
 
 class IAudioIoBackend {
 public:
     virtual ~IAudioIoBackend() = default;
 
-    // Opens the system's default input/output device(s) per `config` and
-    // starts `callback` running on a real-time (or near-real-time) thread
-    // the backend owns. Throws std::runtime_error on failure to open or
-    // start the device. Calling start() while already running throws too.
+    // Opens the input/output device(s) selected by `config` -- the system
+    // defaults unless `config.device` names one -- and starts `callback`
+    // running on a real-time (or near-real-time) thread the backend owns.
+    // Throws std::runtime_error on failure to open or start the device,
+    // including when nothing matches `config.device`. Calling start()
+    // while already running throws too.
     virtual void start(const AudioIoConfig& config, AudioCallback callback) = 0;
 
     // Stops the callback and closes the device(s). Safe to call when not

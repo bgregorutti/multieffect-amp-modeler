@@ -39,6 +39,12 @@ CLIENT_WIFI=""
 PULL_BRANCH=""
 # Skip the interactive "this will disconnect you" confirmation (-y/--yes).
 ASSUME_YES="false"
+# Substring of the audio interface's name for audio-engine to capture/play
+# through (--audio-device). Empty = let it use whatever ALSA calls the
+# default device, which on a Pi is the onboard bcm2835 -- output-only, so
+# the engine will fail to open an input. Set this on any Pi with a USB
+# interface; `audio_engine --list-devices` prints the available names.
+AUDIO_DEVICE=""
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -92,6 +98,18 @@ Options:
                              NOT enabled by default: it changes what kernel
                              boots and needs a manual reboot + verification
                              you actually want (see deploy/README.md).
+  --audio-device NAME       Substring of the audio interface's name the
+                             engine should capture/play through (e.g.
+                             'Scarlett', 'USB Audio'). Matched
+                             case-insensitively against a device that has
+                             the needed channels, so it survives USB card
+                             renumbering across reboots -- which a card
+                             index would not, on a pedal that gets power-cut
+                             constantly. Default: ALSA's default device,
+                             which on a Pi is the onboard bcm2835 and has no
+                             capture side at all -- so set this if you've got
+                             a USB interface. List the names with:
+                             audio-engine/build/audio_engine --list-devices
   --service-user NAME       System user the services run as (default: ${SERVICE_USER})
   -h, --help                 Show this help.
 
@@ -128,6 +146,7 @@ while [[ $# -gt 0 ]]; do
     --skip-ap) SKIP_AP="true"; shift ;;
     --skip-build) SKIP_BUILD="true"; shift ;;
     --enable-rt-kernel) ENABLE_RT_KERNEL="true"; shift ;;
+    --audio-device) AUDIO_DEVICE="$2"; shift 2 ;;
     --service-user) SERVICE_USER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
@@ -347,9 +366,14 @@ apt-get update -qq
 # succeeds, nmcli shows "connected") but never gives a joining phone/laptop
 # an IP address at all. Stock Raspberry Pi OS images ship it regardless;
 # a minimal Debian install (this script's other target) does not.
+# portaudio19-dev backs the engine's real-time audio I/O (step 4 builds
+# with -DAUDIO_ENGINE_WITH_PORTAUDIO=ON); git is needed because that same
+# step's -DAUDIO_ENGINE_WITH_REAL_NAM=ON fetches NeuralAmpModelerCore and
+# Eigen via CMake FetchContent, which shells out to git.
 apt-get install -y --no-install-recommends \
   python3 python3-venv python3-pip \
   build-essential cmake pkg-config nlohmann-json3-dev \
+  portaudio19-dev git \
   network-manager dnsmasq-base \
   ca-certificates curl
 
@@ -387,6 +411,22 @@ while [[ "${path}" != "/" ]]; do
 done
 
 # --------------------------------------------------------------------------
+# 2c. The 'audio' group must exist for audio-engine.service's
+#     SupplementaryGroups=audio to resolve. ${SERVICE_USER} is created above
+#     with no supplementary groups at all, and /dev/snd/* is group-owned by
+#     'audio', so without it the engine cannot open any audio device -- it
+#     fails at Pa_Initialize/Pa_OpenStream with a permissions error rather
+#     than anything that names the real cause. Granting it via the unit
+#     (SupplementaryGroups=) rather than usermod keeps the privilege scoped
+#     to the service instead of the account.
+# --------------------------------------------------------------------------
+if ! getent group audio >/dev/null 2>&1; then
+  warn "no 'audio' group on this system -- audio-engine.service declares" \
+       "SupplementaryGroups=audio and will fail to start. Create it" \
+       "(groupadd -r audio) or drop that line from the unit."
+fi
+
+# --------------------------------------------------------------------------
 # 3. Persistent data directory (presets/banks/footswitch-mapping JSON +
 #    uploaded .nam/IR assets). Deliberately OUTSIDE the repo checkout so a
 #    `git pull` / redeploy never touches it.
@@ -402,9 +442,19 @@ else
   # ------------------------------------------------------------------------
   # 4. Build audio-engine (Release)
   # ------------------------------------------------------------------------
-  log "building audio-engine (Release)"
+  # Both feature options default to OFF in CMakeLists.txt (they were added
+  # while this project was developed in a sandbox with no GitHub access).
+  # A pedal needs both of them ON, or the engine builds into a control-plane
+  # -only process that opens no audio device and passes audio through
+  # unmodified -- it starts cleanly and does nothing, which is a confusing
+  # way to fail. WITH_REAL_NAM fetches NeuralAmpModelerCore + Eigen at
+  # configure time and so needs internet: that's exactly what step 0b's
+  # radio borrow exists to provide, and why this runs after it.
+  log "building audio-engine (Release, real audio I/O + real NAM inference)"
   cmake -S "${REPO_DIR}/audio-engine" -B "${REPO_DIR}/audio-engine/build" \
-    -DCMAKE_BUILD_TYPE=Release -DAUDIO_ENGINE_BUILD_TESTS=OFF
+    -DCMAKE_BUILD_TYPE=Release -DAUDIO_ENGINE_BUILD_TESTS=OFF \
+    -DAUDIO_ENGINE_WITH_PORTAUDIO=ON \
+    -DAUDIO_ENGINE_WITH_REAL_NAM=ON
   cmake --build "${REPO_DIR}/audio-engine/build" -j"$(nproc)"
 
   # ------------------------------------------------------------------------
@@ -420,11 +470,25 @@ fi
 # 6. systemd units
 # --------------------------------------------------------------------------
 log "installing systemd units"
+# Quoted in the substitution, not here, so a device name with spaces ("USB
+# Audio CODEC") survives into ExecStart as one argument. Empty when no
+# device was configured, leaving the engine on the OS default.
+if [[ -n "${AUDIO_DEVICE}" ]]; then
+  log "audio-engine will capture/play through the device matching '${AUDIO_DEVICE}'"
+  AUDIO_DEVICE_ARGS="--device \"${AUDIO_DEVICE}\""
+else
+  warn "no --audio-device set: the engine will use ALSA's default device," \
+       "which on a Pi is the onboard bcm2835 and has NO capture side -- so" \
+       "it will fail to open an input. List the real names with:" \
+       "${REPO_DIR}/audio-engine/build/audio_engine --list-devices"
+  AUDIO_DEVICE_ARGS=""
+fi
 for unit in control-daemon audio-engine; do
   sed \
     -e "s#__REPO_DIR__#${REPO_DIR}#g" \
     -e "s#__SERVICE_USER__#${SERVICE_USER}#g" \
     -e "s#__DATA_DIR__#${DATA_DIR}#g" \
+    -e "s#__AUDIO_DEVICE_ARGS__#${AUDIO_DEVICE_ARGS}#g" \
     "${REPO_DIR}/deploy/systemd/${unit}.service" \
     > "/etc/systemd/system/multieffect-${unit}.service"
 done

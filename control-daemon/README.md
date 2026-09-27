@@ -104,6 +104,13 @@ started it with (see `audio-engine/README.md`):
 CONTROL_DAEMON_AUDIO_ENGINE_SOCKET=/tmp/audio_engine.sock .venv/bin/control-daemon
 ```
 
+On a deployed pedal you don't set this by hand: `deploy/install.sh` bakes
+`CONTROL_DAEMON_AUDIO_ENGINE_SOCKET=/run/multieffect-amp-modeler/audio-engine.sock`
+into the systemd unit, matching the path `audio-engine.service` starts the
+engine with. Worth knowing because the symptom of it being unset is not an
+error anywhere -- the daemon works normally and the app's block palette is
+simply empty, since that list comes from the engine's `list_block_types`.
+
 `UnixSocketAudioEngineClient` (`src/control_daemon/audio_engine_client.py`)
 is the real implementation -- see its docstring for the resilience
 posture (a missing/restarting engine process logs a warning and is

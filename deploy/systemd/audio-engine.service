@@ -10,7 +10,12 @@ Group=__SERVICE_USER__
 WorkingDirectory=__REPO_DIR__/audio-engine
 RuntimeDirectory=multieffect-amp-modeler
 RuntimeDirectoryMode=0770
-ExecStart=__REPO_DIR__/audio-engine/build/audio_engine /run/multieffect-amp-modeler/audio-engine.sock
+# --audio is what actually opens a capture/playback device; without it this
+# process is control-plane only (it answers the daemon's socket commands and
+# passes no audio at all -- see main.cpp). __AUDIO_DEVICE_ARGS__ is filled in
+# by deploy/install.sh from --audio-device/AUDIO_DEVICE, and is empty when
+# unset, which falls back to ALSA's default device.
+ExecStart=__REPO_DIR__/audio-engine/build/audio_engine /run/multieffect-amp-modeler/audio-engine.sock --audio __AUDIO_DEVICE_ARGS__
 Restart=on-failure
 RestartSec=2
 
@@ -29,6 +34,29 @@ PrivateTmp=true
 ProtectSystem=strict
 ReadOnlyPaths=__DATA_DIR__
 ProtectHome=read-only
+
+# Real audio I/O needs two things the sandbox above doesn't grant by
+# default.
+#
+# SupplementaryGroups=audio: /dev/snd/* is group-owned by 'audio', and
+# install.sh creates __SERVICE_USER__ with no supplementary groups, so
+# without this every device open fails on permissions. Scoped to the service
+# rather than added to the account with usermod.
+#
+# LimitRTPRIO/LimitMEMLOCK: ALSA and PortAudio put the audio callback on a
+# SCHED_FIFO thread and mlock its buffers. Both are privileged operations
+# capped by these rlimits, which default to 0 for a system service -- the
+# callback then runs at normal priority, competing with every other process
+# on the Pi, and you hear that as xruns and crackling under load rather than
+# as any error. The engine's own health counters (logged every ~2s) are how
+# to tell whether this is working. Note these raise the *ceiling* only: the
+# process still has to ask, and nothing here forces real-time scheduling on
+# a thread that doesn't want it, which is why CPUSchedulingPolicy=fifo is
+# deliberately NOT set -- that would put the main thread (an idle 2s sleep
+# loop) at real-time priority for no benefit.
+SupplementaryGroups=audio
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

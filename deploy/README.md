@@ -300,48 +300,87 @@ sudo ./deploy/uninstall.sh --purge    # also deletes /var/lib/multieffect-amp-mo
 Getting `systemctl status` to say `active (running)` is not the same as a
 working guitar pedal. As of this V1:
 
-The code for a working signal path exists; **this script doesn't switch
-it on yet.** Three gaps, all in deployment configuration rather than in
-the components themselves:
+The signal path **is** switched on as of this version: the engine is built
+with real audio I/O and real NAM inference, started with `--audio`, and the
+daemon is pointed at its control socket. What that changed, and what is
+still genuinely missing:
 
-- **The daemon isn't pointed at the engine.** `control-daemon.service`
-  doesn't set `CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`, so the daemon falls
-  back to `NullAudioEngineClient` (logs preset changes, calls no one) even
-  though the real client, `UnixSocketAudioEngineClient`, exists and
-  `audio-engine`'s socket is up at
-  `/run/multieffect-amp-modeler/audio-engine.sock` (see step 5). Wiring
-  them is an `Environment=` line plus `After=`/`Wants=` on the engine unit
-  -- see "Audio engine wiring" in `control-daemon/README.md`.
-- **The engine is built and started without audio I/O.** `install.sh`
-  builds without `-DAUDIO_ENGINE_WITH_PORTAUDIO=ON` (and doesn't install
-  `portaudio19-dev`), and `audio-engine.service` doesn't pass `--audio`, so
-  no audio device is ever opened -- plugging a guitar in does nothing yet.
-  The service user will also need the `audio` group to open the ALSA device.
-  See "Real-time audio I/O" in `audio-engine/README.md`.
-- **Real NAM inference isn't enabled.** Built without
-  `-DAUDIO_ENGINE_WITH_REAL_NAM=ON`, so `.nam` files are parsed and
-  validated but processed by the pass-through `StubNamModel`. See "Real NAM
-  inference" in `audio-engine/README.md` (and build `Release`/
-  `RelWithDebInfo`, never `Debug`, for anything real-time -- same README).
-- **No footswitch or onboard display exists yet** -- `footswitch/` and
-  `display/` in the repo layout are still just planned.
+**Now enabled (was deployment configuration, not missing code):**
+
+- **The daemon talks to the engine.** `control-daemon.service` sets
+  `CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`, so it uses the real
+  `UnixSocketAudioEngineClient` instead of falling back to
+  `NullAudioEngineClient`. This is also what makes the app's effects
+  usable at all: the block palette is built purely from the engine's
+  `list_block_types` reply, so under the null client it came up **empty** --
+  no Big Muff, Tube Screamer, noise gate, tone stack or delay, even though
+  all of them were registered in the engine the whole time.
+- **Real audio I/O.** `install.sh` installs `portaudio19-dev`, builds with
+  `-DAUDIO_ENGINE_WITH_PORTAUDIO=ON`, and the unit passes `--audio` plus
+  `SupplementaryGroups=audio` (for `/dev/snd`) and `LimitRTPRIO`/
+  `LimitMEMLOCK` (so the callback can actually get real-time priority
+  instead of silently competing with everything else and crackling).
+- **Real NAM inference.** Built with `-DAUDIO_ENGINE_WITH_REAL_NAM=ON`, so
+  `.nam` files run a real forward pass rather than the pass-through
+  `StubNamModel`. This fetches NeuralAmpModelerCore + Eigen at configure
+  time and therefore needs internet **during the build** -- which is what
+  the radio-borrow step exists for, and why you cannot deploy this with
+  `--skip-ap` on a Pi that has no other uplink.
+
+**You almost certainly need `--audio-device`.** ALSA's default device on a
+Pi is the onboard bcm2835, which has no capture side at all, so the engine
+will fail to open an input and log every device it did find. Get the name
+and set it:
+
+```bash
+# on the Pi, after plugging the interface in
+sudo systemctl stop multieffect-audio-engine
+./audio-engine/build/audio_engine --list-devices
+sudo ./deploy/install.sh --audio-device "USB Audio" --skip-build --skip-ap
+```
+
+It matches a case-insensitive substring against a device that has the
+channels being asked for -- a substring rather than a card index because USB
+card numbers shuffle between reboots, and this pedal gets power-cut rather
+than shut down. `AUDIO_DEVICE` in `deploy/config.env` is the persistent
+place for it.
+
+**Still genuinely missing or unverified:**
+
+- **NAM inference has never been benchmarked on ARM.** The per-block timing
+  margins quoted in `audio-engine/README.md` were measured on a dev machine.
+  A WaveNet model at the default 64-sample block may simply not hit
+  real-time on a Pi 4. Measure offline first with the `nam_render` tool
+  rather than debugging it as live-audio dropouts, expect to raise
+  `--block-size`, and watch the engine's own `[health]` xrun lines in
+  `journalctl -u multieffect-audio-engine -f`.
+- **Model sample-rate mismatch is unhandled.** A model captured at 44.1kHz
+  driven at 48kHz runs at the wrong rate -- audible as a shifted frequency
+  response, not as an error. See "Sample rate policy" in
+  `audio-engine/README.md`.
+- **No footswitch or onboard display client** -- `footswitch/` and
+  `display/` are still just planned. `GpioZeroFootswitchBackend` exists in
+  the daemon but is never instantiated (nothing builds a
+  `FootswitchInputController`, and `create_app` takes no footswitch
+  backend). This does not block testing: `footswitch_press` arrives over
+  the WebSocket from a client with role `footswitch`, which is how the web
+  and mobile apps drive the switches today.
 - **No PREEMPT_RT kernel by default.** `docs/open-questions.md` #1 (Pi 4 vs
   5, latency) is still open and needs this kernel (or Elk Audio OS) plus
-  real benchmarking once audio I/O is enabled on the Pi. `--enable-rt-kernel`
-  installs the `linux-image-rt-arm64` package if you want to get a head
-  start, but does not reboot into it or verify anything for you -- see
-  "Real-time kernel" below.
-- **No protection against hard power cuts to the SD card.** If the
-  physical power switch is going to cut power directly (like a real
-  stompbox, no clean shutdown first -- see `docs/open-questions.md` #6),
-  this script does not set up the read-only-root overlay that mitigates
-  it. Rigs/presets/assets are already power-cut-safe (atomic writes); the
-  OS partition currently is not.
+  real benchmarking -- now finally possible, since audio I/O is on.
+  `--enable-rt-kernel` installs `linux-image-rt-arm64` if you want a head
+  start, but does not reboot into it or verify anything for you.
+- **No protection against hard power cuts to the SD card.** If the physical
+  power switch cuts power directly (like a real stompbox, no clean shutdown
+  -- see `docs/open-questions.md` #6), this script does not set up the
+  read-only-root overlay that mitigates it. Rigs/presets/assets are already
+  power-cut-safe (atomic writes); the OS partition is not.
 
-In short: this deploys the two *processes* correctly and gets them running
-reliably as system services, on a Pi actually broadcasting its own Wi-Fi
-network -- but the guitar-to-speaker signal path isn't switched on in this
-deployment yet, even though every piece of it exists in the code.
+In short: this deploys both processes as reliable system services on a Pi
+broadcasting its own Wi-Fi, with the guitar-to-speaker path actually
+running. What's unproven is whether a Pi keeps up with real NAM inference
+at low latency -- that's now a measurement you can take, not a gap in the
+code.
 
 ## Real-time kernel (optional, manual verification required)
 

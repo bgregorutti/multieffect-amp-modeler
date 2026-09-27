@@ -1,8 +1,10 @@
 #include "audio_engine/portaudio_backend.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstring>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -11,6 +13,46 @@ namespace audio_engine {
 namespace {
 std::string paError(const char* what, PaError err) {
     return std::string(what) + ": " + Pa_GetErrorText(err);
+}
+
+std::string toLower(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+// Assumes PortAudio is already initialized -- Pa_GetDeviceCount and friends
+// return an error/nothing useful otherwise. PortAudioBackend::describeDevices()
+// wraps this in its own Pa_Initialize/Pa_Terminate pair for standalone use
+// (--list-devices), while start()'s failure paths call it directly, already
+// holding an initialization of their own.
+std::string listDevices() {
+    std::ostringstream out;
+    const PaDeviceIndex count = Pa_GetDeviceCount();
+    if (count < 0) {
+        out << "  " << paError("Pa_GetDeviceCount failed", static_cast<PaError>(count)) << "\n";
+        return out.str();
+    }
+    if (count == 0) {
+        out << "  (no audio devices at all -- on a Pi, check `aplay -l` / `arecord -l` and that\n"
+               "   the service's user is in the 'audio' group)\n";
+        return out.str();
+    }
+    const PaDeviceIndex defaultIn = Pa_GetDefaultInputDevice();
+    const PaDeviceIndex defaultOut = Pa_GetDefaultOutputDevice();
+    for (PaDeviceIndex i = 0; i < count; ++i) {
+        const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+        if (info == nullptr) continue;
+        const PaHostApiInfo* host = Pa_GetHostApiInfo(info->hostApi);
+        out << "  [" << i << "] \"" << (info->name != nullptr ? info->name : "(unnamed)") << "\""
+            << " via " << ((host != nullptr && host->name != nullptr) ? host->name : "?")
+            << " -- in=" << info->maxInputChannels << " out=" << info->maxOutputChannels
+            << " default_rate=" << info->defaultSampleRate << " Hz";
+        if (i == defaultIn) out << "  [system default input]";
+        if (i == defaultOut) out << "  [system default output]";
+        out << "\n";
+    }
+    return out.str();
 }
 }  // namespace
 
@@ -67,6 +109,29 @@ int PortAudioBackend::paCallback(const void* input, void* output, unsigned long 
     return paContinue;
 }
 
+PaDeviceIndex PortAudioBackend::findDeviceByName(const std::string& needle, bool wantInput) {
+    const std::string wanted = toLower(needle);
+    const PaDeviceIndex count = Pa_GetDeviceCount();
+    for (PaDeviceIndex i = 0; i < count; ++i) {
+        const PaDeviceInfo* info = Pa_GetDeviceInfo(i);
+        if (info == nullptr || info->name == nullptr) continue;
+        const int channels = wantInput ? info->maxInputChannels : info->maxOutputChannels;
+        if (channels < 1) continue;
+        if (toLower(info->name).find(wanted) != std::string::npos) return i;
+    }
+    return paNoDevice;
+}
+
+std::string PortAudioBackend::describeDevices() {
+    const PaError err = Pa_Initialize();
+    if (err != paNoError) {
+        return paError("Pa_Initialize failed", err) + "\n";
+    }
+    const std::string devices = listDevices();
+    Pa_Terminate();
+    return devices;
+}
+
 void PortAudioBackend::start(const AudioIoConfig& config, AudioCallback callback) {
     if (running_.load()) {
         throw std::runtime_error("PortAudioBackend::start called while already running");
@@ -85,12 +150,18 @@ void PortAudioBackend::start(const AudioIoConfig& config, AudioCallback callback
     initialized_ = true;
 
     PaStreamParameters inputParams{};
-    inputParams.device = Pa_GetDefaultInputDevice();
+    inputParams.device = config.device.empty() ? Pa_GetDefaultInputDevice()
+                                               : findDeviceByName(config.device, /*wantInput=*/true);
     if (inputParams.device == paNoDevice) {
+        const std::string available = listDevices();
         Pa_Terminate();
         initialized_ = false;
         throw std::runtime_error(
-            "no default input audio device found -- select one in your OS's audio settings");
+            (config.device.empty()
+                 ? std::string("no default input audio device found -- select one in your OS's "
+                               "audio settings, or name one explicitly with --device")
+                 : "no audio input device whose name contains \"" + config.device + "\"") +
+            ". Available devices:\n" + available);
     }
     inputParams.channelCount = 1;
     inputParams.sampleFormat = paFloat32;
@@ -98,17 +169,34 @@ void PortAudioBackend::start(const AudioIoConfig& config, AudioCallback callback
     inputParams.hostApiSpecificStreamInfo = nullptr;
 
     PaStreamParameters outputParams{};
-    outputParams.device = Pa_GetDefaultOutputDevice();
+    outputParams.device = config.device.empty()
+                              ? Pa_GetDefaultOutputDevice()
+                              : findDeviceByName(config.device, /*wantInput=*/false);
     if (outputParams.device == paNoDevice) {
+        const std::string available = listDevices();
         Pa_Terminate();
         initialized_ = false;
         throw std::runtime_error(
-            "no default output audio device found -- select one in your OS's audio settings");
+            (config.device.empty()
+                 ? std::string("no default output audio device found -- select one in your OS's "
+                               "audio settings, or name one explicitly with --device")
+                 : "no audio output device whose name contains \"" + config.device + "\"") +
+            ". Available devices:\n" + available);
     }
     outputParams.channelCount = 1;
     outputParams.sampleFormat = paFloat32;
     outputParams.suggestedLatency = Pa_GetDeviceInfo(outputParams.device)->defaultLowOutputLatency;
     outputParams.hostApiSpecificStreamInfo = nullptr;
+
+    // Captured before Pa_OpenStream so the names are available to whoever
+    // reports a failure, and so they reflect the resolved index rather than
+    // the substring that was searched for.
+    {
+        const PaDeviceInfo* in = Pa_GetDeviceInfo(inputParams.device);
+        const PaDeviceInfo* out = Pa_GetDeviceInfo(outputParams.device);
+        inputDeviceName_ = (in != nullptr && in->name != nullptr) ? in->name : "(unknown)";
+        outputDeviceName_ = (out != nullptr && out->name != nullptr) ? out->name : "(unknown)";
+    }
 
     err = Pa_OpenStream(&stream_, &inputParams, &outputParams, config.sampleRate,
                          static_cast<unsigned long>(config.blockSize), paNoFlag,

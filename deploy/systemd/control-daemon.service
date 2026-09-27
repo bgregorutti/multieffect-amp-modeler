@@ -1,8 +1,14 @@
 [Unit]
 Description=Multi-Effect Amp Modeler - control daemon
 Documentation=file://__REPO_DIR__/control-daemon/README.md
-After=network.target
+After=network.target multieffect-audio-engine.service
 Wants=network.target
+# After=, but deliberately NOT Requires=/Wants= on the engine: the daemon is
+# the source of truth for preset/bank/footswitch state whether or not an
+# engine is listening, and UnixSocketAudioEngineClient reconnects per call
+# and fails open, so a crashed or absent engine must not take the WS API (and
+# therefore the app) down with it. Ordering alone means the socket is
+# normally already there for the app's first list_block_types query.
 
 [Service]
 Type=simple
@@ -13,6 +19,14 @@ Environment=CONTROL_DAEMON_STORE_PATH=__DATA_DIR__/state.json
 Environment=CONTROL_DAEMON_HOST=0.0.0.0
 Environment=CONTROL_DAEMON_PORT=8765
 Environment=CONTROL_DAEMON_LOG_LEVEL=info
+# Without this the daemon falls back to NullAudioEngineClient (see main.py),
+# which logs every call and discards it -- the pedal then has a fully working
+# control plane that changes nothing about what you hear. It is also why the
+# app's block palette would come up empty: the editor builds that list purely
+# from list_block_types, which the null client answers with [], so none of the
+# engine's effects (big_muff, tube_screamer, noise_gate, tone_stack, delay...)
+# would ever be offered. Matches audio-engine.service's ExecStart socket path.
+Environment=CONTROL_DAEMON_AUDIO_ENGINE_SOCKET=/run/multieffect-amp-modeler/audio-engine.sock
 ExecStart=__REPO_DIR__/control-daemon/.venv/bin/control-daemon
 Restart=on-failure
 RestartSec=2

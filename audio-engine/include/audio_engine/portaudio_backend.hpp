@@ -11,16 +11,19 @@
 // same #ifdef, so it's safe to include <portaudio.h> directly rather than
 // forward-declaring its types.
 //
-// Device selection: always the system's current default input/output
-// device (Pa_GetDefaultInputDevice/OutputDevice), not a name/index passed
-// in -- on macOS, pick your external interface as the system default in
-// Audio MIDI Setup before starting the engine with --audio. Deliberately
-// minimal for now: picking a specific device by name is a reasonable
-// follow-up if/when it's actually needed, not guessed at here.
+// Device selection: AudioIoConfig::device -- a case-insensitive substring
+// of the device's name -- or the system's current default input/output
+// device (Pa_GetDefaultInputDevice/OutputDevice) when that's empty. On
+// macOS the default is usually what you want: pick your external interface
+// in Audio MIDI Setup before starting the engine with --audio. On a Pi it
+// is not, because ALSA's default device there is the onboard bcm2835,
+// which has no capture side at all -- name the USB interface explicitly.
+// `audio_engine --list-devices` prints the available names.
 #pragma once
 
 #include <atomic>
 #include <cstdint>
+#include <string>
 
 #include <portaudio.h>
 
@@ -67,16 +70,43 @@ public:
     // Microseconds; 0 if no callback has run yet.
     std::uint64_t maxCallbackMicros() const { return maxCallbackMicros_.load(std::memory_order_relaxed); }
 
+    // The devices actually opened; empty until start() succeeds. Logged by
+    // main.cpp on startup so a headless pedal's journal records which
+    // interface it really grabbed, not merely which one was asked for --
+    // the whole point of matching AudioIoConfig::device by substring is
+    // that the match isn't perfectly predictable in advance.
+    const std::string& inputDeviceName() const { return inputDeviceName_; }
+    const std::string& outputDeviceName() const { return outputDeviceName_; }
+
+    // One line per available device (index, name, host API, channel counts,
+    // default sample rate), marking PortAudio's current defaults -- what
+    // `audio_engine --list-devices` prints, and what start() appends to its
+    // "no such device" errors. Self-contained: initializes and terminates
+    // PortAudio itself, so it works before (and without) start(). Never
+    // throws -- returns PortAudio's own error text as its result instead,
+    // since a diagnostic that can fail loudly is worse than useless.
+    static std::string describeDevices();
+
 private:
     static int paCallback(const void* input, void* output, unsigned long frameCount,
                            const PaStreamCallbackTimeInfo* timeInfo,
                            PaStreamCallbackFlags statusFlags, void* userData);
+
+    // Index of the first device whose name contains `needle`
+    // (case-insensitive) and that has at least one channel on the requested
+    // side, or paNoDevice if nothing matches. The channel-count filter
+    // matters on a Pi, where the onboard output-only device would otherwise
+    // happily match a substring meant for a duplex USB interface. Requires
+    // PortAudio to already be initialized.
+    static PaDeviceIndex findDeviceByName(const std::string& needle, bool wantInput);
 
     PaStream* stream_ = nullptr;
     bool initialized_ = false;
     std::atomic<bool> running_{false};
     AudioCallback callback_;
     double sampleRate_ = 48000.0;
+    std::string inputDeviceName_;
+    std::string outputDeviceName_;
 
     std::atomic<std::uint64_t> xrunCount_{0};
     std::atomic<std::uint64_t> overBudgetCount_{0};
