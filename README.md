@@ -28,7 +28,7 @@ audio-engine/     C++20 real-time plugin host skeleton: preset/asset model,
                   audio-engine/README.md.
 
 mobile-app/       Flutter app: connects to the daemon's WebSocket API over
-                  local Wi-Fi, builds/edits presets and banks, configures
+                  local Wi-Fi, builds/edits rigs and presets, configures
                   the footswitch mapping, uploads NAM/IR assets. See
                   mobile-app/README.md.
 
@@ -86,8 +86,10 @@ scripts/          Dev-machine testing tools that don't belong to any one
   audio-engine/README.md; what the Raspberry Pi build itself uses
   (PortAudio again, ALSA, or JUCE) is still open, but `IAudioIoBackend`
   means that's a new backend behind an existing interface, not a rewrite.
-  Crossfade-on-switch is not yet wired into the real-time path (known gap,
-  documented in audio-engine/README.md).
+  Crossfade-on-switch is not yet wired into the real-time path, and every
+  preset switch -- even within a rig -- currently rebuilds the whole chain,
+  amp and cab included (known gaps, see audio-engine/README.md and
+  docs/open-questions.md #5).
 - `mobile-app`: **V1 built and tested** (passing via `flutter test`,
   `flutter analyze` clean as of this writing — this environment has no
   Flutter SDK to re-run the count against, so treat any specific number as
@@ -98,8 +100,10 @@ scripts/          Dev-machine testing tools that don't belong to any one
   Adding/removing/reordering chain blocks lives only in the rig editor now
   (a rig's chain is shared by every preset in it); the preset editor only
   toggles and tweaks what the rig already has — see "Rigs are boards,
-  presets stomp them" in mobile-app/README.md. OS file-picker integration
-  is stubbed pending on-device testing (needs a real phone/emulator).
+  presets stomp them" in mobile-app/README.md. The daemon's address is a
+  runtime setting in the app (no rebuild to point it at a pedal). OS
+  file-picker integration is stubbed pending on-device testing (needs a
+  real phone/emulator).
 - `footswitch`, `display`: not yet started — real GPIO/I2C hardware is
   needed to build and validate these properly. `next_rig`/`prev_rig`
   (swap the whole backline) and `next_preset`/`prev_preset` (step within
@@ -109,5 +113,7 @@ scripts/          Dev-machine testing tools that don't belong to any one
   mapping, for whenever a real pedal is the first one wired up.
 - `deploy`: **script + guide written**, shellchecked and validated piece by
   piece in this dev environment (unit-file verification, production build
-  paths) — but **not yet run end to end on real Raspberry Pi hardware**. See
-  deploy/README.md's "Honesty check" before running it.
+  paths) — but **not yet run end to end on real Raspberry Pi hardware**, and
+  it doesn't yet switch on the daemon→engine link, audio I/O or real NAM
+  inference (all of which exist in the code). See deploy/README.md's
+  "Honesty check" and "What this deploys, honestly" before running it.

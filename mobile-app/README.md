@@ -28,10 +28,11 @@ The split that decides where each control lives:
   lets you choose which pedals are on and how they are set. It cannot add or
   remove a block, because the board belongs to the rig.
 
-This mirrors a real pedalboard, and it is what makes preset switching cheap:
-every preset of a rig has the same blocks loaded, so switching toggles them
-rather than constructing and tearing down DSP (which is what the crossfade work
-in `docs/open-questions.md` #5 depends on).
+This mirrors a real pedalboard, and it is what lets preset switching be
+cheap: every preset of a rig has the same blocks, so switching can toggle them
+rather than construct and tear down DSP. The engine doesn't take advantage of
+that yet -- it still rebuilds the whole chain on every switch -- which is the
+work tracked in `docs/open-questions.md` #5.
 
 The earlier arrangement let you add effects from inside a preset. Because the
 chain is shared, an effect added in one preset appeared -- switched off -- in

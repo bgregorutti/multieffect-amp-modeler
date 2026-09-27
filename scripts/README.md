@@ -157,14 +157,14 @@ normalization". Rebuild `build-audio` to pick this up too.
 
 ### Resetting state between test runs
 
-control-daemon persists everything (presets, banks, footswitch mapping,
+control-daemon persists everything (rigs, presets, footswitch mapping,
 asset metadata) to a JSON file and reloads it on every startup -- that's
 the whole point of persistence, so restarting the daemon process alone
 will *not* clear anything you've built up across test sessions with
 `load_test_preset.py`.
 
-There's also no WS command to wipe state wholesale (only `delete_preset`
-exists for individual presets; there's no `delete_bank` at all yet) --
+There's also no WS command to wipe state wholesale (only `delete_rig`/
+`delete_preset` for individual rigs and presets) --
 deliberately: a "wipe everything" remote command is a real production
 feature decision for the actual pedal, not something to bolt on as a side
 effect of a test-tooling convenience. For a clean slate while testing,

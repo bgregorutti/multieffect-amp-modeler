@@ -175,13 +175,16 @@ own amp/cab reference. The active position is `(active_rig_index,
 active_preset_index)` rather than a bare preset id, since presets live
 inside rigs and two rigs can each have a preset named "Solo".
 
-This split is a real-time property, not just nicer modelling: stepping
-presets within a rig only flips per-block enable flags, so it's fast and
-click-free on the audio thread. Stepping rigs is the expensive path (a
-different amp/cab means the engine reloads a NAM model and re-partitions an
-IR) -- the footswitch mapping reflects this with separate `next_rig`/
-`prev_rig` vs. `next_preset`/`prev_preset` actions, and preset-stepping
-deliberately never crosses into another rig (see `FootswitchAction` below).
+This split is meant to be a real-time property, not just nicer modelling:
+stepping presets within a rig should only flip per-block enable flags, so
+it's fast and click-free on the audio thread. Stepping rigs is the
+expensive path (a different amp/cab means the engine reloads a NAM model and
+re-partitions an IR) -- the footswitch mapping reflects this with separate
+`next_rig`/`prev_rig` vs. `next_preset`/`prev_preset` actions, and
+preset-stepping deliberately never crosses into another rig (see
+`FootswitchAction` below). The daemon side of this is complete, but the
+engine doesn't exploit it yet: every `load_preset` rebuilds the full chain,
+amp and cab included -- see `docs/open-questions.md` #5.
 
 Asset references (`asset_id`) live on individual blocks, not on the preset
 or rig as a whole -- an amp block points at a `.nam` asset, a cab block at
@@ -377,7 +380,9 @@ Presets deliberately never step across a rig boundary: a preset's block ids
 only mean anything against its own rig's chain, so a footswitch press that
 silently swapped the amp mid-song would be a bug, not a feature. `rig`
 changes are the expensive path (NAM model reload + IR re-partitioning);
-`preset` changes within a rig only flip enable flags and stay click-free.
+`preset` changes within a rig are designed to only flip enable flags --
+though until the engine side of that lands (`docs/open-questions.md` #5),
+both currently go through the same full `load_preset` rebuild.
 
 ### HTTP: uploading a `.nam`/IR binary
 

@@ -25,10 +25,11 @@ regardless of deployment success.
   this guide).
 - Either a monitor+keyboard for the Pi, or a way to SSH into it headlessly
   (covered below).
-- A USB Audio 2.0 class-compliant interface, if you have one -- **not yet
-  used by anything in this repo** (no real-time audio I/O backend exists
-  yet, see "What this deploys, honestly"), but worth having plugged in so
-  it's there when that lands.
+- A USB Audio 2.0 class-compliant interface, if you have one -- **not used
+  by this deployment yet**: the engine has a real-time audio backend
+  (PortAudio), but `install.sh` doesn't build or start it with audio enabled
+  (see "What this deploys, honestly"). Worth having plugged in so it's there
+  when that lands.
 
 ## 1. Flash Raspberry Pi OS
 
@@ -66,7 +67,7 @@ sudo reboot
 ```bash
 git clone https://github.com/bgregorutti/multieffect-amp-modeler.git
 cd multieffect-amp-modeler
-git checkout claude/modest-hypatia-xn646y   # or main/whatever branch you're deploying
+git checkout main   # or whichever branch you're deploying
 ```
 
 (If the repo is private, use your usual GitHub auth -- an SSH remote or a
@@ -93,7 +94,7 @@ order (see the script itself -- it's commented step by step):
    `nlohmann-json3-dev`, NetworkManager).
 2. Creates a dedicated, unprivileged system user (`ampmodeler` by default)
    that both services run as.
-3. Creates `/var/lib/multieffect-amp-modeler/` (presets/banks/footswitch
+3. Creates `/var/lib/multieffect-amp-modeler/` (rigs/presets/footswitch
    mapping JSON + uploaded `.nam`/IR assets) -- **outside** the git
    checkout, so redeploys never touch your data.
 4. Builds `audio-engine` in Release mode and sets up `control-daemon`'s
@@ -146,11 +147,12 @@ echo '{"cmd":"get_state"}' | nc -U /run/multieffect-amp-modeler/audio-engine.soc
 
 Connect a phone to the `MultiEffectPedal` (or whatever `--ssid` you chose)
 Wi-Fi network and confirm it gets an IP address -- that's NetworkManager's
-DHCP-server-in-shared-mode working. The mobile app itself isn't packaged
-for install yet (no APK/IPA build step exists in this repo), so pointing
-the app at `ws://<pi-ip>:8765/ws` currently means running it from a dev
-machine per `mobile-app/README.md` while your phone/dev machine is on the
-pedal's AP or the same network.
+DHCP-server-in-shared-mode working (the Pi itself is the gateway; shared
+mode defaults to `10.42.0.1`). There's no prebuilt APK/IPA in this repo:
+build and install the app from a dev machine per `mobile-app/README.md`
+(e.g. `flutter build apk`), then set the pedal's address in the app's
+Settings screen (gear icon on the Status tab) -- it's stored on the phone and
+applied immediately, no rebuild needed.
 
 ## 6. Reboot test
 
@@ -223,24 +225,34 @@ sudo ./deploy/uninstall.sh --purge    # also deletes /var/lib/multieffect-amp-mo
 Getting `systemctl status` to say `active (running)` is not the same as a
 working guitar pedal. As of this V1:
 
-- **`control-daemon` and `audio-engine` are not wired together.**
-  `control-daemon` still talks to a `NullAudioEngineClient` (it logs preset
-  changes but doesn't call anyone). `audio-engine`'s Unix control socket
-  exists and works (see step 5 above) but nothing drives it yet. Connecting
-  them is a documented follow-up -- see `audio-engine/README.md`'s
-  "Deviations from the plan" #5 and control-daemon's `AudioEngineClient`.
-- **`audio-engine` has no real-time audio I/O.** No ALSA/JACK/PortAudio
-  backend exists (see `audio-engine/README.md` deviation #1) -- plugging a
-  guitar into a USB interface right now does nothing. The engine currently
-  only proves out preset-loading/control-plane logic.
-- **No real NAM (WaveNet) inference yet** -- `.nam` files are parsed and
-  validated for real, but processed audio would currently just be a
-  passthrough/gain stub (deviation #2).
+The code for a working signal path exists; **this script doesn't switch
+it on yet.** Three gaps, all in deployment configuration rather than in
+the components themselves:
+
+- **The daemon isn't pointed at the engine.** `control-daemon.service`
+  doesn't set `CONTROL_DAEMON_AUDIO_ENGINE_SOCKET`, so the daemon falls
+  back to `NullAudioEngineClient` (logs preset changes, calls no one) even
+  though the real client, `UnixSocketAudioEngineClient`, exists and
+  `audio-engine`'s socket is up at
+  `/run/multieffect-amp-modeler/audio-engine.sock` (see step 5). Wiring
+  them is an `Environment=` line plus `After=`/`Wants=` on the engine unit
+  -- see "Audio engine wiring" in `control-daemon/README.md`.
+- **The engine is built and started without audio I/O.** `install.sh`
+  builds without `-DAUDIO_ENGINE_WITH_PORTAUDIO=ON` (and doesn't install
+  `portaudio19-dev`), and `audio-engine.service` doesn't pass `--audio`, so
+  no audio device is ever opened -- plugging a guitar in does nothing yet.
+  The service user will also need the `audio` group to open the ALSA device.
+  See "Real-time audio I/O" in `audio-engine/README.md`.
+- **Real NAM inference isn't enabled.** Built without
+  `-DAUDIO_ENGINE_WITH_REAL_NAM=ON`, so `.nam` files are parsed and
+  validated but processed by the pass-through `StubNamModel`. See "Real NAM
+  inference" in `audio-engine/README.md` (and build `Release`/
+  `RelWithDebInfo`, never `Debug`, for anything real-time -- same README).
 - **No footswitch or onboard display exists yet** -- `footswitch/` and
   `display/` in the repo layout are still just planned.
 - **No PREEMPT_RT kernel by default.** `docs/open-questions.md` #1 (Pi 4 vs
   5, latency) is still open and needs this kernel (or Elk Audio OS) plus
-  real benchmarking once real audio I/O exists. `--enable-rt-kernel`
+  real benchmarking once audio I/O is enabled on the Pi. `--enable-rt-kernel`
   installs the `linux-image-rt-arm64` package if you want to get a head
   start, but does not reboot into it or verify anything for you -- see
   "Real-time kernel" below.
@@ -248,13 +260,13 @@ working guitar pedal. As of this V1:
   physical power switch is going to cut power directly (like a real
   stompbox, no clean shutdown first -- see `docs/open-questions.md` #6),
   this script does not set up the read-only-root overlay that mitigates
-  it. Presets/banks/assets are already power-cut-safe (atomic writes); the
+  it. Rigs/presets/assets are already power-cut-safe (atomic writes); the
   OS partition currently is not.
 
 In short: this deploys the two *processes* correctly and gets them running
-reliably as system services with real (if still partial) functionality
-behind them, on a Pi actually broadcasting its own Wi-Fi network -- but the
-guitar-to-speaker signal path itself isn't wired up yet.
+reliably as system services, on a Pi actually broadcasting its own Wi-Fi
+network -- but the guitar-to-speaker signal path isn't switched on in this
+deployment yet, even though every piece of it exists in the code.
 
 ## Real-time kernel (optional, manual verification required)
 
@@ -282,7 +294,7 @@ A pedal's power switch is expected to cut power to the Pi directly, the
 same way unplugging a wall-wart does -- no clean `shutdown` first. See
 `docs/open-questions.md` #6 for the full writeup; in short:
 
-- **Your presets/banks/assets are already safe.** `persistence.py` writes
+- **Your rigs/presets/assets are already safe.** `persistence.py` writes
   `state.json` via `fsync` + atomic `os.replace`, so a cut mid-save loses at
   most the last unsaved edit, never a corrupt file.
 - **The OS partition is not.** Enough abrupt power cuts during a

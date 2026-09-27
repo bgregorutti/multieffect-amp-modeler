@@ -92,6 +92,18 @@ Wiring `PresetSwitcher` into the real-time path is the natural next step
 once you're validating audio through real hardware, not attempted here to
 keep this change scoped to "get real signal flowing."
 
+It's worse than a click in one respect: `ResourceManager::loadPreset`
+rebuilds the *entire* chain on every `load_preset` -- re-reading and
+re-preparing the `.nam` model, re-reading/resampling/normalizing the IR,
+re-`dlopen`ing any VST3 -- and `handleCommand` holds the same mutex
+`processAudioBlock` needs for that whole time. There's no reuse between
+consecutive presets of the same rig (disabled blocks aren't even
+constructed), so the daemon's rig/preset split -- designed so an in-rig
+preset switch only flips enable flags -- buys nothing here yet. Building
+every block of the chain once per rig and applying a preset as enable/param
+changes on the live chain is the engine-side half of that design; see
+`docs/open-questions.md` #5.
+
 **macOS microphone permission.** The very first time you run `--audio`,
 opening the input device can trigger (or silently block on, if run
 non-interactively/headless) a one-time TCC microphone-permission prompt

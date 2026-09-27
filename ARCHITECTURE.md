@@ -50,14 +50,20 @@ one-line-per-component snapshot, not the source of truth for numbers.
   records which of that rig's other blocks are enabled. This replaced an
   earlier design where each preset carried its own amp/cab reference
   directly, which left chain order undefined, allowed only one IR, and gave
-  no way to bypass the cab alone. The split is a real-time property, not
-  just modelling: stepping presets within a rig only flips enable flags
-  (fast, click-free), while stepping rigs reloads the NAM model and
-  re-partitions the IR (the expensive, between-songs path) — the
+  no way to bypass the cab alone. The split is meant to be a real-time
+  property, not just modelling: stepping presets within a rig should only
+  flip enable flags (fast, click-free), while stepping rigs reloads the NAM
+  model and re-partitions the IR (the expensive, between-songs path) — the
   footswitch mapping follows this exactly (`next_rig`/`prev_rig` vs.
   `next_preset`/`prev_preset`, the latter never crossing a rig boundary).
   The audio engine is kept ignorant of the split: the daemon flattens
   rig + preset into a `ResolvedPreset` and sends the exact chain to play.
+  **Not yet realised in the engine:** `ResourceManager::loadPreset`
+  rebuilds the whole chain on every `load_preset` — re-reading the `.nam`
+  and IR from disk even when only an effect toggled — while holding the
+  lock the audio callback needs, so today an in-rig preset switch costs the
+  same as a rig switch. The data model and daemon side are done; the engine
+  side is tracked in `docs/open-questions.md` #5.
   See "Rigs and presets" in `control-daemon/README.md` and "Shared data
   model" in `audio-engine/README.md`.
 
@@ -112,8 +118,8 @@ one-line-per-component snapshot, not the source of truth for numbers.
   engine present. See `control-daemon/src/control_daemon/gpio.py`
   (`FootswitchInputBackend`, with a `MockFootswitchBackend` for dev/tests)
   and `control-daemon/src/control_daemon/audio_engine_client.py`
-  (`AudioEngineClient`, with a `NullAudioEngineClient` placeholder until the
-  real JUCE-based engine exists).
+  (`AudioEngineClient`: `NullAudioEngineClient` when no engine socket is
+  configured, `UnixSocketAudioEngineClient` to drive a real `audio-engine`).
 
 - **Client roles are distinguished on WebSocket connect** (`app`,
   `footswitch`, `display`) via a `hello` message. Footswitch/display
@@ -135,7 +141,7 @@ one-line-per-component snapshot, not the source of truth for numbers.
   from-scratch AP needs. See `deploy/README.md` for the older-OS fallback
   recipe. Persistent data (`/var/lib/multieffect-amp-modeler/`) lives
   outside the git checkout so a redeploy (`git pull` + re-run) never
-  touches presets/banks/uploaded assets.
+  touches rigs/presets/uploaded assets.
 
 ## Resource constraints
 
@@ -192,4 +198,5 @@ interface, real GPIO, or a real JUCE build to be developed and tested:
 Tracked in [`docs/open-questions.md`](./docs/open-questions.md) as they get
 resolved (Pi 4 vs 5, USB audio interface choice, crossfade/preloading
 strategy for glitch-free preset switching, whether the onboard display ships
-in V1, etc.).
+in V1, power-cut resilience for a pedal that gets switched off like a
+stompbox rather than shut down).

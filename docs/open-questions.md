@@ -31,11 +31,24 @@ architecturally.
 
 ## 5. Exact crossfade/preloading strategy for glitch-free preset switching
 
-**Status: open.** Belongs to the audio engine (not yet started). Candidates
-per the spec: software crossfade between old/new chains, or background
-preloading of the next preset while the current one plays. The control
-daemon's `AudioEngineClient` interface (`load_preset`, etc.) is written so
-either strategy can be implemented behind it without changing the daemon.
+**Status: open.** Belongs to the audio engine. Candidates per the spec:
+software crossfade between old/new chains, or background preloading of the
+next preset while the current one plays. The control daemon's
+`AudioEngineClient` interface (`load_preset`, etc.) is written so either
+strategy can be implemented behind it without changing the daemon.
+
+Where it stands: `PresetSwitcher` (equal-power crossfade between two
+already-prepared chains) is built and tested but not wired into the
+real-time path. More fundamentally, the rig/preset split (see
+`ARCHITECTURE.md`) was introduced precisely so that switching presets
+*within* a rig needs no loading at all -- the amp, cab and every effect are
+the same blocks, only their enable flags and params differ -- but the engine
+doesn't exploit it yet: `ResourceManager::loadPreset` rebuilds the whole
+chain on every `load_preset`, re-reading the `.nam` and IR from disk, while
+holding the mutex the audio callback needs. So the likely shape of the answer
+is two-tier: in-rig preset changes applied in place to a chain built once per
+rig (no load, nothing to crossfade beyond per-param smoothing), and rig changes
+built off the audio thread then crossfaded with `PresetSwitcher`.
 
 ## 6. Power-cut resilience (the Pi will be switched on/off like a stompbox, not gracefully shut down)
 
@@ -65,7 +78,7 @@ doesn't touch:
   (`raspi-config` → Overlay Filesystem / `raspi-config nonint do_overlayfs`)
   so the root filesystem can't be corrupted by a power cut at all. The
   catch: that overlay's writable layer is tmpfs and discarded on reboot, so
-  `/var/lib/multieffect-amp-modeler` (`DATA_DIR` — presets/banks/assets)
+  `/var/lib/multieffect-amp-modeler` (`DATA_DIR` — rigs/presets/assets)
   would need to live on its own real, separately-mounted partition
   *excluded* from the overlay, or every saved preset would vanish on the
   next boot. Not yet automated in `install.sh` or verified on real
