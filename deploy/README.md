@@ -512,6 +512,22 @@ Wire a **momentary** (not latching) SPST button between physical **pin 5
 (GPIO3)** and any ground pin (6, 9, 14...). Reboot once for the overlay to
 load.
 
+> **The switch type is not a detail -- it decides whether this works at
+> all.** A rocker/toggle sold as "ON/OFF" latches: held closed, it keeps
+> GPIO3 tied to ground, so you get one shutdown and then a Pi that won't
+> boot while it sits in that position. `gpio-shutdown` needs a
+> press-and-release edge. Look for "momentary SPST, normally open" (12mm
+> tactile and anti-vandal buttons are the usual formats).
+>
+> A mains-rated latching switch (e.g. 3A 250V AC) is still useful -- just
+> not here. Put it on the **AC input, ahead of the PSU**, where that rating
+> is exactly right, and use it as a master cutoff *after* the Pi has
+> halted. Don't put it in the 5V DC line: contacts rated for AC carry much
+> less DC, and a Pi 5 can draw 5A.
+>
+> The two-switch build is the good one -- momentary button for daily
+> on/off, mains rocker for true zero standby draw.
+
 What you get is the stompbox behaviour you'd want from both directions:
 
 - **Press while running** -> the overlay emits a `KEY_POWER` event,
@@ -560,18 +576,50 @@ out to the enclosure is far less work than Option 3 on a Pi 4 -- worth
 weighing in `docs/open-questions.md` #1 (Pi 4 vs Pi 5), because it's a real
 argument for the 5 that has nothing to do with CPU headroom.
 
-### One conflict to design around now, not later
+### The GPIO3 conflict -- and why an HDMI screen avoids it
 
-**GPIO3 is also I2C1 SCL** (and GPIO2 is SDA, pin 3). If the planned onboard
-display (see `docs/open-questions.md` #4) is an I2C OLED -- which most small
-Pi displays are -- it wants that exact pin, and the two cannot share it.
+**GPIO3 is also I2C1 SCL** (GPIO2 is SDA, pin 3). An I2C display -- which most
+small Pi panels are -- wants that exact pin, and it cannot share it with the
+shutdown button. You can move the button
+(`dtoverlay=gpio-shutdown,gpio_pin=17`), but **only GPIO3 wakes a halted Pi
+4**, so moving it costs the press-to-boot half and leaves you a
+shutdown-only button.
 
-You can move the shutdown button (`dtoverlay=gpio-shutdown,gpio_pin=17`),
-but **only GPIO3 wakes a halted Pi 4**, so moving it costs you the
-press-to-boot half and the button becomes shutdown-only. The ways out are an
-SPI display instead of I2C, or a Pi 5 whose own power button leaves GPIO3
-free. Decide this before buying the display, because the cheap fix
-disappears afterwards.
+**An HDMI/USB panel sidesteps this entirely**: it uses no GPIO, so GPIO3
+stays free and press-to-boot works even on a Pi 4. If the display is
+undecided, that's a real point in HDMI's favour beyond screen size -- see
+`docs/open-questions.md` #4. The other escapes are an SPI panel or a Pi 5
+whose own power button leaves GPIO3 alone.
+
+Two things to budget for with an HDMI panel: roughly 0.5-1A over USB on top
+of the Pi, and an explicit video mode. Cheap 3.5" panels are usually
+480x320, and on plain Debian's KMS driver that's a `video=` parameter in
+`cmdline.txt` -- **not** the legacy `hdmi_group`/`hdmi_mode` lines in
+`config.txt` that most Pi tutorials still show.
+
+### Cooling, and the 5V rail your audio interface shares
+
+A fan wired to GPIO pins 4/6 is power-only: always on, full speed, no
+control, spinning from the moment the Pi is powered. Two of them is likely
+overkill -- a decent heatsink plus one quiet fan generally covers sustained
+DSP load -- and for an audio device there are two costs worth weighing:
+
+- **Acoustic.** This is a pedal. Constant fan noise is audible in a quiet
+  room and in front of a microphone.
+- **Electrical.** Fan motors put ripple on the 5V rail, which is the *same
+  rail* feeding the USB audio interface. That's the path that can actually
+  reach the signal, so it belongs in the interface/power decision rather
+  than being treated as a thermal question -- see
+  `docs/open-questions.md` #2.
+
+On a **Pi 5**, prefer its dedicated 4-pin fan header: PWM-controlled and
+thermally managed, so it stays silent until it genuinely needs to spin.
+Mechanically, a connector on pins 4/6 sits immediately beside pin 5 -- check
+its housing doesn't block the GPIO3 button wire.
+
+Whole-system power: a Pi 5 (up to 5A) plus a panel (~1A) plus fans (~0.4A)
+needs a genuinely solid 5V supply, and anything switching the DC side has to
+carry all of it.
 
 ### What this changes about the SD-card risk
 

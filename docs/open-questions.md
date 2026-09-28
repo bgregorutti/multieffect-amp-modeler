@@ -24,6 +24,17 @@ free for an I2C display -- see "Wiring an on/off switch" in
 driver, mounted inside the enclosure with only the instrument input and one
 output channel routed to the panel.
 
+**The 5V rail is part of this decision.** Everything else in the enclosure
+-- an HDMI panel drawing ~1A over USB, and especially any fan wired straight
+to the GPIO 5V pins -- shares the rail that powers the interface. Fan motors
+put ripple on it, and that is the one path in this build that can reach the
+audio signal rather than merely stealing current. Worth deciding together
+with cooling (see "Cooling, and the 5V rail your audio interface shares" in
+`deploy/README.md`) rather than treating cooling as purely thermal: a
+bus-powered interface is more exposed to this than one with its own supply,
+and a PWM fan that idles silent is better than an always-on pair. Also size
+the PSU for the total, not the Pi alone.
+
 ## 3. Preset serialization format
 
 **Status: resolved — JSON.** Versioned schema, atomic writes. See
@@ -37,14 +48,24 @@ connected client, so a display client (I2C LCD/OLED) is a thin consumer of
 the existing WebSocket API whenever it's built — deferring it costs nothing
 architecturally.
 
-One hardware decision here does *not* defer cheaply, though: **I2C vs SPI**.
-An I2C display needs GPIO2/GPIO3 (pins 3 and 5), and GPIO3 is also the only
-pin that wakes a halted Pi 4 — the pin `dtoverlay=gpio-shutdown` defaults to
-for a press-to-shutdown/press-to-boot power button (question #6, and
-"Wiring an on/off switch" in `deploy/README.md`). Picking an I2C display
-means either giving up press-to-boot or moving to a Pi 5 whose own power
-button leaves GPIO3 free. An SPI display avoids the clash entirely. Worth
-settling before buying the panel, since the cheap fix is gone afterwards.
+**Panel interface affects the power button.** An I2C display needs
+GPIO2/GPIO3 (pins 3 and 5), and GPIO3 is also the only pin that wakes a
+halted Pi 4 — the pin `dtoverlay=gpio-shutdown` defaults to for a
+press-to-shutdown/press-to-boot button (question #6, and "Wiring an on/off
+switch" in `deploy/README.md`). An I2C panel therefore costs either
+press-to-boot or a move to the Pi 5. **SPI, or HDMI/USB, avoids the clash
+entirely** — HDMI uses no GPIO at all, which is a point in its favour beyond
+screen size. Current leaning is an HDMI/USB 3.5" panel, which settles this.
+
+**An HDMI panel may also remove most of the work.** `mobile-app/` already
+builds for web (`mobile-app/web/` exists, and the app has been run as a web
+app against a live daemon), so a kiosk browser on the Pi pointed at the
+local daemon would be an onboard display with no new client to write — the
+display client stops being a component and becomes a browser flag. The
+honest caveat: the app has no responsive breakpoints today (a single
+`MediaQuery` call, for keyboard insets), so at a typical 480x320 panel the
+existing layout will be cramped and needs layout work. Probably still less
+work than a display client from scratch, but it is not free.
 
 ## 5. Exact crossfade/preloading strategy for glitch-free preset switching
 
