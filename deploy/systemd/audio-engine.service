@@ -12,10 +12,16 @@ RuntimeDirectory=multieffect-amp-modeler
 RuntimeDirectoryMode=0770
 # --audio is what actually opens a capture/playback device; without it this
 # process is control-plane only (it answers the daemon's socket commands and
-# passes no audio at all -- see main.cpp). __AUDIO_DEVICE_ARGS__ is filled in
-# by deploy/install.sh from --audio-device/AUDIO_DEVICE, and is empty when
-# unset, which falls back to ALSA's default device.
-ExecStart=__REPO_DIR__/audio-engine/build/audio_engine /run/multieffect-amp-modeler/audio-engine.sock --audio __AUDIO_DEVICE_ARGS__
+# passes no audio at all -- see main.cpp). __AUDIO_FLAG_ARGS__ is filled in
+# by deploy/install.sh: "--audio --device NAME" once --audio-device has
+# been set to a real capture-capable interface, empty until then. A Pi's
+# onboard audio has no input side, so passing --audio with no interface
+# connected doesn't fall back to some default -- it fails to open a capture
+# stream and the process exits immediately, which systemd sees as a
+# crash-loop. Deploying control-plane-only until a real interface is
+# configured keeps the app (rig/preset editing, list_block_types) usable
+# during hardware bring-up instead.
+ExecStart=__REPO_DIR__/audio-engine/build/audio_engine /run/multieffect-amp-modeler/audio-engine.sock __AUDIO_FLAG_ARGS__
 Restart=on-failure
 RestartSec=2
 

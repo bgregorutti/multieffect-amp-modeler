@@ -523,20 +523,30 @@ log "installing systemd units"
 # device was configured, leaving the engine on the OS default.
 if [[ -n "${AUDIO_DEVICE}" ]]; then
   log "audio-engine will capture/play through the device matching '${AUDIO_DEVICE}'"
-  AUDIO_DEVICE_ARGS="--device \"${AUDIO_DEVICE}\""
+  AUDIO_FLAG_ARGS="--audio --device \"${AUDIO_DEVICE}\""
 else
-  warn "no --audio-device set: the engine will use ALSA's default device," \
-       "which on a Pi is the onboard bcm2835 and has NO capture side -- so" \
-       "it will fail to open an input. List the real names with:" \
+  # Deliberately not "--audio" with no --device: a Pi's onboard bcm2835 has
+  # NO capture side, so that combination doesn't fall back to some usable
+  # default -- it fails to open an input stream and the process exits
+  # immediately, which systemd sees as a crash-loop (Restart=on-failure
+  # hits "Start request repeated too quickly" within seconds). Until a real
+  # interface is plugged in and named here, run control-plane only: the
+  # engine stays up and keeps answering the daemon's control socket (so
+  # list_block_types and the app's rig/preset editing work), it just passes
+  # no real audio yet.
+  warn "no --audio-device set -- audio-engine will run control-plane only" \
+       "(reachable over its control socket, no real audio I/O) until you" \
+       "plug in an interface and re-run with --audio-device NAME. List the" \
+       "real names with:" \
        "${REPO_DIR}/audio-engine/build/audio_engine --list-devices"
-  AUDIO_DEVICE_ARGS=""
+  AUDIO_FLAG_ARGS=""
 fi
 for unit in control-daemon audio-engine; do
   sed \
     -e "s#__REPO_DIR__#${REPO_DIR}#g" \
     -e "s#__SERVICE_USER__#${SERVICE_USER}#g" \
     -e "s#__DATA_DIR__#${DATA_DIR}#g" \
-    -e "s#__AUDIO_DEVICE_ARGS__#${AUDIO_DEVICE_ARGS}#g" \
+    -e "s#__AUDIO_FLAG_ARGS__#${AUDIO_FLAG_ARGS}#g" \
     "${REPO_DIR}/deploy/systemd/${unit}.service" \
     > "/etc/systemd/system/multieffect-${unit}.service"
 done
