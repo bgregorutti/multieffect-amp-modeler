@@ -438,6 +438,28 @@ chmod 750 "${DATA_DIR}"
 
 if [[ "${SKIP_BUILD}" == "true" ]]; then
   log "--skip-build set: leaving existing audio-engine build / control-daemon venv as-is"
+  # A redeploy that only means to touch config (e.g. no --pull, or a
+  # deliberate --skip-build to avoid the slow real-NAM fetch) can otherwise
+  # leave a binary that silently predates the checkout it's running next to
+  # -- no build error, no crash, just a control socket that answers
+  # `list_block_types` from whatever code was compiled last time. Catch that
+  # here rather than have it surface as "some feature I definitely pushed
+  # isn't in the app."
+  ENGINE_BIN="${REPO_DIR}/audio-engine/build/audio_engine"
+  if [[ -x "${ENGINE_BIN}" ]]; then
+    NEWEST_SOURCE="$(find "${REPO_DIR}/audio-engine/src" "${REPO_DIR}/audio-engine/include" \
+      -type f -newer "${ENGINE_BIN}" 2>/dev/null | head -1)"
+    if [[ -n "${NEWEST_SOURCE}" ]]; then
+      warn "audio-engine source is newer than the built binary" \
+           "(e.g. ${NEWEST_SOURCE#"${REPO_DIR}/"}) -- this is running a STALE build." \
+           "Re-run without --skip-build (add --pull main too if the checkout" \
+           "itself might be behind) to pick up the current source."
+    fi
+  else
+    warn "--skip-build set but no built binary found at" \
+         "${ENGINE_BIN#"${REPO_DIR}/"} -- audio-engine.service will fail to start." \
+         "Re-run without --skip-build at least once."
+  fi
 else
   # ------------------------------------------------------------------------
   # 4. Build audio-engine (Release)
@@ -450,12 +472,38 @@ else
   # way to fail. WITH_REAL_NAM fetches NeuralAmpModelerCore + Eigen at
   # configure time and so needs internet: that's exactly what step 0b's
   # radio borrow exists to provide, and why this runs after it.
-  log "building audio-engine (Release, real audio I/O + real NAM inference)"
+  log "building audio-engine (Release, real audio I/O + real NAM inference)" \
+      "at commit $(git -C "${REPO_DIR}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
   cmake -S "${REPO_DIR}/audio-engine" -B "${REPO_DIR}/audio-engine/build" \
     -DCMAKE_BUILD_TYPE=Release -DAUDIO_ENGINE_BUILD_TESTS=OFF \
     -DAUDIO_ENGINE_WITH_PORTAUDIO=ON \
     -DAUDIO_ENGINE_WITH_REAL_NAM=ON
-  cmake --build "${REPO_DIR}/audio-engine/build" -j"$(nproc)"
+
+  # Built as its own explicit target, not the default `all`: `all` also
+  # includes nam_render (tools/nam_render.cpp), a dev diagnostic that is not
+  # part of the running pedal and links the exact same nam_core archive
+  # WHOLE_ARCHIVE. Under `set -e`, a build-`all` invocation dies on ANY
+  # target failing -- including nam_render alone -- and never reaches the
+  # systemd restart below, leaving whatever (or nothing) was previously
+  # installed running instead of the audio_engine that DID just build fine.
+  # Building this target alone means the one binary the pedal actually needs
+  # is what gates success.
+  cmake --build "${REPO_DIR}/audio-engine/build" -j"$(nproc)" --target audio_engine
+
+  # nam_render best-effort: worth having when it works, never worth failing
+  # a deploy over. See its own CMakeLists.txt comment for why it can fail
+  # independently of audio_engine (WHOLE_ARCHIVE forces the whole nam_core
+  # archive into both, so a corrupt member -- e.g. from an earlier build
+  # that hit ENOSPC/OOM mid-archive -- can take out one link and not the
+  # other depending on which objects each executable's own symbols pull in
+  # first).
+  if ! cmake --build "${REPO_DIR}/audio-engine/build" -j"$(nproc)" --target nam_render; then
+    warn "nam_render (the dry/wet WAV diagnostic tool) failed to build --" \
+         "harmless, it isn't part of the running pedal. If this persists" \
+         "across a clean 'rm -rf audio-engine/build' rebuild, check" \
+         "'df -h' and 'journalctl -k | grep -i \"killed process\"' for" \
+         "disk space / OOM during the nam_core compile."
+  fi
 
   # ------------------------------------------------------------------------
   # 5. control-daemon: venv + install (runtime deps only, no dev/test extras)
