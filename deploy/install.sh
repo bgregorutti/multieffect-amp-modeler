@@ -554,10 +554,22 @@ else
       con-name "${AP_CON_NAME}" \
       autoconnect yes \
       ssid "${WIFI_SSID}"
+    # autoconnect-priority, not just `autoconnect yes` above: a dev Pi
+    # normally also has a client Wi-Fi profile (a netplan-rendered home
+    # network, say) that autoconnects too, and both sit at the default
+    # priority 0. NetworkManager then breaks the tie by whichever profile
+    # was used most recently -- so which network the pedal comes up on
+    # after a power cut depends on what the last run happened to do. A
+    # pedal has to be predictable: highest priority always wins, so the AP
+    # always claims the radio at boot. The client profile is deliberately
+    # left autoconnecting as a fallback -- it only ever gets the radio if
+    # the AP fails to come up, which is the one moment you want a way back
+    # in that isn't a keyboard and a monitor.
     nmcli connection modify "${AP_CON_NAME}" \
       mode ap \
       802-11-wireless.band bg \
       ipv4.method shared \
+      connection.autoconnect-priority 100 \
       wifi-sec.key-mgmt wpa-psk \
       wifi-sec.psk "${WIFI_PASSWORD}"
     nmcli connection up "${AP_CON_NAME}"

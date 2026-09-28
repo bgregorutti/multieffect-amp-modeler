@@ -412,15 +412,58 @@ same way unplugging a wall-wart does -- no clean `shutdown` first. See
   `state.json` via `fsync` + atomic `os.replace`, so a cut mid-save loses at
   most the last unsaved edit, never a corrupt file.
 - **The OS partition is not.** Enough abrupt power cuts during a
-  systemd/journald/apt write can leave Raspberry Pi OS's root filesystem
-  unbootable, needing a re-flash. This is a real risk for anything power-
-  cycled this often, independent of anything in this repo.
+  systemd/journald/apt write can leave the root filesystem unbootable,
+  needing a re-flash. ext4's journal keeps metadata *consistent* but does
+  not make a cut mid-write harmless, and SD cards add their own failure
+  mode: a power loss while the card's controller is updating its internal
+  block mapping can corrupt data that was never being written, which `fsck`
+  cannot always repair. This is a real risk for anything power-cycled this
+  often, independent of anything in this repo.
+- **journald is the main write source** on an otherwise idle pedal, so it is
+  also the main exposure. `Storage=volatile` in
+  `/etc/systemd/journald.conf` cuts it to near zero -- but it also means no
+  logs survive a reboot, so don't do it while you're still debugging audio.
 
-The standard mitigation is Raspberry Pi OS's built-in read-only-root
-overlay (`sudo raspi-config` -> "Overlay Filesystem", or non-interactively
-`sudo raspi-config nonint do_overlayfs 0`), which makes the root filesystem
-immune to power-cut corruption. **This script does not enable it**, on
-purpose: that overlay's writable layer is tmpfs and discarded on every
+### What comes back on its own after a power cut
+
+Both services are `WantedBy=multi-user.target` and `Restart=on-failure`, so
+they start unattended -- nothing needs typing after a power cut.
+
+The Wi-Fi AP needs one thing to be deterministic, which `install.sh` now
+sets: `connection.autoconnect-priority 100` on the `multieffect-ap` profile.
+A dev Pi usually also has a client Wi-Fi profile that autoconnects, and at
+equal priority NetworkManager breaks the tie by *whichever was used most
+recently* -- so the pedal comes up on your home network instead of its own
+AP, depending on what the last run happened to do. Check it after a reboot:
+
+```bash
+nmcli -t -f NAME,AUTOCONNECT,AUTOCONNECT-PRIORITY connection show
+nmcli -t -f NAME connection show --active      # expect multieffect-ap
+```
+
+If an older install left the AP at priority 0, fix it without a full
+redeploy:
+
+```bash
+sudo nmcli connection modify multieffect-ap connection.autoconnect-priority 100
+sudo nmcli connection up multieffect-ap
+```
+
+The client profile is left autoconnecting on purpose: it only gets the radio
+if the AP fails to come up, which is the one moment you want a way in that
+isn't a keyboard and a monitor.
+
+### The root filesystem
+
+The standard mitigation is a read-only root with a tmpfs overlay. On
+Raspberry Pi OS that's built in (`sudo raspi-config` -> "Overlay
+Filesystem"). **On plain Debian -- which is what at least one of these pedals
+is actually running -- there is no `raspi-config`**, so it's either the
+`overlayroot` package (Ubuntu-originated; confirm it's available on your
+release before planning around it) or a hand-written initramfs hook. Budget
+real time for this; it is not a five-minute step.
+
+Either way **this script does not enable it**, on purpose: that overlay's writable layer is tmpfs and discarded on every
 reboot, so `${DATA_DIR}` would need to live on its own real, separately
 mounted partition *excluded* from the overlay first -- otherwise every
 preset you save vanishes on the next boot. That's an SD-card partition
