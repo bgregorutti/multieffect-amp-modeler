@@ -10,6 +10,14 @@ chain, once the audio engine exists. Needs a real NAM model + IR + a
 representative effects chain running under a PREEMPT_RT kernel (or Elk Audio
 OS) with buffer sizes swept down until xruns appear, on both boards.
 
+Power/enclosure input to this decision: the Pi 5 has an onboard power
+button that already does clean shutdown and wake, and `POWER_OFF_ON_HALT=1`
+makes it cut its own rails on halt. Bringing that button out to the
+enclosure is much less work than the equivalent on a Pi 4 (a
+`gpio-poweroff` GPIO plus an external latching circuit), and it leaves GPIO3
+free for an I2C display -- see "Wiring an on/off switch" in
+`deploy/README.md` and question #4 below.
+
 ## 2. Final choice of USB audio interface
 
 **Status: open.** Requirement: class-compliant USB Audio 2.0, no proprietary
@@ -28,6 +36,15 @@ output channel routed to the panel.
 connected client, so a display client (I2C LCD/OLED) is a thin consumer of
 the existing WebSocket API whenever it's built — deferring it costs nothing
 architecturally.
+
+One hardware decision here does *not* defer cheaply, though: **I2C vs SPI**.
+An I2C display needs GPIO2/GPIO3 (pins 3 and 5), and GPIO3 is also the only
+pin that wakes a halted Pi 4 — the pin `dtoverlay=gpio-shutdown` defaults to
+for a press-to-shutdown/press-to-boot power button (question #6, and
+"Wiring an on/off switch" in `deploy/README.md`). Picking an I2C display
+means either giving up press-to-boot or moving to a Pi 5 whose own power
+button leaves GPIO3 free. An SPI display avoids the clash entirely. Worth
+settling before buying the panel, since the cheap fix is gone afterwards.
 
 ## 5. Exact crossfade/preloading strategy for glitch-free preset switching
 
@@ -55,9 +72,17 @@ Where it stands:
 
 ## 6. Power-cut resilience (the Pi will be switched on/off like a stompbox, not gracefully shut down)
 
-**Status: open.** Confirmed design constraint: the pedal's power switch cuts
-power to the Pi directly (no GPIO/soft-shutdown signal beforehand), the
-same way unplugging a wall-wart or a real stompbox's footswitch does.
+**Status: open, but the constraint has softened.** This was originally
+recorded as a confirmed design constraint -- the pedal's power switch cuts
+power to the Pi directly, no GPIO/soft-shutdown signal, the same way
+unplugging a wall-wart does. That is no longer settled: a momentary button
+on GPIO3 plus `dtoverlay=gpio-shutdown` gives a clean shutdown *and*
+press-to-boot from one button, which removes most of the corruption risk
+below for one line of `config.txt`. See "Wiring an on/off switch" in
+`deploy/README.md` for the three options, their standby-draw trade-offs,
+and the GPIO3-vs-I2C conflict that interacts with open question #4.
+
+Interim working practice: `sudo poweroff` before pulling the wire.
 Autostart itself is already solved — both systemd units are `enable`d with
 `Restart=on-failure` (see `deploy/install.sh`, confirmed by the "Reboot
 test" step in `deploy/README.md`) — but this raises two problems autostart
@@ -77,8 +102,16 @@ doesn't touch:
   systemd/journald/apt write can leave Raspberry Pi OS's root filesystem
   unbootable.
 
-  The standard fix is Raspberry Pi OS's **read-only-root overlay**
-  (`raspi-config` → Overlay Filesystem / `raspi-config nonint do_overlayfs`)
+  Note this risk is largely *avoided*, not merely mitigated, if the switch
+  ends up being a soft-shutdown button rather than a bare power cut -- the
+  overlay then guards against accidents (yanked cable, blown supply) rather
+  than against routine use.
+
+  The standard fix is a **read-only-root overlay**. On Raspberry Pi OS
+  that's built in (`raspi-config` → Overlay Filesystem /
+  `raspi-config nonint do_overlayfs`); on the plain Debian at least one of
+  these Pis actually runs there is no `raspi-config`, so it's the
+  `overlayroot` package or a hand-written initramfs hook
   so the root filesystem can't be corrupted by a power cut at all. The
   catch: that overlay's writable layer is tmpfs and discarded on reboot, so
   `/var/lib/multieffect-amp-modeler` (`DATA_DIR` — rigs/presets/assets)

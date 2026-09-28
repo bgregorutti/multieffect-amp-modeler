@@ -474,6 +474,113 @@ automate without verifying it on real hardware first (see this guide's own
 partition) and confirm a saved preset actually survives a hard power cut to
 `${DATA_DIR}`'s own mount before trusting it on a gig.
 
+## Wiring an on/off switch (and what the Pi needs for it)
+
+Short answer: **a plain switch in the power line needs no Pi setup at all,
+and a button that shuts down cleanly needs exactly one line in
+`config.txt`.** Which you pick decides whether the SD-card risk above
+applies to you, so it's worth picking deliberately rather than by what's in
+the parts drawer.
+
+Find your firmware config first -- the path differs between images, and on
+plain Debian it is *not* where most Pi tutorials say:
+
+```bash
+ls /boot/firmware/config.txt /boot/config.txt 2>/dev/null
+ls /boot/firmware/overlays/ | grep -E 'gpio-shutdown|gpio-poweroff'
+```
+
+If those overlays aren't listed, the rest of this section can't work as
+written -- check which package supplies `/boot/firmware/overlays` on your
+release before planning a design around it.
+
+### Option 1 -- latching switch in the power line
+
+Nothing to configure. Every power-off is the abrupt kind, so everything in
+the section above applies at full strength, and you'd want the read-only
+overlay before gigging it.
+
+### Option 2 -- momentary button on GPIO3 (recommended)
+
+One line in `config.txt`:
+
+```
+dtoverlay=gpio-shutdown
+```
+
+Wire a **momentary** (not latching) SPST button between physical **pin 5
+(GPIO3)** and any ground pin (6, 9, 14...). Reboot once for the overlay to
+load.
+
+What you get is the stompbox behaviour you'd want from both directions:
+
+- **Press while running** -> the overlay emits a `KEY_POWER` event,
+  `systemd-logind` sees it (`HandlePowerKey=poweroff` is the default) and
+  runs a clean shutdown. Same safety as typing `sudo poweroff`.
+- **Press while halted** -> the Pi boots. GPIO3 is special: it doubles as
+  the wake line, which is exactly why the overlay defaults to it. One
+  momentary button is your whole power switch.
+
+Verify without gambling an SD card on it:
+
+```bash
+grep -E 'gpio-shutdown|gpio-poweroff' /boot/firmware/config.txt
+grep -B2 -A3 -i 'shutdown' /proc/bus/input/devices   # the overlay's input device
+journalctl -b -u systemd-logind | tail              # after a test press
+```
+
+The button press should produce a normal, logged shutdown. If nothing
+happens, `logind` isn't picking up the key -- check
+`loginctl show-seat seat0` and `HandlePowerKey` in
+`/etc/systemd/logind.conf` before rewiring anything.
+
+**Cost:** a halted Pi still draws a little current (the 5V rail stays up so
+GPIO3 can wake it). Fine for a pedal that lives on a board with a mains
+supply; not fine for battery.
+
+### Option 3 -- Option 2 plus a real power cut
+
+For true zero standby draw, add:
+
+```
+dtoverlay=gpio-poweroff
+```
+
+That asserts a GPIO at the very *end* of shutdown, which is the signal an
+external latching circuit (MOSFET or relay) needs to cut power only once the
+filesystem is already flushed and unmounted. This is the correct design for
+a production pedal and the most work: it needs real circuitry, not just a
+button.
+
+**On a Pi 5 this is mostly solved in hardware.** It has an onboard power
+button that already does a clean shutdown and wake, and
+`POWER_OFF_ON_HALT=1` (via `sudo rpi-eeprom-config --edit`) makes it
+genuinely cut its own rails on halt, down to a few mA. Bringing that button
+out to the enclosure is far less work than Option 3 on a Pi 4 -- worth
+weighing in `docs/open-questions.md` #1 (Pi 4 vs Pi 5), because it's a real
+argument for the 5 that has nothing to do with CPU headroom.
+
+### One conflict to design around now, not later
+
+**GPIO3 is also I2C1 SCL** (and GPIO2 is SDA, pin 3). If the planned onboard
+display (see `docs/open-questions.md` #4) is an I2C OLED -- which most small
+Pi displays are -- it wants that exact pin, and the two cannot share it.
+
+You can move the shutdown button (`dtoverlay=gpio-shutdown,gpio_pin=17`),
+but **only GPIO3 wakes a halted Pi 4**, so moving it costs you the
+press-to-boot half and the button becomes shutdown-only. The ways out are an
+SPI display instead of I2C, or a Pi 5 whose own power button leaves GPIO3
+free. Decide this before buying the display, because the cheap fix
+disappears afterwards.
+
+### What this changes about the SD-card risk
+
+Options 2 and 3 mean the normal power-off path is a clean shutdown, which
+removes the main source of corruption above. The read-only overlay becomes
+defence against accidents (yanked cable, blown supply) rather than against
+your own on/off switch -- still worth doing eventually, no longer the thing
+standing between you and a usable pedal.
+
 ## Security notes
 
 - Both services run as a dedicated, unprivileged system user
