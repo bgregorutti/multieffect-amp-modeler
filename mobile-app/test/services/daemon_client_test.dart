@@ -154,4 +154,100 @@ void main() {
 
     expect(client.status, ConnectionStatus.disconnected);
   });
+
+  test('reconnects on its own after the socket drops', () async {
+    // The whole point: a Wi-Fi blip must not leave the app dead until
+    // someone notices and taps Connect.
+    client = DaemonClient(
+      uri: daemon.wsUri,
+      clientName: 'test-app',
+      reconnectInitialDelay: const Duration(milliseconds: 50),
+      reconnectMaxDelay: const Duration(milliseconds: 100),
+    );
+    await client.connect();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(client.status, ConnectionStatus.connected);
+
+    await daemon.dropConnections();
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(client.status, ConnectionStatus.connected,
+        reason: 'should have reconnected without any manual intervention');
+  });
+
+  test('rebuilds state from the snapshot after reconnecting', () async {
+    client = DaemonClient(
+      uri: daemon.wsUri,
+      clientName: 'test-app',
+      reconnectInitialDelay: const Duration(milliseconds: 50),
+      reconnectMaxDelay: const Duration(milliseconds: 100),
+    );
+    await client.connect();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(client.state.bypass, false);
+
+    // State changed while the app was away -- the reconnect's own
+    // state_snapshot is what has to bring it back in sync.
+    daemon.state = {...daemon.state, 'bypass': true};
+    await daemon.dropConnections();
+    await Future<void>.delayed(const Duration(milliseconds: 500));
+
+    expect(client.status, ConnectionStatus.connected);
+    expect(client.state.bypass, true,
+        reason: 'reconnect must resync state, not keep the stale copy');
+  });
+
+  test('keeps retrying while the daemon is down, then connects when it '
+      'comes back', () async {
+    // Bind a fresh server on a known port so it can be stopped and restarted
+    // at the same address, which is what a daemon/Pi restart looks like.
+    final restartable = FakeControlDaemon();
+    await restartable.start();
+    final uri = restartable.wsUri;
+
+    client = DaemonClient(
+      uri: uri,
+      clientName: 'test-app',
+      reconnectInitialDelay: const Duration(milliseconds: 50),
+      reconnectMaxDelay: const Duration(milliseconds: 100),
+    );
+    await client.connect();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(client.status, ConnectionStatus.connected);
+
+    await restartable.stop();
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(client.status, isNot(ConnectionStatus.connected));
+
+    // Same port again: the retry loop should find it.
+    final revived = FakeControlDaemon();
+    await revived.startOn(uri.port);
+    await Future<void>.delayed(const Duration(milliseconds: 600));
+
+    expect(client.status, ConnectionStatus.connected,
+        reason: 'retry loop should pick the daemon back up unaided');
+    await revived.stop();
+  });
+
+  test('dispose stops the retry loop', () async {
+    client = DaemonClient(
+      uri: daemon.wsUri,
+      clientName: 'test-app',
+      reconnectInitialDelay: const Duration(milliseconds: 50),
+      reconnectMaxDelay: const Duration(milliseconds: 100),
+    );
+    await client.connect();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    final connectionsWhileAlive = daemon.acceptedConnections;
+
+    client.dispose();
+    await daemon.dropConnections();
+    // Long enough that several retries would have fired had dispose not
+    // stopped them -- a disposed client reconnecting would leak a socket
+    // (and, via main.dart's Settings flow, fight the client that replaced it).
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+
+    expect(daemon.acceptedConnections, connectionsWhileAlive,
+        reason: 'a disposed client must not keep reconnecting');
+  });
 }

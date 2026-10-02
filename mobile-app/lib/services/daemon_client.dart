@@ -63,8 +63,24 @@ class DaemonClient extends DaemonClientBase {
   final String clientName;
   final Duration commandTimeout;
 
+  /// Backoff schedule for automatic reconnection. A pedal's Wi-Fi link drops
+  /// for all sorts of ordinary reasons -- the Pi's own AP restarting, the
+  /// phone's radio power-saving, walking out of range mid-set -- and without
+  /// this the app stays dead until someone notices and taps Connect. The
+  /// first retry is deliberately fast (most drops recover immediately), then
+  /// it backs off so a genuinely absent pedal isn't hammered.
+  final Duration reconnectInitialDelay;
+  final Duration reconnectMaxDelay;
+
   WebSocketChannel? _channel;
   StreamSubscription<dynamic>? _subscription;
+
+  Timer? _reconnectTimer;
+  Duration? _nextReconnectDelay;
+
+  /// Set by [dispose] so an in-flight retry can't resurrect a dead client,
+  /// and by [connect] so a manual connect cancels any pending retry.
+  bool _disposed = false;
 
   final _statusController = StreamController<ConnectionStatus>.broadcast();
   final _stateController = StreamController<DaemonState>.broadcast();
@@ -95,6 +111,8 @@ class DaemonClient extends DaemonClientBase {
     required this.uri,
     this.clientName = 'mobile-app',
     this.commandTimeout = const Duration(seconds: 10),
+    this.reconnectInitialDelay = const Duration(milliseconds: 500),
+    this.reconnectMaxDelay = const Duration(seconds: 10),
   });
 
   @override
@@ -119,32 +137,89 @@ class DaemonClient extends DaemonClientBase {
     if (!_stateController.isClosed) _stateController.add(s);
   }
 
+  /// Connects, and from here on keeps itself connected: any drop schedules a
+  /// retry (see [_scheduleReconnect]). Calling this by hand -- the Connect
+  /// button, or saving a new address in Settings -- cancels any pending
+  /// retry and restarts the backoff from scratch, so an explicit user action
+  /// is never left waiting behind a long backoff delay.
+  ///
+  /// Rethrows on failure so a manual connect can surface the error, but a
+  /// retry is scheduled either way.
   @override
   Future<void> connect() async {
+    if (_disposed) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _nextReconnectDelay = null;
+    await _openConnection(rethrowOnFailure: true);
+  }
+
+  Future<void> _openConnection({required bool rethrowOnFailure}) async {
+    if (_disposed) return;
+
+    // A previous socket can still be half-open (a dropped Wi-Fi link often
+    // isn't noticed until a write fails), and leaving its listener attached
+    // would let a dying connection's onDone schedule retries that race this
+    // one.
+    await _subscription?.cancel();
+    _subscription = null;
+    _channel?.sink.close();
+    _channel = null;
+
     _setStatus(ConnectionStatus.connecting);
     try {
       final channel = WebSocketChannel.connect(uri);
       _channel = channel;
       await channel.ready;
+      if (_disposed) {
+        channel.sink.close();
+        return;
+      }
 
       _subscription = channel.stream.listen(
         _onData,
         onError: (Object err, StackTrace st) {
           _setStatus(ConnectionStatus.error);
           _failAllPending('connection error: $err');
+          _scheduleReconnect();
         },
         onDone: () {
           _setStatus(ConnectionStatus.disconnected);
           _failAllPending('connection closed');
+          _scheduleReconnect();
         },
       );
 
       _send(HelloMessage(role: 'app', clientName: clientName).toJson());
       _setStatus(ConnectionStatus.connected);
+      // Reconnected cleanly -- the daemon replies to that hello with a
+      // state_snapshot, so [state] rebuilds itself with no extra work here.
+      // Reset the backoff so the next unrelated drop retries promptly again.
+      _nextReconnectDelay = null;
     } catch (e) {
       _setStatus(ConnectionStatus.error);
-      rethrow;
+      _scheduleReconnect();
+      if (rethrowOnFailure) rethrow;
     }
+  }
+
+  /// Queues the next reconnect attempt, doubling the delay each time up to
+  /// [reconnectMaxDelay]. At most one retry is ever pending.
+  void _scheduleReconnect() {
+    if (_disposed) return;
+    if (_reconnectTimer?.isActive ?? false) return;
+
+    final delay = _nextReconnectDelay ?? reconnectInitialDelay;
+    _nextReconnectDelay = delay * 2 > reconnectMaxDelay
+        ? reconnectMaxDelay
+        : delay * 2;
+
+    _reconnectTimer = Timer(delay, () {
+      _reconnectTimer = null;
+      // Failure here schedules the next attempt via _openConnection's own
+      // catch, so this keeps retrying until it connects or is disposed.
+      unawaited(_openConnection(rethrowOnFailure: false));
+    });
   }
 
   void _onData(dynamic data) {
@@ -309,6 +384,9 @@ class DaemonClient extends DaemonClientBase {
 
   @override
   void dispose() {
+    _disposed = true;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
     _subscription?.cancel();
     _channel?.sink.close();
     _failAllPending('disposed');

@@ -24,6 +24,11 @@ class FakeControlDaemon {
   HttpServer? _server;
   final _sockets = <WebSocket>[];
 
+  /// Total accepted connections over this server's lifetime (not the
+  /// currently-open count) -- lets a test assert that a client did, or did
+  /// not, come back after a drop.
+  int acceptedConnections = 0;
+
   /// In-memory state, shaped like `DaemonState`. Deliberately minimal --
   /// just enough fields for the test scenarios that exercise it.
   Map<String, dynamic> state = {
@@ -47,6 +52,14 @@ class FakeControlDaemon {
     unawaited(_serve());
   }
 
+  /// Binds a specific port rather than an ephemeral one, so a test can stop
+  /// a daemon and bring another up at the same address -- what the app sees
+  /// when the Pi reboots or the service restarts.
+  Future<void> startOn(int port) async {
+    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+    unawaited(_serve());
+  }
+
   Future<void> _serve() async {
     await for (final request in _server!) {
       if (WebSocketTransformer.isUpgradeRequest(request)) {
@@ -61,6 +74,7 @@ class FakeControlDaemon {
 
   void _handleSocket(WebSocket socket) {
     _sockets.add(socket);
+    acceptedConnections++;
     socket.listen((raw) {
       final json = jsonDecode(raw as String) as Map<String, dynamic>;
       _handleMessage(socket, json);
@@ -187,6 +201,16 @@ class FakeControlDaemon {
   void simulateExternalChange(Map<String, dynamic> newState, String reason) {
     state = newState;
     _broadcastStateChanged(reason);
+  }
+
+  /// Drops every connected client but keeps listening -- what a Wi-Fi blip
+  /// or a daemon restart looks like from the app's side, as distinct from
+  /// [stop] (the server going away entirely).
+  Future<void> dropConnections() async {
+    for (final socket in List.of(_sockets)) {
+      await socket.close();
+    }
+    _sockets.clear();
   }
 
   Future<void> stop() async {
