@@ -45,7 +45,8 @@ class MultiEffectApp extends StatefulWidget {
   State<MultiEffectApp> createState() => _MultiEffectAppState();
 }
 
-class _MultiEffectAppState extends State<MultiEffectApp> {
+class _MultiEffectAppState extends State<MultiEffectApp>
+    with WidgetsBindingObserver {
   DaemonEndpoint _endpoint =
       const DaemonEndpoint(host: kDefaultDaemonHost, port: kDefaultDaemonPort);
 
@@ -56,8 +57,31 @@ class _MultiEffectAppState extends State<MultiEffectApp> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _buildServices(connect: true);
     _loadPersistedEndpoint();
+  }
+
+  /// Android (and iOS) suspend a backgrounded app's sockets and timers, so
+  /// coming back to the foreground routinely finds the WebSocket dead --
+  /// and dead in the worst way: a half-open TCP socket produces no close
+  /// event until a write fails, so [DaemonClient]'s own retry loop has
+  /// nothing to react to and the UI sits on a connection that no longer
+  /// exists. Forcing a fresh connect on resume is what actually fixes
+  /// "I unlocked my phone and the app was disconnected again".
+  ///
+  /// Unconditional rather than conditional on [ConnectionStatus]: status can
+  /// still read `connected` for exactly the half-open case this exists to
+  /// handle, so it is not a usable signal here. Reconnecting is cheap -- a
+  /// LAN socket plus one state snapshot.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.resumed) {
+      // Failure just schedules the client's normal backoff retry; nothing
+      // here should throw into the framework's lifecycle callback.
+      _controller.connect().catchError((_) {});
+    }
   }
 
   /// (Re)builds the client/controller/upload-service trio for [_endpoint].
@@ -101,6 +125,7 @@ class _MultiEffectAppState extends State<MultiEffectApp> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller.dispose();
     _daemonClient.dispose();
     _uploadService.dispose();
