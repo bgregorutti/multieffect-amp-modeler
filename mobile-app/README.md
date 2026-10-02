@@ -55,6 +55,69 @@ else (all business logic, all screens) is fully covered by `flutter test`,
 which uses Flutter's headless "flutter tester" engine and needs none of
 that.
 
+## Installing / updating on an Android phone
+
+`adb` ships with the SDK's platform-tools and is not on `PATH` by default:
+
+```bash
+export PATH="$(brew --prefix)/share/android-commandlinetools/platform-tools:$PATH"
+```
+
+Plug the phone in, then confirm both layers see it -- `adb` first, because
+`flutter devices` showing nothing is almost always an `adb`/authorisation
+problem rather than a Flutter one:
+
+```bash
+adb devices -l      # must list the phone as "device", not "unauthorized"
+flutter devices     # should now list it too
+```
+
+Then either run a debug build with hot reload:
+
+```bash
+cd mobile-app
+flutter run -d <device-id-from-flutter-devices>
+```
+
+...or install a standalone release build that survives unplugging, which is
+what you want on an actual pedalboard:
+
+```bash
+cd mobile-app
+flutter build apk --release
+flutter install --release
+```
+
+**You do not need to rebuild to point the app at a different pedal.** The
+daemon address is a runtime setting (gear icon on the Status tab), persisted
+on the device -- see "Known limitations" below. `--dart-define=DAEMON_HOST=...`
+only seeds the very first launch, before anything has been saved.
+
+### If the phone doesn't appear
+
+`adb devices` listing nothing, while the phone is plugged in and charging,
+is a phone-side setting every time -- the Mac seeing it as a USB device is
+not enough. In rough order of likelihood:
+
+1. **Unlock the phone and look for an "Allow USB debugging?" prompt.** It
+   appears on the phone the moment `adb` first touches it, and is easy to
+   miss behind the lock screen. Tick "Always allow from this computer".
+2. **Enable USB debugging**: Settings -> Developer options -> USB debugging.
+   (No Developer options menu? Settings -> About phone -> tap "Build number"
+   seven times.)
+3. **Switch the USB mode to File Transfer / MTP** from the notification that
+   appears on connect. Some phones expose no ADB interface at all on a
+   charge-only connection.
+4. **Try another cable.** Charge-only cables have no data lines and give
+   exactly this symptom: the phone charges, and nothing enumerates.
+
+`adb kill-server && adb start-server` after any of the above forces a fresh
+look rather than reusing a stale daemon.
+
+To sideload instead of using `flutter install` (e.g. to send a build to a
+phone that isn't attached to this machine), the built artifact is at
+`build/app/outputs/flutter-apk/app-release.apk`.
+
 ## Architecture
 
 ```
@@ -259,8 +322,13 @@ implemented and covered by `flutter test`.
   needed. `kDefaultDaemonHost`/`kDefaultDaemonPort` in `main.dart` (still
   overridable at build time via `--dart-define`) are only the first-launch
   fallback, before anything has been saved.
-- `DaemonClient` does not currently auto-reconnect after a dropped
-  connection; `status` correctly reflects `disconnected`/`error`, and
-  `ConnectionScreen` offers a manual "Connect" button, but automatic
-  backoff-retry would be a natural next step for real hardware use (Wi-Fi
-  drops, pedal reboots, etc).
+- `DaemonClient` auto-reconnects after a dropped connection, with
+  exponential backoff (500ms doubling to a 10s ceiling). A manual "Connect"
+  or a Settings save cancels any pending retry and resets the backoff, so an
+  explicit action never waits behind it, and `dispose()` stops the loop --
+  which matters because `main.dart` disposes and rebuilds the client when the
+  address changes, and a surviving retry loop would fight its replacement.
+  State resync is free: the daemon answers the reconnect's `hello` with a
+  `state_snapshot`, so anything that changed while the app was away is
+  picked up. Covered by `daemon_client_test.dart` against a real socket
+  (blip, resync, full daemon restart, and dispose halting retries).
