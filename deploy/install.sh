@@ -45,6 +45,14 @@ ASSUME_YES="false"
 # the engine will fail to open an input. Set this on any Pi with a USB
 # interface; `audio_engine --list-devices` prints the available names.
 AUDIO_DEVICE=""
+# Samples per audio callback (--block-size). Empty = the engine's own default
+# (64, ~1.33ms at 48kHz). Raise it when the health log reports over-budget
+# blocks or device xruns: each block then has proportionally longer to finish
+# (128 -> ~2.67ms, 256 -> ~5.33ms) and per-callback overhead is amortised
+# over more samples. The cost is latency, and it is the first thing to try on
+# a Pi running oversampled pedals (big_muff/tube_screamer do 4x oversampling
+# with 65-tap FIRs) alongside NAM inference and IR convolution.
+BLOCK_SIZE=""
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -110,6 +118,15 @@ Options:
                              capture side at all -- so set this if you've got
                              a USB interface. List the names with:
                              audio-engine/build/audio_engine --list-devices
+  --block-size N            Samples per audio callback. Default: the
+                             engine's own 64 (~1.33ms at 48kHz). Raise this
+                             when the engine's health log reports
+                             over-budget blocks or device xruns -- each
+                             block gets proportionally longer to finish
+                             (128 -> ~2.67ms, 256 -> ~5.33ms) at the cost of
+                             latency. Usually the first thing to try on a Pi
+                             running oversampled pedals alongside NAM
+                             inference. Only applies with --audio-device.
   --service-user NAME       System user the services run as (default: ${SERVICE_USER})
   -h, --help                 Show this help.
 
@@ -147,6 +164,10 @@ while [[ $# -gt 0 ]]; do
     --skip-build) SKIP_BUILD="true"; shift ;;
     --enable-rt-kernel) ENABLE_RT_KERNEL="true"; shift ;;
     --audio-device) AUDIO_DEVICE="$2"; shift 2 ;;
+    --block-size)
+      [[ "${2:-}" =~ ^[0-9]+$ ]] \
+        || die "--block-size requires a number of samples, e.g. --block-size 256"
+      BLOCK_SIZE="$2"; shift 2 ;;
     --service-user) SERVICE_USER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
@@ -541,6 +562,20 @@ else
        "${REPO_DIR}/audio-engine/build/audio_engine --list-devices"
   AUDIO_FLAG_ARGS=""
 fi
+
+# Appended only alongside --audio: the engine parses --block-size in any mode
+# but only applies it when it actually opens a device, so passing it to a
+# control-plane-only process would just be noise in ExecStart.
+if [[ -n "${BLOCK_SIZE}" ]]; then
+  if [[ -n "${AUDIO_FLAG_ARGS}" ]]; then
+    log "audio-engine will use a block size of ${BLOCK_SIZE} samples"
+    AUDIO_FLAG_ARGS="${AUDIO_FLAG_ARGS} --block-size ${BLOCK_SIZE}"
+  else
+    warn "--block-size ${BLOCK_SIZE} ignored: it only takes effect with" \
+         "real audio I/O, which needs --audio-device too."
+  fi
+fi
+
 for unit in control-daemon audio-engine; do
   sed \
     -e "s#__REPO_DIR__#${REPO_DIR}#g" \
