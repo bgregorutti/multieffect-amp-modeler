@@ -8,6 +8,12 @@
 #include <stdexcept>
 #include <string>
 
+#ifdef AUDIO_ENGINE_HAVE_PA_ALSA_RT
+// ALSA-specific PortAudio extension (Linux only -- the header does not exist
+// in the macOS/CoreAudio build, hence the CMake check that defines this).
+#include <pa_linux_alsa.h>
+#endif
+
 namespace audio_engine {
 
 namespace {
@@ -206,6 +212,23 @@ void PortAudioBackend::start(const AudioIoConfig& config, AudioCallback callback
         initialized_ = false;
         throw std::runtime_error(paError("Pa_OpenStream failed", err));
     }
+
+#ifdef AUDIO_ENGINE_HAVE_PA_ALSA_RT
+    // PortAudio's ALSA backend runs its callback at NORMAL scheduling
+    // priority unless asked otherwise -- it does not infer it from the
+    // process's rlimits. So raising LimitRTPRIO in the systemd unit only
+    // lifts the ceiling; without this call nothing ever requests the
+    // priority, the callback competes with every other process on the box,
+    // and you see it as intermittent over-budget blocks and xruns under
+    // load while the CPU is nowhere near saturated.
+    //
+    // Must sit between Pa_OpenStream and Pa_StartStream: it configures the
+    // thread the latter creates. Returns void -- failure (no rlimit
+    // headroom) is not reported here, so verify on the host with:
+    //   ps -L -o tid,cls,rtprio,comm -p "$(pgrep -f build/audio_engine)"
+    // The callback thread should show cls=FF with a non-zero rtprio.
+    PaAlsa_EnableRealtimeScheduling(stream_, 1);
+#endif
 
     err = Pa_StartStream(stream_);
     if (err != paNoError) {

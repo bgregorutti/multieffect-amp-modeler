@@ -62,6 +62,26 @@ if(AUDIO_ENGINE_WITH_PORTAUDIO)
   target_sources(audio_engine_core PRIVATE src/portaudio_backend.cpp)
   target_link_libraries(audio_engine_core PUBLIC PkgConfig::PORTAUDIO)
   target_compile_definitions(audio_engine_core PUBLIC AUDIO_ENGINE_WITH_PORTAUDIO)
+
+  # PaAlsa_EnableRealtimeScheduling() is an ALSA-host-API extension, declared
+  # in a header that only exists in a Linux/ALSA PortAudio build -- the
+  # macOS/CoreAudio one has no equivalent. Without that call the audio
+  # callback runs at normal priority no matter what rlimits the service has
+  # (see the call site in portaudio_backend.cpp), so it matters on the Pi;
+  # detect it rather than assuming, so the macOS dev build still compiles.
+  # CheckIncludeFileCXX, not CheckIncludeFile: this project enables CXX only
+  # (see project() above), and the C variant fails outright without a C
+  # compiler rather than just reporting "not found".
+  include(CheckIncludeFileCXX)
+  set(CMAKE_REQUIRED_INCLUDES ${PORTAUDIO_INCLUDE_DIRS})
+  check_include_file_cxx("pa_linux_alsa.h" HAVE_PA_LINUX_ALSA_H)
+  unset(CMAKE_REQUIRED_INCLUDES)
+  if(HAVE_PA_LINUX_ALSA_H)
+    target_compile_definitions(audio_engine_core PUBLIC AUDIO_ENGINE_HAVE_PA_ALSA_RT)
+    message(STATUS "PortAudio ALSA real-time scheduling: enabled")
+  else()
+    message(STATUS "PortAudio ALSA real-time scheduling: unavailable (not a Linux/ALSA PortAudio)")
+  endif()
 endif()
 
 # --- Real NAM inference (optional, requires network access to vendor) ---
