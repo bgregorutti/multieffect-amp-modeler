@@ -29,6 +29,7 @@ import contextvars
 import hashlib
 import logging
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import List, Optional
@@ -73,6 +74,10 @@ from .ws_protocol import (
 # True while a WS command is being applied (on the loop or in its worker
 # thread): state changes made then are queued for _dispatch to flush in
 # order, instead of being broadcast at once like a GPIO callback's.
+# Commands slower than this are logged with their duration -- on a Pi that
+# is almost always the audio engine loading a preset.
+SLOW_COMMAND_S = 0.25
+
 _in_dispatch: contextvars.ContextVar[bool] = contextvars.ContextVar("in_dispatch", default=False)
 
 logger = logging.getLogger("control_daemon.app")
@@ -220,6 +225,7 @@ def create_app(
     async def ws_endpoint(websocket: WebSocket) -> None:
         await connection_manager.connect(websocket)
         role: Optional[str] = None
+        peer = "?"
         try:
             first_raw = await websocket.receive_json()
             if not isinstance(first_raw, dict) or first_raw.get("type") != "hello":
@@ -243,6 +249,8 @@ def create_app(
 
             role = hello.role
             await connection_manager.set_role(websocket, role)
+            peer = f"{websocket.client.host}:{websocket.client.port}" if websocket.client else "?"
+            logger.info("client connected: %s role=%s name=%s", peer, role, hello.client_name)
             await websocket.send_json(
                 StateSnapshotMessage(state=state_manager.state_view()).model_dump()
             )
@@ -253,8 +261,8 @@ def create_app(
                     websocket, role, raw, state_manager, connection_manager,
                     pending_broadcasts, dispatch_lock,
                 )
-        except WebSocketDisconnect:
-            pass
+        except WebSocketDisconnect as exc:
+            logger.info("client disconnected: %s role=%s code=%s", peer, role, exc.code)
         finally:
             await connection_manager.disconnect(websocket)
 
@@ -324,6 +332,7 @@ async def _dispatch(
         # Run on the event loop, that froze the whole daemon -- every other
         # client, the display's updates included -- for the duration.
         token = _in_dispatch.set(True)
+        started = time.monotonic()
         try:
             result = await asyncio.to_thread(_apply, state_manager, message)
         except StateError as exc:
@@ -341,6 +350,9 @@ async def _dispatch(
             failed = False
         finally:
             _in_dispatch.reset(token)
+            elapsed = time.monotonic() - started
+            if elapsed > SLOW_COMMAND_S:
+                logger.info("%s took %.2fs to apply", msg_type, elapsed)
 
         if not failed and result is not None:
             await connection_manager.send(

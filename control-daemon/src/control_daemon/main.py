@@ -69,6 +69,10 @@ def run() -> None:
     host = os.environ.get("CONTROL_DAEMON_HOST", "0.0.0.0")
     port = int(os.environ.get("CONTROL_DAEMON_PORT", "8765"))
     log_level = os.environ.get("CONTROL_DAEMON_LOG_LEVEL", "info")
+    # uvicorn only configures its own loggers: without this, every INFO line
+    # of the daemon itself (clients connecting and leaving, slow commands)
+    # was silently dropped.
+    logging.basicConfig(level=log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
     logger.info("starting control daemon on %s:%s", host, port)
     _NotifyingServer(uvicorn.Config(
         app, host=host, port=port, log_level=log_level,

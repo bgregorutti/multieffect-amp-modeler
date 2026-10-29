@@ -5,6 +5,9 @@
 #include "audio_engine/vst3_host.hpp"
 #include "audio_engine/wav_file.hpp"
 
+#include <chrono>
+#include <iostream>
+
 namespace audio_engine {
 
 using nlohmann::json;
@@ -85,15 +88,28 @@ json EngineState::handleLoadPreset(const json& command) {
     if (presetIt == command.end() || !presetIt->is_object()) {
         return makeError(EngineErrorCode::ValidationError, "load_preset requires an object field 'preset'");
     }
+    const auto t0 = std::chrono::steady_clock::now();
     Preset preset = presetIt->get<Preset>();  // throws PresetParseError on malformed shape
     // The slow part -- reading/preparing a new amp or cab -- happens here,
     // with the audio thread still playing the current chain.
     auto chain = resourceManager_.buildChain(preset);  // throws for unknown asset ids / load failures
+    const auto t1 = std::chrono::steady_clock::now();
     std::unique_ptr<EngineChain> previous;
     {
         std::lock_guard<std::mutex> audioLock(mutex_);
         previous = resourceManager_.installChain(std::move(chain));
         currentPresetId_ = preset.id;
+    }
+    const auto t2 = std::chrono::steady_clock::now();
+    // Where the time of a preset change goes: building the chain (loading
+    // the amp and cab) versus waiting for the audio callback to release the
+    // lock to swap it in. Only worth a line when it is slow.
+    const auto ms = [](auto from, auto to) {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count();
+    };
+    if (ms(t0, t2) > 250) {
+        std::cerr << "audio-engine: load_preset '" << preset.id << "' took " << ms(t0, t2)
+                  << " ms (build " << ms(t0, t1) << " ms, swap " << ms(t1, t2) << " ms)\n";
     }
     // `previous` is destroyed here, after the audio lock is released, so
     // freeing an amp/cab the new chain didn't reuse never stalls audio.

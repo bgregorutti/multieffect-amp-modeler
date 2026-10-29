@@ -17,6 +17,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, List, Optional, Union
@@ -208,6 +209,7 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
         return value, but register_asset/list_block_types need the reply's
         own extra fields."""
         line = (json.dumps(command) + "\n").encode("utf-8")
+        started = time.monotonic()
         with self._lock:
             for attempt in (1, 2):
                 try:
@@ -235,6 +237,9 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
                         )
                         return {}
                     reply = json.loads(reply_line) if reply_line else {}
+                    elapsed = time.monotonic() - started
+                    if elapsed > 0.25:
+                        logger.info("audio-engine answered %s in %.2fs", command.get("cmd"), elapsed)
                     if not reply.get("ok", False):
                         # Reachable and refusing: the engine is now playing
                         # something other than what the daemon believes, so
