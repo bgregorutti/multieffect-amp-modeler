@@ -1,4 +1,7 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'services/asset_upload_service.dart';
 import 'services/daemon_client.dart';
@@ -58,8 +61,21 @@ class _MultiEffectAppState extends State<MultiEffectApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _keepScreenOn(true);
     _buildServices(connect: true);
     _loadPersistedEndpoint();
+  }
+
+  /// The app is a remote control used while playing, hands on the guitar.
+  /// With the screen timing out (2 minutes by default), the OS suspends the
+  /// app and closes its socket, and the next tap -- on waking the phone --
+  /// goes into a dead connection and times out. Staying awake while the app
+  /// is in the foreground avoids the disconnect in the first place; the
+  /// reconnect on resume below remains the safety net for everything else.
+  /// Best effort: a platform without wakelock support just keeps the
+  /// default behaviour.
+  void _keepScreenOn(bool on) {
+    unawaited((on ? WakelockPlus.enable() : WakelockPlus.disable()).catchError((_) {}));
   }
 
   /// Android (and iOS) suspend a backgrounded app's sockets and timers, so
@@ -126,6 +142,7 @@ class _MultiEffectAppState extends State<MultiEffectApp>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _keepScreenOn(false);
     _controller.dispose();
     _daemonClient.dispose();
     _uploadService.dispose();

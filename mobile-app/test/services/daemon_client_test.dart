@@ -272,4 +272,20 @@ void main() {
       expect((await second)['bypass'], false);
     },
   );
+
+  test('a command while disconnected fails at once instead of timing out', () async {
+    client = DaemonClient(
+      uri: daemon.wsUri,
+      clientName: 'test-app',
+      commandTimeout: const Duration(seconds: 5),
+    );
+    // Never connected.
+    final stopwatch = Stopwatch()..start();
+    await expectLater(
+      client.setBypass(const SetBypassCommand(bypass: true)),
+      throwsA(isA<DaemonCommandError>()
+          .having((e) => e.code, 'code', 'not_connected')),
+    );
+    expect(stopwatch.elapsed, lessThan(const Duration(seconds: 1)));
+  });
 }

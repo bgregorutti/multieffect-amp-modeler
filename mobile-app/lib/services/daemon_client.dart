@@ -319,6 +319,15 @@ class DaemonClient extends DaemonClientBase {
         // That command's own caller gets its outcome; this one just goes next.
       }
     }
+    // Writing to a socket that isn't open is silent: the command would only
+    // surface 10 s later as "no reply". Say so at once instead, e.g. for a
+    // tap in the moment between waking the phone and the reconnect landing.
+    if (_status != ConnectionStatus.connected) {
+      throw DaemonCommandError(
+        'not_connected',
+        'not connected to the pedal (${_status.name}) -- reconnecting',
+      );
+    }
     final completer = Completer<Map<String, dynamic>>();
     _pendingByType[cmd.type] = completer;
     _send(cmd.toJson());
