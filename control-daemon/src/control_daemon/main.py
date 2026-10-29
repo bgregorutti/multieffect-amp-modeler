@@ -70,7 +70,13 @@ def run() -> None:
     port = int(os.environ.get("CONTROL_DAEMON_PORT", "8765"))
     log_level = os.environ.get("CONTROL_DAEMON_LOG_LEVEL", "info")
     logger.info("starting control daemon on %s:%s", host, port)
-    _NotifyingServer(uvicorn.Config(app, host=host, port=port, log_level=log_level)).run()
+    _NotifyingServer(uvicorn.Config(
+        app, host=host, port=port, log_level=log_level,
+        # Protocol-level pings reap a client whose link died without a close
+        # (the uvicorn default is 20 s + 20 s): the phone reconnects on its
+        # own, and the dead socket would otherwise sit in the client list.
+        ws_ping_interval=10.0, ws_ping_timeout=10.0,
+    )).run()
 
 
 if __name__ == "__main__":

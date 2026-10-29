@@ -327,14 +327,14 @@ async def _dispatch(
         try:
             result = await asyncio.to_thread(_apply, state_manager, message)
         except StateError as exc:
-            await websocket.send_json(
-                ErrorMessage(code=exc.code, message=exc.message).model_dump()
+            await connection_manager.send(
+                websocket, ErrorMessage(code=exc.code, message=exc.message).model_dump()
             )
             result, failed = None, True
         except Exception as exc:  # pragma: no cover - defensive catch-all
             logger.exception("unhandled error applying %s", msg_type)
-            await websocket.send_json(
-                ErrorMessage(code="internal_error", message=str(exc)).model_dump()
+            await connection_manager.send(
+                websocket, ErrorMessage(code="internal_error", message=str(exc)).model_dump()
             )
             result, failed = None, True
         else:
@@ -343,8 +343,8 @@ async def _dispatch(
             _in_dispatch.reset(token)
 
         if not failed and result is not None:
-            await websocket.send_json(
-                {"type": "command_ok", "command": msg_type, "result": result}
+            await connection_manager.send(
+                websocket, {"type": "command_ok", "command": msg_type, "result": result}
             )
 
         # Flush any broadcast(s) the mutation above queued -- always *after*
