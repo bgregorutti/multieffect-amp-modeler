@@ -71,13 +71,13 @@ from .ws_protocol import (
     UpdateRigMessage,
 )
 
-# True while a WS command is being applied (on the loop or in its worker
-# thread): state changes made then are queued for _dispatch to flush in
-# order, instead of being broadcast at once like a GPIO callback's.
 # Commands slower than this are logged with their duration -- on a Pi that
 # is almost always the audio engine loading a preset.
 SLOW_COMMAND_S = 0.25
 
+# True while a WS command is being applied (on the loop or in its worker
+# thread): state changes made then are queued for _dispatch to flush in
+# order, instead of being broadcast at once like a GPIO callback's.
 _in_dispatch: contextvars.ContextVar[bool] = contextvars.ContextVar("in_dispatch", default=False)
 
 logger = logging.getLogger("control_daemon.app")
