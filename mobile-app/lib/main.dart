@@ -135,7 +135,7 @@ class _MultiEffectAppState extends State<MultiEffectApp>
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Multi-Effect Amp Modeler',
+      title: 'MyRig',
       theme: ThemeData(colorSchemeSeed: Colors.deepPurple, useMaterial3: true),
       darkTheme: ThemeData(
         colorSchemeSeed: Colors.deepPurple,

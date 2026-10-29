@@ -1,11 +1,11 @@
 {
-    "name": "mobile_app",
-    "short_name": "mobile_app",
+    "name": "MyRig",
+    "short_name": "MyRig",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#1c1e28",
     "theme_color": "#1c1e28",
-    "description": "A new Flutter project.",
+    "description": "Control your multi-effect amp modeler pedal.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
