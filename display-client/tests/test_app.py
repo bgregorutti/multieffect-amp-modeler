@@ -168,3 +168,23 @@ async def test_boot_screen_until_engine_ready():
         await task
         server.close()
         await server.wait_closed()
+
+
+async def test_crash_looping_engine_does_not_hold_the_boot_screen():
+    async def handler(ws, *_):
+        await ws.recv()
+        await ws.send(json.dumps({"type": "state_snapshot", "state": _state(0)}))
+        await ws.wait_closed()
+
+    server, uri = await _serve(handler)
+    probe = _Probe(units=UnitState(active="activating", sub="auto-restart"))
+    app = DisplayApp(Config(uri=uri), _Capture(), probe=probe)
+    task = asyncio.create_task(app.run())
+    try:
+        await _wait_for(lambda: not app.booting)
+        assert app.view is not None
+    finally:
+        app.request_shutdown()
+        await task
+        server.close()
+        await server.wait_closed()

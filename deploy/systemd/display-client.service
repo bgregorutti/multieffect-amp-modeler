@@ -25,6 +25,16 @@ Environment=DISPLAY_CLIENT_OUTPUT=auto
 Environment=DISPLAY_CLIENT_WIDTH=__LCD_WIDTH__
 Environment=DISPLAY_CLIENT_HEIGHT=__LCD_HEIGHT__
 Environment=DISPLAY_CLIENT_ROTATE=__LCD_ROTATE__
+# Take the Linux text console off every framebuffer before drawing, or
+# boot messages, the getty login prompt and the cursor keep drawing on top
+# of the panel. Unbinding fbcon (rather than putting the VT in graphics
+# mode) is the only thing that sticks: getty@tty1 resets its terminal to
+# text mode when it starts (TTYReset=yes). "+" runs this one line as root,
+# outside the sandbox below. It also blanks the HDMI console, which a
+# headless pedal doesn't use -- SSH in instead. Not undone on stop: at
+# shutdown the console would otherwise draw over the "shutting down" frame.
+# To get it back by hand: echo 1 | sudo tee /sys/class/vtconsole/vtcon1/bind
+ExecStartPre=+/bin/sh -c 'for v in /sys/class/vtconsole/vtcon*; do grep -q "frame buffer" "$$v/name" && echo 0 > "$$v/bind"; done; true'
 ExecStart=__REPO_DIR__/display-client/.venv/bin/display-client
 Restart=on-failure
 RestartSec=1

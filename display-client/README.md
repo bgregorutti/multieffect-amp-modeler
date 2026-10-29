@@ -56,9 +56,26 @@ Overlay parameters, if needed: `dtoverlay=waveshare35c,rotate=90,speed=...,fps=.
 (it also accepts `bgr`, `txbuflen`, `swapxy`). Rotation can instead be done
 by this client (`DISPLAY_CLIENT_ROTATE`) with no reboot.
 
-Leave the stock `dtoverlay=vc4-kms-v3d` line in place. HDMI then stays
-`/dev/fb0`, the panel becomes `/dev/fb1`, and the Linux text console stays
-on fb0 instead of drawing over the panel.
+Leave the stock `dtoverlay=vc4-kms-v3d` line in place. Whether the panel
+ends up as `/dev/fb0` or `/dev/fb1` depends on probe order (and on whether
+HDMI is plugged in); the client finds it either way.
+
+### Keeping the Linux console off the panel
+
+Left alone, the kernel's framebuffer console draws boot messages, the
+login prompt and a blinking cursor on top of the client's frames. Two
+things prevent it, both set up by `install.sh --lcd waveshare35c`:
+
+- The unit's `ExecStartPre` unbinds the framebuffer console
+  (`/sys/class/vtconsole/vtconN/bind`) before the client starts. Switching
+  the VT to graphics mode instead doesn't last: `getty@tty1` resets its
+  terminal to text mode when it starts. This also blanks the HDMI console,
+  so use SSH. To get the console back until the next boot:
+  `echo 1 | sudo tee /sys/class/vtconsole/vtcon1/bind`.
+- `quiet loglevel=3 logo.nologo vt.global_cursor_default=0` are added to
+  `cmdline.txt` (backed up as `cmdline.txt.bak-multieffect`), so the few
+  seconds before the client starts don't scroll text across the panel. An
+  option you've already set, such as your own `loglevel=`, is kept as is.
 
 Check after the reboot:
 
@@ -94,14 +111,21 @@ process exists". The client polls
 only**:
 
 1. display client running: 25%
-2. audio engine ready (or failed, or not installed): 50%
+2. audio engine ready (or failed, crash-looping, or not installed): 50%
 3. control daemon ready: 75%
 4. first state snapshot received: 100%, then the live screen
 
 Between steps the bar creeps forward slowly, so a slow step still looks
-alive, but it never passes the next real milestone. If the engine fails,
-the boot screen shows a warning and carries on: the daemon and the app work
-without an engine. If the daemon fails, the screen shows an error and the
+alive, but it never passes the next real milestone. A step taking more than
+5 s also shows its elapsed time.
+
+The engine never holds the boot screen. With no audio interface plugged
+in it exits, and systemd restarts it every 2 s. Between attempts systemd
+reports it as `activating` (sub-state `auto-restart`), never `failed`, so
+that sub-state counts as settled. The boot screen warns
+"Audio engine not running" and moves on. An engine that's simply slow is
+waited for at most 15 s after the daemon's state has arrived. The daemon
+and the app work without an engine. If the daemon fails, the screen shows an error and the
 `journalctl` command to run.
 
 The bar can't cover the first few seconds after power-on. The panel stays

@@ -7,6 +7,13 @@ a unit's ``ActiveState`` is an honest "is it ready" signal. This module
 turns those states -- plus "have we received the daemon's first state
 snapshot" -- into a bar fraction and a label.
 
+A unit that keeps crashing never shows up as ``failed``: between
+``Restart=`` attempts systemd reports it as ``activating`` (sub-state
+``auto-restart``) for as long as the start rate limit isn't hit. The audio
+engine does exactly that when its interface isn't plugged in, so a
+restarting unit counts as settled (with a warning), and the boot screen
+stops waiting for the engine after ``ENGINE_WAIT_S`` regardless.
+
 Only the userspace part of the boot can be shown: the panel is blank until
 the kernel has loaded its overlay, and this client is itself a service.
 """
@@ -25,11 +32,21 @@ logger = logging.getLogger("display_client.boot")
 # already complete when the first frame is drawn.
 TOTAL_STEPS = 4
 
+# Once the daemon's state has arrived, how long to keep waiting for an
+# engine that is neither ready nor visibly failing (e.g. hung opening an
+# audio device) before showing the live screen anyway.
+ENGINE_WAIT_S = 15.0
+
+# A step taking longer than this shows its elapsed time, so a stuck boot is
+# visibly stuck rather than looking like a slow bar.
+SHOW_ELAPSED_AFTER_S = 5.0
+
 
 @dataclass(frozen=True)
 class UnitState:
     load: str = "loaded"  # systemd LoadState: "loaded", "not-found", ...
     active: str = "inactive"  # systemd ActiveState
+    sub: str = ""  # systemd SubState: "running", "auto-restart", ...
 
     @property
     def missing(self) -> bool:
@@ -44,12 +61,18 @@ class UnitState:
         return self.active == "failed"
 
     @property
+    def restarting(self) -> bool:
+        """Crashed and waiting for its next ``Restart=`` attempt."""
+        return self.sub == "auto-restart"
+
+    @property
     def settled(self) -> bool:
-        """Nothing more to wait for: ready, failed, or not installed."""
-        return self.ready or self.failed or self.missing
+        """Nothing more to wait for: ready, failed, crash-looping, or not
+        installed."""
+        return self.ready or self.failed or self.restarting or self.missing
 
 
-UNKNOWN = UnitState(load="unknown", active="unknown")
+UNKNOWN = UnitState(load="unknown", active="unknown", sub="unknown")
 
 
 @dataclass(frozen=True)
@@ -58,34 +81,46 @@ class BootStatus:
     label: str
     warning: Optional[str] = None
     error: Optional[str] = None
+    elapsed_s: Optional[int] = None  # time spent on the current step, once it's slow
 
 
-def boot_status(engine: UnitState, daemon: UnitState, connected: bool) -> BootStatus:
+def boot_status(
+    engine: UnitState, daemon: UnitState, connected: bool, step_s: float = 0.0
+) -> BootStatus:
+    """``step_s``: how long the boot has been on the current step."""
     done = 1
     done += engine.settled
-    done += daemon.settled or connected
+    done += (daemon.ready or daemon.failed or daemon.missing) or connected
     done += connected
 
-    warning = "Audio engine failed to start" if engine.failed else None
+    warning = None
+    if engine.failed or engine.restarting:
+        warning = "Audio engine not running - is the interface plugged in?"
+    if daemon.restarting and not connected:
+        warning = "Control daemon is restarting"
+    elapsed = int(step_s) if step_s >= SHOW_ELAPSED_AFTER_S else None
     if daemon.failed and not connected:
         return BootStatus(done / TOTAL_STEPS, "Control daemon failed", warning,
                           "journalctl -u multieffect-control-daemon")
     if not engine.settled:
         label = "Starting audio engine"
-    elif not (daemon.settled or connected):
+    elif not ((daemon.ready or daemon.failed or daemon.missing) or connected):
         label = "Starting control daemon"
     elif not connected:
         label = "Connecting to control daemon"
     else:
         label = "Ready"
-    return BootStatus(done / TOTAL_STEPS, label, warning)
+    return BootStatus(done / TOTAL_STEPS, label, warning, elapsed_s=None if label == "Ready" else elapsed)
 
 
-def boot_complete(engine: UnitState, connected: bool) -> bool:
+def boot_complete(engine: UnitState, connected: bool, connected_s: float = 0.0) -> bool:
     """Leave the boot screen once the daemon's state has arrived and the
     engine has finished starting one way or the other -- so the first live
-    screen isn't followed a second later by the sound coming on."""
-    return connected and (engine.settled or engine == UNKNOWN)
+    screen isn't followed a second later by the sound coming on. An engine
+    that is still starting ``ENGINE_WAIT_S`` after the daemon connected
+    (``connected_s``) isn't waited for any longer: the live screen works
+    without it."""
+    return connected and (engine.settled or engine == UNKNOWN or connected_s >= ENGINE_WAIT_S)
 
 
 class SmoothProgress:
@@ -114,7 +149,7 @@ class SmoothProgress:
 
 
 def parse_systemctl_show(output: str, units: Iterable[str]) -> Dict[str, UnitState]:
-    """Parse ``systemctl show -p LoadState -p ActiveState u1 u2 ...``: one
+    """Parse ``systemctl show -p LoadState -p ActiveState -p SubState u1 u2 ...``: one
     blank-line-separated block of KEY=VALUE lines per unit, in order."""
     units = list(units)
     blocks = [b for b in output.strip().split("\n\n")] if output.strip() else []
@@ -124,6 +159,7 @@ def parse_systemctl_show(output: str, units: Iterable[str]) -> Dict[str, UnitSta
         result[unit] = UnitState(
             load=fields.get("LoadState", "unknown"),
             active=fields.get("ActiveState", "unknown"),
+            sub=fields.get("SubState", "unknown"),
         )
     return result
 
@@ -153,7 +189,7 @@ class SystemdProbe:
         return stdout.decode(errors="replace")
 
     async def unit_states(self, *units: str) -> Dict[str, UnitState]:
-        output = await self._run("show", "-p", "LoadState", "-p", "ActiveState", *units)
+        output = await self._run("show", "-p", "LoadState", "-p", "ActiveState", "-p", "SubState", *units)
         parsed = parse_systemctl_show(output, units) if output else {}
         return {unit: parsed.get(unit, UNKNOWN) for unit in units}
 

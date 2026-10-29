@@ -489,6 +489,26 @@ if [[ "${LCD}" == "waveshare35c" ]]; then
     } >> "${CONFIG_TXT}"
     LCD_REBOOT_NEEDED="true"
   fi
+
+  # Kernel messages, the Raspberry Pi logo and the blinking cursor would
+  # otherwise scroll across the panel for the few seconds before
+  # display-client starts and takes the console off it (its unit's
+  # ExecStartPre). "quiet" also limits systemd's own status lines to
+  # failures. Each option only if missing; cmdline.txt must stay one line.
+  CMDLINE_TXT="${BOOT_DIR}/cmdline.txt"
+  if [[ -f "${CMDLINE_TXT}" ]]; then
+    CMDLINE_ADD=()
+    for opt in quiet loglevel=3 logo.nologo vt.global_cursor_default=0; do
+      grep -qE "(^|\s)${opt%%=*}(=|\s|$)" "${CMDLINE_TXT}" || CMDLINE_ADD+=("${opt}")
+    done
+    if [[ ${#CMDLINE_ADD[@]} -gt 0 ]]; then
+      log "adding ${CMDLINE_ADD[*]} to ${CMDLINE_TXT}"
+      cp "${CMDLINE_TXT}" "${CMDLINE_TXT}.bak-multieffect"
+      printf '%s %s\n' "$(tr -d '\n' < "${CMDLINE_TXT}")" "${CMDLINE_ADD[*]}" > "${CMDLINE_TXT}.new"
+      mv "${CMDLINE_TXT}.new" "${CMDLINE_TXT}"
+      LCD_REBOOT_NEEDED="true"
+    fi
+  fi
 fi
 
 # --------------------------------------------------------------------------
@@ -849,7 +869,7 @@ Not wired up yet (see ARCHITECTURE.md "Spec coverage"):
 
 SUMMARY
 if [[ "${LCD_REBOOT_NEEDED}" == "true" ]]; then
-  warn "the LCD overlay was just enabled in config.txt -- reboot for the" \
-       "panel to appear (sudo reboot). Until then the display client draws" \
-       "on whatever framebuffer exists."
+  warn "the LCD overlay or boot options were just changed in config.txt /" \
+       "cmdline.txt -- reboot for them to take effect (sudo reboot). Until" \
+       "then the display client draws on whatever framebuffer exists."
 fi

@@ -121,6 +121,8 @@ class Renderer:
             draw.rounded_rectangle((left, top, fill_right, top + bar_h), radius=bar_h // 2, fill=colour)
 
         label = status.label if status.error or fraction >= 1.0 else status.label + "…"
+        if status.elapsed_s is not None and not status.error:
+            label += f" {status.elapsed_s} s"
         f, label = fit_line(draw, label, right - left, self._px(0.065), self._px(0.045), bold=False)
         self._centered(draw, self.h * 0.66, label, f, BAD if status.error else DIM)
 

@@ -119,6 +119,8 @@ class DisplayApp:
         started = time.monotonic()
         last = started
         next_poll = 0.0
+        step_label, step_since = None, started
+        connected_since = None
         while self.booting and not self._stop.is_set():
             now = time.monotonic()
             if now >= next_poll:
@@ -126,10 +128,18 @@ class DisplayApp:
                 self.engine = states[self.config.engine_unit]
                 self.daemon = states[self.config.daemon_unit]
                 next_poll = now + 0.5
-            self.boot = boot_status(self.engine, self.daemon, self.connected)
+            if self.connected and connected_since is None:
+                connected_since = now
+            self.boot = boot_status(self.engine, self.daemon, self.connected, now - step_since)
+            if self.boot.label != step_label:
+                step_label, step_since = self.boot.label, now
             self.progress.update(self.boot.fraction, now - last)
             last = now
-            if boot_complete(self.engine, self.connected):
+            connected_s = now - connected_since if connected_since is not None else 0.0
+            if boot_complete(self.engine, self.connected, connected_s):
+                if not self.engine.settled and self.engine != UNKNOWN:
+                    logger.warning("audio engine still %s/%s; showing the live screen without it",
+                                   self.engine.active, self.engine.sub)
                 logger.info("boot complete after %.1fs (userspace)", now - started)
                 self.booting = False
             self._mark_dirty()
