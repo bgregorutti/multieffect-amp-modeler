@@ -26,6 +26,9 @@ from .models import Asset, BlockParamDescriptor, ResolvedPreset
 logger = logging.getLogger("control_daemon.audio_engine")
 
 
+_SLOW_COMMANDS = frozenset({"load_preset", "register_asset"})
+
+
 class AudioEngineRejected(Exception):
     """The engine was reachable, answered, and said no.
 
@@ -148,9 +151,18 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
     as NullAudioEngineClient, until the engine grows one.
     """
 
-    def __init__(self, socket_path: Union[str, Path], timeout: float = 2.0) -> None:
+    def __init__(
+        self,
+        socket_path: Union[str, Path],
+        timeout: float = 2.0,
+        load_timeout: float = 8.0,
+    ) -> None:
         self.socket_path = str(socket_path)
         self.timeout = timeout
+        # load_preset / register_asset read and prepare NAM and IR files in
+        # the engine before replying, which takes seconds on a Pi. Kept under
+        # the app's own 10 s command timeout so a refusal still reaches it.
+        self.load_timeout = load_timeout
         self._lock = threading.Lock()
         self._sock: socket.socket | None = None
         self._asset_provider: Optional[Callable[[], List[Asset]]] = None
@@ -200,8 +212,28 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
             for attempt in (1, 2):
                 try:
                     sock = self._ensure_connected_locked()
+                    wait_s = (
+                        self.load_timeout if command.get("cmd") in _SLOW_COMMANDS else self.timeout
+                    )
+                    sock.settimeout(wait_s)
                     sock.sendall(line)
-                    reply_line = self._readline_locked(sock)
+                    try:
+                        reply_line = self._readline_locked(sock)
+                    except socket.timeout:
+                        # Delivered, but still being worked on. Re-sending
+                        # would queue a second copy behind the first (the
+                        # engine runs one command at a time) and, on this
+                        # same socket, leave the late reply to be read as
+                        # the next command's. Drop the connection instead;
+                        # the engine finishes the command on its own.
+                        self._close_locked()
+                        logger.warning(
+                            "audio-engine did not answer %s within %.0fs -- it may still be "
+                            "working on it; not retrying",
+                            command.get("cmd"),
+                            wait_s,
+                        )
+                        return {}
                     reply = json.loads(reply_line) if reply_line else {}
                     if not reply.get("ok", False):
                         # Reachable and refusing: the engine is now playing
@@ -236,7 +268,13 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
         sock.settimeout(self.timeout)
         sock.connect(self.socket_path)
         self._sock = sock
-        self._replay_assets_locked(sock)
+        try:
+            self._replay_assets_locked(sock)
+        except OSError:
+            # A reply that never came would be read as the answer to the
+            # next command on this socket: start over on a fresh one.
+            self._close_locked()
+            raise
         return sock
 
     def _replay_assets_locked(self, sock: socket.socket) -> None:
@@ -266,7 +304,7 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
         for asset in assets:
             try:
                 reply = self._exchange_locked(sock, self._register_asset_command(asset))
-            except (OSError, json.JSONDecodeError) as exc:
+            except json.JSONDecodeError as exc:
                 logger.warning("re-registering asset %s failed: %s", asset.id, exc)
                 continue
             if reply.get("ok", False):
@@ -281,6 +319,7 @@ class UnixSocketAudioEngineClient(AudioEngineClient):
 
     def _exchange_locked(self, sock: socket.socket, command: dict) -> dict:
         """One command/reply round trip on an already-held socket."""
+        sock.settimeout(self.load_timeout)
         sock.sendall((json.dumps(command) + "\n").encode("utf-8"))
         reply_line = self._readline_locked(sock)
         return json.loads(reply_line) if reply_line else {}

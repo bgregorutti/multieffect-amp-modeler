@@ -10,6 +10,7 @@ import json
 import socket
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import List
@@ -32,6 +33,8 @@ class FakeEngineServer:
         self.socket_path = socket_path
         self.received: List[dict] = []
         self.reject_next = False
+        # Seconds to sit on a command before replying -- a slow preset load.
+        self.reply_delay_s = 0.0
         # Merged into the next reply -- lets a test simulate e.g.
         # register_asset's "parameters" field or list_block_types'
         # "block_types" field without a real engine process.
@@ -77,7 +80,11 @@ class FakeEngineServer:
                         self.reject_next = False
                     else:
                         reply = {"ok": True, "cmd": command.get("cmd"), **self.extra_reply_fields}
-                    conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
+                    time.sleep(self.reply_delay_s)
+                    try:
+                        conn.sendall((json.dumps(reply) + "\n").encode("utf-8"))
+                    except OSError:
+                        return  # the client gave up and hung up
 
     def close(self) -> None:
         self._listener.close()
@@ -275,3 +282,23 @@ def test_no_asset_provider_means_no_replay(fake_engine):
     client.load_preset(Preset(name="A"))
     client.close()
     assert [c["cmd"] for c in fake_engine.connections[0]] == ["load_preset"]
+
+
+def test_slow_load_is_not_resent_and_the_next_command_gets_its_own_reply(fake_engine):
+    client = UnixSocketAudioEngineClient(fake_engine.socket_path, load_timeout=0.3)
+    fake_engine.reply_delay_s = 0.8
+
+    client.load_preset(Preset(name="Big amp"))  # gives up waiting; must not raise
+
+    # Delivered once and not re-sent behind itself.
+    assert [c["cmd"] for c in fake_engine.received] == ["load_preset"]
+
+    # The late reply is gone with the old connection, so this command is
+    # answered with its own reply rather than the load's.
+    fake_engine.reply_delay_s = 0.0
+    fake_engine.extra_reply_fields = {"bypass": True}
+    time.sleep(1.0)  # the fake engine finishes the first command
+    client.set_bypass(True)
+    client.close()
+    assert [c["cmd"] for c in fake_engine.received] == ["load_preset", "set_bypass"]
+    assert len(fake_engine.connections) == 2

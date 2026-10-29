@@ -25,6 +25,7 @@ that actually needs the machine's RAM/CPU budget. Concretely that means:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import logging
 import threading
@@ -69,6 +70,11 @@ from .ws_protocol import (
     UpdateRigMessage,
 )
 
+# True while a WS command is being applied (on the loop or in its worker
+# thread): state changes made then are queued for _dispatch to flush in
+# order, instead of being broadcast at once like a GPIO callback's.
+_in_dispatch: contextvars.ContextVar[bool] = contextvars.ContextVar("in_dispatch", default=False)
+
 logger = logging.getLogger("control_daemon.app")
 
 # Chunk size for streaming the upload to disk. Small enough to keep peak
@@ -104,17 +110,18 @@ def create_app(
     connection_manager = ConnectionManager()
     asset_dir = store_path.parent / "assets"
 
-    # Reasons queued by a state mutation that happened synchronously on the
-    # event loop's own thread (the overwhelmingly common case: a mutation
-    # made directly inside a WS message handler). `_dispatch` drains this
+    # Reasons queued by a state mutation made by a WS message handler (run on
+    # the event loop's own thread, or in a worker thread on its behalf --
+    # see _dispatch). `_dispatch` drains this
     # right after sending its direct reply to the command's sender, so a
     # client always sees its own `command_ok` before the resulting
     # `state_changed` broadcast -- even though that broadcast also reaches
     # the sender itself, per "broadcast to ALL connected clients".
     pending_broadcasts: List[str] = []
+    dispatch_lock = asyncio.Lock()
 
     def _on_state_changed(reason: str) -> None:
-        if threading.get_ident() == app.state.main_thread_id:
+        if threading.get_ident() == app.state.main_thread_id or _in_dispatch.get():
             pending_broadcasts.append(reason)
             return
         # Called from a different OS thread than the event loop's own (e.g.
@@ -243,7 +250,8 @@ def create_app(
             while True:
                 raw = await websocket.receive_json()
                 await _dispatch(
-                    websocket, role, raw, state_manager, connection_manager, pending_broadcasts
+                    websocket, role, raw, state_manager, connection_manager,
+                    pending_broadcasts, dispatch_lock,
                 )
         except WebSocketDisconnect:
             pass
@@ -260,6 +268,7 @@ async def _dispatch(
     state_manager: DaemonStateManager,
     connection_manager: ConnectionManager,
     pending_broadcasts: List[str],
+    dispatch_lock: asyncio.Lock,
 ) -> None:
     if not isinstance(raw, dict) or "type" not in raw:
         await websocket.send_json(
@@ -303,33 +312,51 @@ async def _dispatch(
         )
         return
 
-    try:
-        result = _apply(state_manager, message)
-    except StateError as exc:
-        await websocket.send_json(
-            ErrorMessage(code=exc.code, message=exc.message).model_dump()
-        )
-        return
-    except Exception as exc:  # pragma: no cover - defensive catch-all
-        logger.exception("unhandled error applying %s", msg_type)
-        await websocket.send_json(
-            ErrorMessage(code="internal_error", message=str(exc)).model_dump()
-        )
-        return
+    # One command at a time, from "apply" through "flush the broadcast": the
+    # state manager isn't safe to mutate from two threads, and a second
+    # client's flush must not send this command's state_changed before this
+    # command's own command_ok (the phone resolves a command from the
+    # broadcast that follows its command_ok, and would wait forever for one
+    # that already went past).
+    async with dispatch_lock:
+        # In a worker thread: applying a command calls the audio engine over
+        # its socket, and loading a preset there can take seconds on a Pi.
+        # Run on the event loop, that froze the whole daemon -- every other
+        # client, the display's updates included -- for the duration.
+        token = _in_dispatch.set(True)
+        try:
+            result = await asyncio.to_thread(_apply, state_manager, message)
+        except StateError as exc:
+            await websocket.send_json(
+                ErrorMessage(code=exc.code, message=exc.message).model_dump()
+            )
+            result, failed = None, True
+        except Exception as exc:  # pragma: no cover - defensive catch-all
+            logger.exception("unhandled error applying %s", msg_type)
+            await websocket.send_json(
+                ErrorMessage(code="internal_error", message=str(exc)).model_dump()
+            )
+            result, failed = None, True
+        else:
+            failed = False
+        finally:
+            _in_dispatch.reset(token)
 
-    if result is not None:
-        await websocket.send_json(
-            {"type": "command_ok", "command": msg_type, "result": result}
-        )
+        if not failed and result is not None:
+            await websocket.send_json(
+                {"type": "command_ok", "command": msg_type, "result": result}
+            )
 
-    # Flush any broadcast(s) the mutation above queued -- always *after* the
-    # direct reply above, so the sender's own command_ok is never preceded
-    # by the broadcast copy of the same change (see _on_state_changed).
-    while pending_broadcasts:
-        reason = pending_broadcasts.pop(0)
-        await connection_manager.broadcast(
-            StateChangedMessage(state=state_manager.state_view(), reason=reason).model_dump()
-        )
+        # Flush any broadcast(s) the mutation above queued -- always *after*
+        # the direct reply above, so the sender's own command_ok is never
+        # preceded by the broadcast copy of the same change (see
+        # _on_state_changed). Also flushed after a StateError: a rejected
+        # select_preset (engine_error) still changed and broadcast the state.
+        while pending_broadcasts:
+            reason = pending_broadcasts.pop(0)
+            await connection_manager.broadcast(
+                StateChangedMessage(state=state_manager.state_view(), reason=reason).model_dump()
+            )
 
 
 def _apply(state_manager: DaemonStateManager, message) -> Optional[dict]:
