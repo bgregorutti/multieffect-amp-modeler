@@ -11,7 +11,11 @@ Wants=network.target
 # normally already there for the app's first list_block_types query.
 
 [Service]
-Type=simple
+# Type=notify: READY=1 is sent once uvicorn has bound the WS port (see
+# control_daemon/sd_notify.py and main.py) -- what the onboard display's
+# boot progress waits for. State is already persisted atomically on every
+# change (persistence.py), so a clean stop has nothing left to flush.
+Type=notify
 User=__SERVICE_USER__
 Group=__SERVICE_USER__
 WorkingDirectory=__REPO_DIR__/control-daemon

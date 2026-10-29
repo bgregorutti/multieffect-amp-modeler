@@ -53,6 +53,17 @@ AUDIO_DEVICE=""
 # a Pi running oversampled pedals (big_muff/tube_screamer do 4x oversampling
 # with 65-tap FIRs) alongside NAM inference and IR convolution.
 BLOCK_SIZE=""
+# Onboard SPI display (--lcd). Empty = install the display client but leave
+# /boot/firmware/config.txt alone (overlay already set up by hand, or no
+# panel yet -- the client then draws on whatever framebuffer exists).
+# "waveshare35c" = also install Waveshare's 3.5" (C) overlay. "none" = no
+# display client at all.
+LCD=""
+# Logical resolution WxH (--lcd-size). Empty = the framebuffer's own size,
+# or 480x320 with --lcd waveshare35c.
+LCD_SIZE=""
+# Clockwise rotation applied by the client in software (--lcd-rotate).
+LCD_ROTATE="0"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -127,6 +138,18 @@ Options:
                              latency. Usually the first thing to try on a Pi
                              running oversampled pedals alongside NAM
                              inference. Only applies with --audio-device.
+  --lcd MODEL               Onboard display. 'waveshare35c' downloads
+                             Waveshare's 3.5" (C) device-tree overlay into
+                             /boot/firmware/overlays and enables it (plus
+                             SPI) in config.txt -- takes effect after a
+                             reboot. 'none' skips the display client
+                             entirely. Default: install the display client,
+                             don't touch the boot config.
+  --lcd-size WxH            Logical resolution, e.g. 480x320 or 320x240.
+                             Default: the framebuffer's own size (480x320
+                             with --lcd waveshare35c).
+  --lcd-rotate DEG          0/90/180/270, clockwise, applied by the display
+                             client (default: 0).
   --service-user NAME       System user the services run as (default: ${SERVICE_USER})
   -h, --help                 Show this help.
 
@@ -168,11 +191,30 @@ while [[ $# -gt 0 ]]; do
       [[ "${2:-}" =~ ^[0-9]+$ ]] \
         || die "--block-size requires a number of samples, e.g. --block-size 256"
       BLOCK_SIZE="$2"; shift 2 ;;
+    --lcd) LCD="${2:-}"; shift 2 ;;
+    --lcd-size) LCD_SIZE="${2:-}"; shift 2 ;;
+    --lcd-rotate) LCD_ROTATE="${2:-}"; shift 2 ;;
     --service-user) SERVICE_USER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
   esac
 done
+
+case "${LCD}" in
+  ""|none|waveshare35c) ;;
+  *) die "--lcd must be 'waveshare35c' or 'none', got '${LCD}'" ;;
+esac
+if [[ -z "${LCD_SIZE}" && "${LCD}" == "waveshare35c" ]]; then
+  LCD_SIZE="480x320"
+fi
+LCD_WIDTH=""; LCD_HEIGHT=""
+if [[ -n "${LCD_SIZE}" ]]; then
+  [[ "${LCD_SIZE}" =~ ^([0-9]+)x([0-9]+)$ ]] \
+    || die "--lcd-size must look like 480x320, got '${LCD_SIZE}'"
+  LCD_WIDTH="${BASH_REMATCH[1]}"; LCD_HEIGHT="${BASH_REMATCH[2]}"
+fi
+[[ "${LCD_ROTATE}" =~ ^(0|90|180|270)$ ]] \
+  || die "--lcd-rotate must be 0, 90, 180 or 270, got '${LCD_ROTATE}'"
 
 [[ $EUID -eq 0 ]] || die "must be run as root: sudo $0 [options]"
 
@@ -396,7 +438,58 @@ apt-get install -y --no-install-recommends \
   build-essential cmake pkg-config nlohmann-json3-dev \
   portaudio19-dev git \
   network-manager dnsmasq-base \
-  ca-certificates curl
+  ca-certificates curl \
+  fonts-dejavu-core
+
+# --------------------------------------------------------------------------
+# 1b. Onboard display overlay (--lcd waveshare35c). Only the device-tree
+#     overlay is used from Waveshare's procedure: their guide also installs
+#     Xorg, LightDM and a desktop, which the spec rules out (section 4.4,
+#     no kiosk/X alongside the real-time engine). The overlay binds the
+#     kernel's fbtft ili9486 driver, which exposes the panel as a plain
+#     /dev/fbN that display-client writes to directly. Runs here, while
+#     step 0b still has internet.
+# --------------------------------------------------------------------------
+LCD_REBOOT_NEEDED="false"
+if [[ "${LCD}" == "waveshare35c" ]]; then
+  BOOT_DIR="/boot/firmware"   # Bookworm and newer
+  [[ -d "${BOOT_DIR}/overlays" ]] || BOOT_DIR="/boot"
+  CONFIG_TXT="${BOOT_DIR}/config.txt"
+  [[ -f "${CONFIG_TXT}" ]] || die "--lcd: no config.txt in ${BOOT_DIR} -- is this a Raspberry Pi OS image?"
+
+  if [[ ! -f "${BOOT_DIR}/overlays/waveshare35c.dtbo" ]]; then
+    log "downloading the Waveshare 3.5\" (C) overlay"
+    LCD_TMP="$(mktemp -d)"
+    curl -fsSL -o "${LCD_TMP}/Waveshare35c.zip" \
+      https://files.waveshare.com/wiki/common/Waveshare35c.zip
+    # python3's zipfile rather than unzip: one fewer package to install.
+    python3 -m zipfile -e "${LCD_TMP}/Waveshare35c.zip" "${LCD_TMP}"
+    [[ -f "${LCD_TMP}/waveshare35c.dtbo" ]] \
+      || die "--lcd: Waveshare35c.zip no longer contains waveshare35c.dtbo -- see display-client/README.md"
+    install -m 0644 "${LCD_TMP}/waveshare35c.dtbo" "${BOOT_DIR}/overlays/"
+    rm -rf "${LCD_TMP}"
+    LCD_REBOOT_NEEDED="true"
+  fi
+
+  # Each line only if no variant of it is there yet, so a hand-tuned
+  # "dtoverlay=waveshare35c,speed=...,rotate=..." is never duplicated or
+  # overridden. "[all]" first: config.txt can end inside a [pi5]/[cm4]
+  # conditional section, which would scope our lines to other boards.
+  LCD_LINES=()
+  grep -qE '^\s*dtparam=spi=on' "${CONFIG_TXT}" || LCD_LINES+=("dtparam=spi=on")
+  grep -qE '^\s*dtoverlay=waveshare35c' "${CONFIG_TXT}" || LCD_LINES+=("dtoverlay=waveshare35c")
+  if [[ ${#LCD_LINES[@]} -gt 0 ]]; then
+    log "enabling ${LCD_LINES[*]} in ${CONFIG_TXT}"
+    cp "${CONFIG_TXT}" "${CONFIG_TXT}.bak-multieffect"
+    {
+      echo ""
+      echo "# Onboard display (multieffect-amp-modeler deploy/install.sh --lcd waveshare35c)"
+      echo "[all]"
+      printf '%s\n' "${LCD_LINES[@]}"
+    } >> "${CONFIG_TXT}"
+    LCD_REBOOT_NEEDED="true"
+  fi
+fi
 
 # --------------------------------------------------------------------------
 # 2. Dedicated, unprivileged system user to run both services
@@ -533,6 +626,17 @@ else
   python3 -m venv "${REPO_DIR}/control-daemon/.venv"
   "${REPO_DIR}/control-daemon/.venv/bin/pip" install --quiet --upgrade pip
   "${REPO_DIR}/control-daemon/.venv/bin/pip" install --quiet -e "${REPO_DIR}/control-daemon"
+
+  # ------------------------------------------------------------------------
+  # 5b. display-client: its own small venv (Pillow + websockets only), so
+  #     the daemon's dependency set stays exactly what it was.
+  # ------------------------------------------------------------------------
+  if [[ "${LCD}" != "none" ]]; then
+    log "setting up display-client virtualenv"
+    python3 -m venv "${REPO_DIR}/display-client/.venv"
+    "${REPO_DIR}/display-client/.venv/bin/pip" install --quiet --upgrade pip
+    "${REPO_DIR}/display-client/.venv/bin/pip" install --quiet -e "${REPO_DIR}/display-client"
+  fi
 fi
 
 # --------------------------------------------------------------------------
@@ -576,23 +680,41 @@ if [[ -n "${BLOCK_SIZE}" ]]; then
   fi
 fi
 
-for unit in control-daemon audio-engine; do
+UNITS=(control-daemon audio-engine)
+if [[ "${LCD}" == "none" ]]; then
+  if [[ -f /etc/systemd/system/multieffect-display-client.service ]]; then
+    log "--lcd none: removing the display client unit"
+    systemctl disable --now multieffect-display-client.service 2>/dev/null || true
+    rm -f /etc/systemd/system/multieffect-display-client.service
+  fi
+else
+  # Listed first: it's the one that shows boot progress for the other two.
+  UNITS=(display-client "${UNITS[@]}")
+fi
+
+for unit in "${UNITS[@]}"; do
   sed \
     -e "s#__REPO_DIR__#${REPO_DIR}#g" \
     -e "s#__SERVICE_USER__#${SERVICE_USER}#g" \
     -e "s#__DATA_DIR__#${DATA_DIR}#g" \
     -e "s#__AUDIO_FLAG_ARGS__#${AUDIO_FLAG_ARGS}#g" \
+    -e "s#__LCD_WIDTH__#${LCD_WIDTH}#g" \
+    -e "s#__LCD_HEIGHT__#${LCD_HEIGHT}#g" \
+    -e "s#__LCD_ROTATE__#${LCD_ROTATE}#g" \
     "${REPO_DIR}/deploy/systemd/${unit}.service" \
     > "/etc/systemd/system/multieffect-${unit}.service"
 done
 
 systemctl daemon-reload
-systemctl enable --now multieffect-control-daemon.service
-systemctl enable --now multieffect-audio-engine.service
-# Re-run-safe: if the units were already running (a redeploy), pick up the
-# freshly built binaries/venv rather than leaving the old process resident.
-systemctl restart multieffect-control-daemon.service
-systemctl restart multieffect-audio-engine.service
+# Re-run-safe: if the units were already running (a redeploy), restart picks
+# up the freshly built binaries/venvs rather than leaving the old process
+# resident. Note both services are Type=notify now, so a binary built before
+# READY=1 was added (a --skip-build redeploy over an old build) would be
+# killed after systemd's 90s start timeout -- rebuild at least once.
+for unit in "${UNITS[@]}"; do
+  systemctl enable "multieffect-${unit}.service"
+  systemctl restart "multieffect-${unit}.service"
+done
 
 # --------------------------------------------------------------------------
 # 7. Wi-Fi access point (NetworkManager "shared" mode: DHCP server + NAT
@@ -699,10 +821,17 @@ fi
 # Summary
 # --------------------------------------------------------------------------
 PI_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ "${LCD}" == "none" ]]; then
+  DISPLAY_SUMMARY="not installed (--lcd none)"
+else
+  DISPLAY_SUMMARY="systemctl status multieffect-display-client"
+fi
+
 cat <<SUMMARY
 
 [deploy] Done.
 
+  display-client : ${DISPLAY_SUMMARY}
   control-daemon : systemctl status multieffect-control-daemon
                     ws://${PI_IP:-<pi-ip>}:8765/ws
   audio-engine   : systemctl status multieffect-audio-engine
@@ -710,12 +839,17 @@ cat <<SUMMARY
   data directory  : ${DATA_DIR}
   logs             : journalctl -u multieffect-control-daemon -f
                        journalctl -u multieffect-audio-engine -f
+                       journalctl -u multieffect-display-client -f
 
-Still NOT functional yet (see deploy/README.md "What this deploys, honestly"):
-  - control-daemon does not yet talk to audio-engine (AudioEngineClient is
-    still the null/logging implementation).
-  - audio-engine has no real audio I/O backend and no real NAM inference
-    yet -- it only proves out the control-plane/preset-loading logic.
-  - No footswitch or onboard display client exists yet.
+Not wired up yet (see ARCHITECTURE.md "Spec coverage"):
+  - Physical footswitches: the daemon has the GPIO backend but does not
+    start it; scripts/keyboard_footswitch.py stands in for now.
+  - Soft-power board (gpio-shutdown / gpio-poweroff overlays): board not
+    chosen yet.
 
 SUMMARY
+if [[ "${LCD_REBOOT_NEEDED}" == "true" ]]; then
+  warn "the LCD overlay was just enabled in config.txt -- reboot for the" \
+       "panel to appear (sudo reboot). Until then the display client draws" \
+       "on whatever framebuffer exists."
+fi

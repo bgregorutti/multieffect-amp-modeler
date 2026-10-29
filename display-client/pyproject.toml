@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "display-client"
+version = "0.1.0"
+description = "Read-only onboard TFT display client for the DIY AI guitar multi-effects pedal"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    # 10.1+ for ImageFont.load_default(size), the fallback when no system
+    # TrueType font is installed.
+    "pillow>=10.1",
+    "websockets>=12.0,<14.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+display-client = "display_client.main:run"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

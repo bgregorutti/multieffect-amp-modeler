@@ -28,7 +28,7 @@ done
 
 [[ $EUID -eq 0 ]] || { echo "[deploy] ERROR: must be run as root: sudo $0" >&2; exit 1; }
 
-for unit in multieffect-control-daemon multieffect-audio-engine; do
+for unit in multieffect-display-client multieffect-control-daemon multieffect-audio-engine; do
   if systemctl list-unit-files "${unit}.service" >/dev/null 2>&1; then
     log "stopping/disabling ${unit}"
     systemctl disable --now "${unit}.service" 2>/dev/null || true

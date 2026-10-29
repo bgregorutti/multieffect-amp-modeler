@@ -284,6 +284,7 @@ if(AUDIO_ENGINE_BUILD_TESTS)
     tests/test_resource_manager.cpp
     tests/test_engine_state.cpp
     tests/test_control_socket_integration.cpp
+    tests/test_sd_notify.cpp
   )
   target_link_libraries(audio_engine_tests PRIVATE audio_engine_core GTest::gtest GTest::gtest_main)
   # Golden vectors exported from the Python reference models -- see

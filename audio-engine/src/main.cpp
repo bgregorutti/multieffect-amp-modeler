@@ -39,6 +39,7 @@
 #include "audio_engine/control_socket.hpp"
 #include "audio_engine/engine_state.hpp"
 #include "audio_engine/resource_manager.hpp"
+#include "audio_engine/sd_notify.hpp"
 
 #ifdef AUDIO_ENGINE_WITH_PORTAUDIO
 #include "audio_engine/portaudio_backend.hpp"
@@ -144,6 +145,10 @@ int main(int argc, char** argv) {
     }
 #endif
 
+    // Everything that can fail at startup has succeeded: the control socket
+    // is listening and, with --audio, the stream is running.
+    audio_engine::sdNotify("READY=1");
+
 #ifdef AUDIO_ENGINE_WITH_PORTAUDIO
     std::uint64_t lastXruns = 0, lastOverBudget = 0, lastTotal = 0;
 #endif
@@ -166,6 +171,8 @@ int main(int argc, char** argv) {
         }
 #endif
     }
+
+    audio_engine::sdNotify("STOPPING=1");
 
 #ifdef AUDIO_ENGINE_WITH_PORTAUDIO
     if (wantAudio) {

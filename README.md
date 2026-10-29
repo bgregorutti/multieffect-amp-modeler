@@ -32,11 +32,11 @@ mobile-app/       Flutter app: connects to the daemon's WebSocket API over
                   the footswitch mapping, uploads NAM/IR assets. See
                   mobile-app/README.md.
 
-footswitch/       (planned) GPIO event relay running on the Pi, talking to
-                  the control daemon's WebSocket API.
-
-display/          (planned) Minimal read-only display client (I2C
-                  LCD/OLED), driven by control-daemon broadcasts.
+display-client/   Read-only onboard SPI TFT client (Waveshare 3.5" (C) /
+                  2.8"): boot progress bar, live rig/preset/chain state,
+                  shutdown screen. Draws straight to the framebuffer, no
+                  X server. Includes the LCD driver install steps. See
+                  display-client/README.md.
 
 vst-python/       Python DSP pedal models (Big Muff, Tube Screamer, noise
                   gate): the reference implementation the audio-engine's
@@ -105,8 +105,15 @@ scripts/          Dev-machine testing tools that don't belong to any one
   runtime setting in the app (no rebuild to point it at a pedal). OS
   file-picker integration is stubbed pending on-device testing (needs a
   real phone/emulator).
-- `footswitch`, `display`: not yet started — real GPIO/I2C hardware is
-  needed to build and validate these properly. `next_rig`/`prev_rig`
+- `display-client`: **V1 step 1 built and tested** on a dev machine
+  (`.venv/bin/pytest -q`) against a fake framebuffer and a stand-in daemon,
+  and smoke-tested against the real daemon. Not yet run on the physical
+  panel. Installed and started at boot by `deploy/install.sh`, with
+  `--lcd waveshare35c` for the panel's overlay. See
+  display-client/README.md.
+- Footswitches: the daemon's GPIO backend and debounce are built and
+  tested against a mock but not started on a Pi yet (GPIO 5/6/12/13, see
+  ARCHITECTURE.md "Spec coverage"). `next_rig`/`prev_rig`
   (swap the whole backline) and `next_preset`/`prev_preset` (step within
   the current rig, never crossing into another one) footswitch actions are
   already supported by control-daemon, and exercised today by

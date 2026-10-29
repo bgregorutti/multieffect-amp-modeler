@@ -22,10 +22,26 @@ from pathlib import Path
 
 import uvicorn
 
+from . import sd_notify
 from .app import create_app
 from .audio_engine_client import AudioEngineClient, NullAudioEngineClient, UnixSocketAudioEngineClient
 
 logger = logging.getLogger("control_daemon.main")
+
+
+class _NotifyingServer(uvicorn.Server):
+    """Tells systemd ``READY=1`` only once the listening socket is bound --
+    uvicorn runs the app's lifespan startup *before* binding, so notifying
+    from the lifespan would report ready while connections still fail."""
+
+    async def startup(self, sockets=None) -> None:
+        await super().startup(sockets=sockets)
+        if not self.should_exit:
+            sd_notify.notify("READY=1")
+
+    async def shutdown(self, sockets=None) -> None:
+        sd_notify.notify("STOPPING=1")
+        await super().shutdown(sockets=sockets)
 
 
 def _build_audio_engine() -> AudioEngineClient:
@@ -54,7 +70,7 @@ def run() -> None:
     port = int(os.environ.get("CONTROL_DAEMON_PORT", "8765"))
     log_level = os.environ.get("CONTROL_DAEMON_LOG_LEVEL", "info")
     logger.info("starting control daemon on %s:%s", host, port)
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    _NotifyingServer(uvicorn.Config(app, host=host, port=port, log_level=log_level)).run()
 
 
 if __name__ == "__main__":

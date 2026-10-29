@@ -43,7 +43,14 @@ the PSU for the total, not the Pi alone.
 
 ## 4. Whether the onboard display is needed in V1
 
-**Status: open.** The control daemon already broadcasts state to any
+**Status: resolved -- yes, one SPI TFT (Waveshare 3.5" (C) likely),
+driven by `display-client/`.** The spec revision settles the points below.
+SPI avoids the GPIO3 clash, and a kiosk browser is ruled out as too
+CPU-hungry next to the engine, so the client renders straight to the
+framebuffer instead. Power on/off moves to an external soft-latch board
+(spec section 5). The notes below are kept for the history.
+
+**Original status: open.** The control daemon already broadcasts state to any
 connected client, so a display client (I2C LCD/OLED) is a thin consumer of
 the existing WebSocket API whenever it's built — deferring it costs nothing
 architecturally.

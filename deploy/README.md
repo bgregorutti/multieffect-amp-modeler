@@ -196,6 +196,25 @@ After it comes back up, `systemctl status multieffect-control-daemon` and
 doing anything -- both units are `enable`d, and the AP connection profile
 has `autoconnect yes`.
 
+## Onboard display
+
+`install.sh` always installs and starts `multieffect-display-client` (pass
+`--lcd none` to skip it). For the Waveshare 3.5" RPi LCD (C), add
+`--lcd waveshare35c` once. That downloads the vendor's overlay into
+`/boot/firmware/overlays/` and adds `dtparam=spi=on` and
+`dtoverlay=waveshare35c` to `config.txt` (backup saved as
+`config.txt.bak-multieffect`), then **reboot** once. Only the overlay is
+used: do not follow the vendor's X/LightDM/desktop steps or the old
+`LCD-show` scripts. `--lcd-size 320x240` switches to the 2.8" layout, and
+`--lcd-rotate 180` flips it. Same settings in `config.env` (`LCD`,
+`LCD_SIZE`, `LCD_ROTATE`).
+
+What you should see on every power-on: a few seconds of blank panel (the
+kernel hasn't loaded the overlay yet), then the boot bar going through
+"Starting audio engine", "Starting control daemon" and "Connecting", then
+the live rig/preset screen. On `sudo poweroff`, the panel shows "Shutting
+down…". Driver checks and troubleshooting: `display-client/README.md`.
+
 ## Loading NAM/IR/VST3 asset packs
 
 Copying a `.nam`/`.wav` file straight into `${DATA_DIR}/assets` (see

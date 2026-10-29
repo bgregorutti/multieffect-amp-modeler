@@ -4,7 +4,11 @@ Documentation=file://__REPO_DIR__/audio-engine/README.md
 After=network.target
 
 [Service]
-Type=simple
+# Type=notify: the engine sends READY=1 once its control socket is
+# listening and (with --audio) the audio stream is running -- see
+# include/audio_engine/sd_notify.hpp. Until then systemd reports the unit as
+# "activating", which is what the onboard display's boot progress shows.
+Type=notify
 User=__SERVICE_USER__
 Group=__SERVICE_USER__
 WorkingDirectory=__REPO_DIR__/audio-engine
@@ -63,6 +67,13 @@ ProtectHome=read-only
 SupplementaryGroups=audio
 LimitRTPRIO=95
 LimitMEMLOCK=infinity
+
+# Spec section 3: the engine gets its own cores. CPU 0 is left to the kernel,
+# the control daemon and the display client (pinned there in
+# display-client.service), so rendering a frame never preempts the audio
+# callback. Applies to every thread the engine starts, the PortAudio/ALSA
+# callback thread included.
+CPUAffinity=1 2 3
 
 [Install]
 WantedBy=multi-user.target
