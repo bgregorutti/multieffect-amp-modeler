@@ -49,6 +49,7 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -91,3 +92,24 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+# Launcher and web app icons. Regenerate after changing the source image:
+#   dart run flutter_launcher_icons
+# The source is only read by the generator, so it isn't listed under
+# flutter: assets: and doesn't ship in the app bundle.
+flutter_launcher_icons:
+  image_path: "assets/icon/icon.png"
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  # Android 8+ adaptive icon. The launcher mask shows only the middle of the
+  # foreground, and the ring nearly fills that circle, so a small inset keeps
+  # its glow from being clipped. The background colour matches the icon's.
+  adaptive_icon_background: "#1c1e28"
+  adaptive_icon_foreground: "assets/icon/icon.png"
+  adaptive_icon_foreground_inset: 6
+  web:
+    generate: true
+    image_path: "assets/icon/icon.png"
+    background_color: "#1c1e28"
+    theme_color: "#1c1e28"
