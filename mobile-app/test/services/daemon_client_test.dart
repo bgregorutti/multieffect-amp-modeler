@@ -250,4 +250,26 @@ void main() {
     expect(daemon.acceptedConnections, connectionsWhileAlive,
         reason: 'a disposed client must not keep reconnecting');
   });
+
+  test(
+    'two commands of the same type sent back to back both get their reply',
+    () async {
+      // Rapid preset taps: the second command goes out while the first is
+      // still waiting. Replies carry no id, so they are matched by type in
+      // order -- the first must not be orphaned by the second.
+      client = DaemonClient(
+        uri: daemon.wsUri,
+        clientName: 'test-app',
+        commandTimeout: const Duration(seconds: 2),
+      );
+      await client.connect();
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+
+      final first = client.setBypass(const SetBypassCommand(bypass: true));
+      final second = client.setBypass(const SetBypassCommand(bypass: false));
+
+      expect((await first)['bypass'], true);
+      expect((await second)['bypass'], false);
+    },
+  );
 }

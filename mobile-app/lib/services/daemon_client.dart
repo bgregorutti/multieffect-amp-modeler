@@ -304,7 +304,21 @@ class DaemonClient extends DaemonClientBase {
     _channel?.sink.add(jsonEncode(json));
   }
 
-  Future<Map<String, dynamic>> _sendCommand(DaemonCommand cmd) {
+  Future<Map<String, dynamic>> _sendCommand(DaemonCommand cmd) async {
+    // Replies carry no id, so they are matched to commands by type: only one
+    // command of a type may be waiting for its reply at a time. A second one
+    // (rapid taps on presets) used to replace the first's entry, which then
+    // never completed and surfaced as a 10 s "no reply" error although the
+    // daemon had answered both. Wait for the earlier one to be answered (or
+    // to give up) before sending. The wait is bounded because a timed-out
+    // entry is removed without being completed.
+    while (_pendingByType.containsKey(cmd.type)) {
+      try {
+        await _pendingByType[cmd.type]!.future.timeout(commandTimeout);
+      } catch (_) {
+        // That command's own caller gets its outcome; this one just goes next.
+      }
+    }
     final completer = Completer<Map<String, dynamic>>();
     _pendingByType[cmd.type] = completer;
     _send(cmd.toJson());
