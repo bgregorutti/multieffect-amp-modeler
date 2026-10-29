@@ -63,6 +63,10 @@ class DaemonClient extends DaemonClientBase {
   final String clientName;
   final Duration commandTimeout;
 
+  /// How long opening the socket may take before it counts as a failed
+  /// attempt (and the retry loop takes over).
+  final Duration connectTimeout;
+
   /// Backoff schedule for automatic reconnection. A pedal's Wi-Fi link drops
   /// for all sorts of ordinary reasons -- the Pi's own AP restarting, the
   /// phone's radio power-saving, walking out of range mid-set -- and without
@@ -111,6 +115,7 @@ class DaemonClient extends DaemonClientBase {
     required this.uri,
     this.clientName = 'mobile-app',
     this.commandTimeout = const Duration(seconds: 10),
+    this.connectTimeout = const Duration(seconds: 5),
     this.reconnectInitialDelay = const Duration(milliseconds: 500),
     this.reconnectMaxDelay = const Duration(seconds: 10),
   });
@@ -154,15 +159,38 @@ class DaemonClient extends DaemonClientBase {
     await _openConnection(rethrowOnFailure: true);
   }
 
-  Future<void> _openConnection({required bool rethrowOnFailure}) async {
-    if (_disposed) return;
+  /// The connection attempt in progress, if any. Every caller -- the
+  /// Connect button, the app coming back to the foreground (which Android
+  /// reports more than once in a row: unlocking, closing the notification
+  /// shade...), a scheduled retry -- joins it instead of starting another.
+  /// Overlapping attempts used to open one socket each, every one closing
+  /// the previous; their listeners then reported "connection closed",
+  /// failing the command in flight, and scheduled yet more reconnects.
+  Future<void>? _connecting;
 
+  Future<void> _openConnection({required bool rethrowOnFailure}) {
+    if (_disposed) return Future.value();
+    final attempt = _connecting ??= _connectOnce().whenComplete(() {
+      _connecting = null;
+    });
+    // Only an explicit connect() surfaces a failure; retries already
+    // schedule the next attempt themselves.
+    return rethrowOnFailure ? attempt : attempt.catchError((_) {});
+  }
+
+  Future<void> _connectOnce() async {
     // A previous socket can still be half-open (a dropped Wi-Fi link often
     // isn't noticed until a write fails), and leaving its listener attached
     // would let a dying connection's onDone schedule retries that race this
     // one.
     await _subscription?.cancel();
     _subscription = null;
+    if (_channel != null) {
+      // Their replies would have come on the socket being replaced, and
+      // with its listener cancelled above nothing would ever fail them:
+      // they would sit there until the 10 s "no reply" timeout.
+      _failAllPending('connection replaced by a reconnect');
+    }
     _channel?.sink.close();
     _channel = null;
 
@@ -170,20 +198,27 @@ class DaemonClient extends DaemonClientBase {
     try {
       final channel = WebSocketChannel.connect(uri);
       _channel = channel;
-      await channel.ready;
+      // Bounded: just after the phone wakes, its Wi-Fi may not be back yet,
+      // and an unanswered connect can otherwise hang for tens of seconds
+      // before the retry loop gets a chance to try again.
+      await channel.ready.timeout(connectTimeout);
       if (_disposed) {
         channel.sink.close();
         return;
       }
 
+      // Events from a socket that has since been replaced are ignored: only
+      // the current connection's end may fail commands or trigger a retry.
       _subscription = channel.stream.listen(
         _onData,
         onError: (Object err, StackTrace st) {
+          if (!identical(channel, _channel)) return;
           _setStatus(ConnectionStatus.error);
           _failAllPending('connection error: $err');
           _scheduleReconnect();
         },
         onDone: () {
+          if (!identical(channel, _channel)) return;
           _setStatus(ConnectionStatus.disconnected);
           _failAllPending('connection closed');
           _scheduleReconnect();
@@ -197,9 +232,11 @@ class DaemonClient extends DaemonClientBase {
       // Reset the backoff so the next unrelated drop retries promptly again.
       _nextReconnectDelay = null;
     } catch (e) {
+      _channel?.sink.close();
+      _channel = null;
       _setStatus(ConnectionStatus.error);
       _scheduleReconnect();
-      if (rethrowOnFailure) rethrow;
+      rethrow;
     }
   }
 

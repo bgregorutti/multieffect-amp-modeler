@@ -288,4 +288,41 @@ void main() {
     );
     expect(stopwatch.elapsed, lessThan(const Duration(seconds: 1)));
   });
+
+  test(
+    'overlapping connects (e.g. Android firing resumed twice) leave one '
+    'working connection',
+    () async {
+      client = DaemonClient(
+        uri: daemon.wsUri,
+        clientName: 'test-app',
+        commandTimeout: const Duration(seconds: 2),
+      );
+      final statuses = <ConnectionStatus>[];
+      client.statusStream.listen(statuses.add);
+      // Not awaited one by one: the second starts while the first is still
+      // opening its socket.
+      await Future.wait([
+        client.connect(),
+        client.connect(),
+        client.connect(),
+      ]);
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+
+      for (final bypass in [true, false, true]) {
+        final result = await client.setBypass(SetBypassCommand(bypass: bypass));
+        expect(result['bypass'], bypass);
+      }
+      expect(daemon.helloCount, daemon.openConnections,
+          reason: 'every open socket must be one that said hello');
+      expect(daemon.openConnections, 1);
+      // One socket for all three calls, and no spurious drop: each extra
+      // socket used to be closed by the next call, and its listener then
+      // reported "connection closed" -- failing whatever command was in
+      // flight -- and scheduled yet another reconnect.
+      expect(daemon.acceptedConnections, 1);
+      expect(statuses, isNot(contains(ConnectionStatus.disconnected)));
+      expect(statuses, isNot(contains(ConnectionStatus.error)));
+    },
+  );
 }

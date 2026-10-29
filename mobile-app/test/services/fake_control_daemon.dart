@@ -29,6 +29,14 @@ class FakeControlDaemon {
   /// not, come back after a drop.
   int acceptedConnections = 0;
 
+  /// Open sockets that have said hello. Like the real daemon, broadcasts
+  /// only go to these: a socket that never says hello has no role and gets
+  /// nothing.
+  final _helloed = <WebSocket>{};
+
+  int get openConnections => _sockets.length;
+  int get helloCount => _helloed.length;
+
   /// In-memory state, shaped like `DaemonState`. Deliberately minimal --
   /// just enough fields for the test scenarios that exercise it.
   Map<String, dynamic> state = {
@@ -80,6 +88,7 @@ class FakeControlDaemon {
       _handleMessage(socket, json);
     }, onDone: () {
       _sockets.remove(socket);
+      _helloed.remove(socket);
     });
   }
 
@@ -89,7 +98,7 @@ class FakeControlDaemon {
 
   void _broadcastStateChanged(String reason) {
     final message = {'type': 'state_changed', 'reason': reason, 'state': state};
-    for (final socket in _sockets) {
+    for (final socket in _helloed) {
       _send(socket, message);
     }
   }
@@ -98,6 +107,7 @@ class FakeControlDaemon {
     final type = json['type'] as String?;
     switch (type) {
       case 'hello':
+        _helloed.add(socket);
         _send(socket, {'type': 'state_snapshot', 'state': state});
       case 'create_rig':
         final rigs = state['rigs'] as List<dynamic>;
@@ -211,6 +221,7 @@ class FakeControlDaemon {
       await socket.close();
     }
     _sockets.clear();
+    _helloed.clear();
   }
 
   Future<void> stop() async {
