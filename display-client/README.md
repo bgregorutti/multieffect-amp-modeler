@@ -14,13 +14,23 @@ protocol, and this client never sends anything after `hello`.
 | Screen | When |
 |---|---|
 | Boot | From the first frame until the daemon's state has arrived *and* the audio engine has finished starting. The bar follows real readiness (see "Boot progress" below). |
-| Live | Header: `RIG n/N`, rig name, `BYPASS` badge, `LIVE`/`OFFLINE`. Body: large preset number and name. Strip: the rig's chain in order, each block filled if enabled in this preset, outlined if off. Bypass also draws a red frame round the whole screen. |
+| Live | Header: `RIG n/N`, rig name, `BYPASS` badge, `LIVE`/`OFFLINE`. Body: large preset number and name. Strip: the rig's chain in order, as component images, washed out if the block is off in this preset (a text chip for types without an image). Input gain and volume are not in the strip: below it come the amp and cab names, then `IN` and `VOL` in dB. Bypass also draws a red frame round the whole screen. |
 | Offline | Same live screen, keeping the last known state, with `OFFLINE` and "Reconnecting…". This covers a daemon crash or restart. The client reconnects on its own. |
 | Shutting down | When the system is going down. The frame stays on the panel until the power board cuts the supply. |
 
-This is step 1 of the spec's two-step plan (text layout). Step 2 (icons
-from the daemon's component catalog) can replace the chain strip's text
-chips without changing anything else.
+### Component images
+
+The strip's images are PNGs in `src/display_client/icons/`, one per block
+type (`BLOCK_ICONS` in `view.py`). They are rendered from the SVG sources in
+`control-daemon/data/img/` because Pillow cannot read SVG, and committed so
+the Pi needs no SVG renderer. After changing or adding an SVG:
+
+```bash
+sudo apt install librsvg2-bin   # once, on the dev machine
+display-client/scripts/render_icons.sh
+```
+
+A new image also needs its block type mapped in `BLOCK_ICONS`.
 
 ## Installing the Waveshare 3.5" RPi LCD (C) driver
 
