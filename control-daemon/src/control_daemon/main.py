@@ -76,10 +76,15 @@ def run() -> None:
     logger.info("starting control daemon on %s:%s", host, port)
     _NotifyingServer(uvicorn.Config(
         app, host=host, port=port, log_level=log_level,
-        # Protocol-level pings reap a client whose link died without a close
-        # (the uvicorn default is 20 s + 20 s): the phone reconnects on its
-        # own, and the dead socket would otherwise sit in the client list.
-        ws_ping_interval=10.0, ws_ping_timeout=10.0,
+        # No server pings. On the Pi's hotspot a phone or tablet on Wi-Fi
+        # power saving answers them late, and the daemon then cut every app
+        # connection after exactly interval + timeout (40 s with uvicorn's
+        # 20 s + 20 s defaults, 20 s with 10 s + 10 s) although commands were
+        # flowing fine. Dead clients are handled without them: every send is
+        # time-limited and drops a client that doesn't take it (see
+        # ConnectionManager.send), and the app reconnects itself when a
+        # command gets no reply.
+        ws_ping_interval=None,
     )).run()
 
 

@@ -103,8 +103,12 @@ class FakeControlDaemon {
     }
   }
 
+  /// Message types to read and never answer -- a link that has gone quiet.
+  final ignoredTypes = <String>{};
+
   void _handleMessage(WebSocket socket, Map<String, dynamic> json) {
     final type = json['type'] as String?;
+    if (ignoredTypes.contains(type)) return;
     switch (type) {
       case 'hello':
         _helloed.add(socket);

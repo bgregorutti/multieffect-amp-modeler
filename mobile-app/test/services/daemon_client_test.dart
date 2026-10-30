@@ -325,4 +325,28 @@ void main() {
       expect(statuses, isNot(contains(ConnectionStatus.error)));
     },
   );
+
+  test('a command that gets no reply makes the client reconnect', () async {
+    client = DaemonClient(
+      uri: daemon.wsUri,
+      clientName: 'test-app',
+      commandTimeout: const Duration(milliseconds: 500),
+    );
+    await client.connect();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(daemon.acceptedConnections, 1);
+
+    daemon.ignoredTypes.add('set_bypass');
+    await expectLater(
+      client.setBypass(const SetBypassCommand(bypass: true)),
+      throwsA(isA<DaemonCommandError>().having((e) => e.code, 'code', 'timeout')),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(daemon.acceptedConnections, 2);
+    expect(client.status, ConnectionStatus.connected);
+
+    daemon.ignoredTypes.clear();
+    final result = await client.setBypass(const SetBypassCommand(bypass: true));
+    expect(result['bypass'], true);
+  });
 }

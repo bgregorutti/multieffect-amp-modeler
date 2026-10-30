@@ -377,6 +377,10 @@ class DaemonClient extends DaemonClientBase {
         // state_changed for it never did -- without this, the entry would
         // sit there forever even though the caller has already timed out.
         _awaitingBroadcast.removeWhere((entry) => entry.key == completer);
+        // No reply at all means the link is most likely dead without
+        // either side having noticed (Wi-Fi gone quiet, no close ever
+        // received). Start over rather than keep sending into it.
+        if (!_disposed) unawaited(_openConnection(rethrowOnFailure: false));
         throw DaemonCommandError(
           'timeout',
           'no reply to "${cmd.type}" within $commandTimeout',
