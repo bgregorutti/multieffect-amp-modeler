@@ -38,6 +38,7 @@ BLOCK_ICONS = {
     "delay": "dly",
     "tube_screamer": "drv",
     "big_muff": "fuzz",
+    "noise_gate": "nr"
 }
 
 # Left out of the strip: their value is shown as a number instead, which
