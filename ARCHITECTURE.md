@@ -90,8 +90,13 @@ Done (`display-client/`, see its README):
   work identically on the fbtft driver (vendor `waveshare35c` overlay) and
   DRM tiny drivers.
 - Content step 1: large preset number and name, rig position and name,
-  connection state, bypass, engine error, plus a text signal-chain strip
+  connection state, bypass, engine error, plus a signal-chain strip
   showing which blocks the active preset enables.
+- Content step 2 (first cut): the strip draws component images (rendered
+  from `control-daemon/data/img/*.svg`), washed out when a block is off,
+  with a text chip for types that have none. Input gain and volume are
+  left out of the strip and shown as dB values instead, under the amp and
+  cab names.
 - Resolution comes from configuration (`--lcd-size`, or the framebuffer's
   own size). The same code renders at 480x320 and 320x240, and both are
   covered by tests.
@@ -108,8 +113,8 @@ Ongoing:
   that the overlay works with direct framebuffer rendering on the current
   64-bit kernel (spec open question 7), and the colour order/rotation. The
   README gives the in-tree `piscreen,drm` fallback, untested.
-- Content step 2: icons from the daemon's component catalog. The
-  chain-strip chips are the slot they replace.
+- Content step 2, rest: images per asset rather than per block type,
+  served by a daemon component catalog (issue #7).
 - Final panel choice (2.8" vs 3.5") is still open in the spec. Nothing in
   the code depends on it.
 - Showing V2 pickup state (pot value vs stored value): waits for 4.5.

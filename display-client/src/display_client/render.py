@@ -14,7 +14,8 @@ from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 from .boot import BootStatus
-from .view import LiveView
+from .icons import icon
+from .view import Chip, LiveView
 
 BG = (13, 15, 18)
 PANEL = (28, 32, 38)
@@ -149,8 +150,10 @@ class Renderer:
     def live(self, view: LiveView, connected: bool) -> Image.Image:
         image, draw = self._canvas()
         pad = self._px(0.04)
-        header_h = self._px(0.17)
-        chain_top, chain_bottom = round(self.h * 0.70), round(self.h * 0.85)
+        header_h = self._px(0.16)
+        preset_bottom = round(self.h * 0.49)
+        chain_top, chain_bottom = round(self.h * 0.51), round(self.h * 0.72)
+        amp_y, cab_y, levels_y = self.h * 0.78, self.h * 0.865, self.h * 0.95
 
         # Header: rig position + name, then badges on the right.
         draw.rectangle((0, 0, self.w, header_h), fill=PANEL)
@@ -184,9 +187,11 @@ class Renderer:
             self._centered(draw, self.h * 0.58, "Create one in the mobile app",
                            font(self._px(0.06), bold=False), DIM)
         else:
-            self._preset(draw, view, header_h, chain_top, pad)
-            self._chain(draw, view, chain_top, chain_bottom, pad)
+            self._preset(draw, view, header_h, preset_bottom, pad)
+            self._chain(image, draw, view, chain_top, chain_bottom, pad)
+            self._backline(draw, view, amp_y, cab_y, pad)
 
+        # An error outranks the levels line: it takes its place until cleared.
         footer = None
         if not connected:
             footer = ("Reconnecting to control daemon…", BAD)
@@ -194,7 +199,9 @@ class Renderer:
             footer = (f"Engine: {view.engine_error}", BAD)
         if footer:
             f, text = fit_line(draw, footer[0], self.w - 2 * pad, self._px(0.055), self._px(0.04), bold=False)
-            draw.text((pad, (chain_bottom + self.h) / 2), text, font=f, fill=footer[1], anchor="lm")
+            draw.text((pad, levels_y), text, font=f, fill=footer[1], anchor="lm")
+        elif not view.empty:
+            self._levels(draw, view, levels_y, pad)
 
         if view.bypass:
             border = self._px(0.015)
@@ -213,7 +220,7 @@ class Renderer:
         x = pad * 2 + box
         max_w = self.w - x - pad
         name = view.preset_name or "No preset"
-        f, lines = fit_two_lines(draw, name, max_w, self._px(0.16), self._px(0.075))
+        f, lines = fit_two_lines(draw, name, max_w, self._px(0.13), self._px(0.07))
         line_h = f.size * 1.15
         sub_f = font(self._px(0.05), bold=False)
         block_h = line_h * len(lines) + sub_f.size * 1.6
@@ -225,22 +232,33 @@ class Renderer:
             draw.text((x, y + sub_f.size * 0.4), f"PRESET {view.preset_number}/{view.preset_count}",
                       font=sub_f, fill=DIM, anchor="la")
 
-    def _chain(self, draw: ImageDraw.ImageDraw, view: LiveView, top: int, bottom: int, pad: int) -> None:
+    def _chain(self, image: Image.Image, draw: ImageDraw.ImageDraw, view: LiveView,
+               top: int, bottom: int, pad: int) -> None:
         chips = view.chain
         if not chips:
             return
-        gap = self._px(0.015)
-        width = (self.w - 2 * pad - gap * (len(chips) - 1)) / len(chips)
-        radius = self._px(0.025)
-        # One size for every chip (the largest the widest label allows), so
-        # the strip reads as a row rather than a ransom note.
-        size = round((bottom - top) * 0.45)
-        widest = max(chips, key=lambda c: text_width(draw, c.label, font(size))).label
-        f, _ = fit_line(draw, widest, width * 0.82, size, 6)
+        height = bottom - top
+        gap = self._px(0.02)
+        # Cells no wider than a pedal image is at full height, so a short
+        # chain stays a compact, centred row instead of spreading out.
+        width = min((self.w - 2 * pad - gap * (len(chips) - 1)) / len(chips), height * 1.1)
+        left = (self.w - (width * len(chips) + gap * (len(chips) - 1))) / 2
+        text_chips = [c for c in chips if not self._icon(c, width, height, False)]
+        if text_chips:
+            # One size for every text chip (the largest the widest label
+            # allows), so they read as a row rather than a ransom note.
+            widest = max(text_chips, key=lambda c: text_width(draw, c.label, font(height // 3))).label
+            f, _ = fit_line(draw, widest, width * 0.82, round(height * 0.3), 6)
         for i, chip in enumerate(chips):
-            left = pad + i * (width + gap)
-            rect = (round(left), top, round(left + width), bottom)
+            x = left + i * (width + gap)
             on = chip.enabled and not view.bypass
+            picture = self._icon(chip, width, height, not on)
+            if picture:
+                image.paste(picture, (round(x + (width - picture.width) / 2),
+                                      round(top + (height - picture.height) / 2)), picture)
+                continue
+            rect = (round(x), top + height // 6, round(x + width), bottom - height // 6)
+            radius = self._px(0.025)
             if on:
                 draw.rounded_rectangle(rect, radius=radius, fill=TEXT)
             else:
@@ -248,6 +266,45 @@ class Renderer:
             label = ellipsize(draw, chip.label, f, width * 0.9)
             draw.text(((rect[0] + rect[2]) / 2, (top + bottom) / 2), label,
                       font=f, fill=BG if on else DIM, anchor="mm")
+
+    @staticmethod
+    def _icon(chip: Chip, width: float, height: int, dimmed: bool) -> Optional[Image.Image]:
+        if not chip.icon:
+            return None
+        return icon(chip.icon, int(width), height, dimmed, BG)
+
+    def _labelled(self, draw: ImageDraw.ImageDraw, x: float, y: float, label: str, value: str,
+                  max_w: float, size: int) -> None:
+        """A dim ``label`` then ``value``, left-aligned at ``x``, within ``max_w``."""
+        f_label = font(size)
+        draw.text((x, y), label, font=f_label, fill=DIM, anchor="lm")
+        offset = text_width(draw, label + " ", f_label)
+        # Same size as the label even if that means ellipsizing: shrinking
+        # each value to fit made the row read as a jumble of sizes.
+        f, value = fit_line(draw, value, max_w - offset, size, size, bold=False)
+        draw.text((x + offset, y), value, font=f, fill=TEXT, anchor="lm")
+
+    def _backline(self, draw: ImageDraw.ImageDraw, view: LiveView, amp_y: float, cab_y: float,
+                  pad: int) -> None:
+        # A line each: capture and IR names run long, and halving the width
+        # cut them down to a few letters on the 320 px panel.
+        size = self._px(0.06)
+        for label, name, y in (("AMP", view.amp_name, amp_y), ("CAB", view.cab_name, cab_y)):
+            if name:
+                self._labelled(draw, pad, y, label, name, self.w - 2 * pad, size)
+
+    def _levels(self, draw: ImageDraw.ImageDraw, view: LiveView, y: float, pad: int) -> None:
+        size = self._px(0.06)
+        column = (self.w - 2 * pad) / 2
+        for i, (label, value) in enumerate((("IN", view.input_gain_db), ("VOL", view.volume_db))):
+            if value is not None:
+                self._labelled(draw, pad + i * column, y, label, format_db(value), column - pad, size)
+
+
+def format_db(value: float) -> str:
+    # -0.0 would otherwise print as "-0.0 dB".
+    value = round(value, 1) + 0.0
+    return f"{value:+.1f} dB".replace("-", "−")
 
 
 def render_screen(
