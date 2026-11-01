@@ -28,7 +28,7 @@ done
 
 [[ $EUID -eq 0 ]] || { echo "[deploy] ERROR: must be run as root: sudo $0" >&2; exit 1; }
 
-for unit in multieffect-display-client multieffect-control-daemon multieffect-audio-engine; do
+for unit in multieffect-display-client multieffect-control-daemon multieffect-audio-engine multieffect-health-logger; do
   if systemctl list-unit-files "${unit}.service" >/dev/null 2>&1; then
     log "stopping/disabling ${unit}"
     systemctl disable --now "${unit}.service" 2>/dev/null || true
@@ -36,6 +36,13 @@ for unit in multieffect-display-client multieffect-control-daemon multieffect-au
   fi
 done
 systemctl daemon-reload
+
+log "removing the reboot/power-off polkit rule and the persistent-journal setting"
+rm -f /etc/polkit-1/rules.d/50-multieffect-power.rules
+if [[ -f /etc/systemd/journald.conf.d/multieffect.conf ]]; then
+  rm -f /etc/systemd/journald.conf.d/multieffect.conf
+  systemctl restart systemd-journald
+fi
 
 if [[ "${PURGE}" == "true" ]]; then
   log "removing data directory ${DATA_DIR}"

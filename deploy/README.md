@@ -665,6 +665,49 @@ standing between you and a usable pedal.
   port 8765 to a network you don't control (e.g. don't put the Pi on your
   home Wi-Fi *and* port-forward 8765 to the internet).
 
+## Investigating problems
+
+Three things are installed for this:
+
+- **Persistent journal.** Raspberry Pi OS normally keeps logs in RAM only,
+  so a crash or a power loss erases them. `install.sh` makes them persistent
+  (capped at 200 MB, see `deploy/system/journald-multieffect.conf`). After an
+  unexpected reboot, the previous boot is still there:
+  `journalctl --list-boots`, then `journalctl -b -1` (`-b -1` = previous
+  boot). A crash looks like a boot whose log just stops.
+- **Health logger** (`multieffect-health-logger.service`). Every 15 s, one
+  line with the SoC temperature, the firmware's under-voltage/throttling
+  flags, the CPU frequency, the load and the audio engine's CPU use. After a
+  crash, `journalctl -b -1 -u multieffect-health-logger | tail` shows what
+  led up to it. `UNDERVOLTAGE` there means the power supply sagged, the usual
+  cause of a Pi rebooting by itself under load (CPU + USB audio interface +
+  display).
+- **One-file report:** `sudo ./deploy/tools/diagnose.sh` collects system
+  info, power and temperature, previous-boot logs, service logs, audio
+  devices, boot config and an asset check into `~/multieffect-diag-<date>.txt`.
+  Run it right after a problem and send the file.
+
+**Crackling or jerky sound with some NAM/IR files.** That's the engine
+running out of CPU time per block. Check what's loaded:
+`python3 scripts/check_assets.py --state /var/lib/multieffect-amp-modeler/state.json`.
+Long IRs are the usual cause: the engine convolves directly, so the cost
+grows with the IR's length up to 171 ms, and many commercial IRs are 0.5-6 s
+long although the cabinet sound is in the first 50-100 ms. The script can
+write trimmed copies (`--trim-ms 100 --out DIR`) to upload instead. The
+engine's own `[health]` log lines count over-budget blocks.
+
+## Restarting or shutting down from the app
+
+The Status tab has **Restart** and **Shut down** buttons. The daemon runs
+as an unprivileged user with `NoNewPrivileges=true`, so it can't use
+`sudo`. It asks systemd-logind instead, as a desktop's power menu does, and
+`install.sh` installs a polkit rule
+(`/etc/polkit-1/rules.d/50-multieffect-power.rules`) that allows exactly
+reboot and power-off for the service user. If the app says the pedal
+refused, check that `polkitd` is installed and the rule is in place. A
+software power-off halts the Pi, but the board stays powered until the
+supply is cut (see "Wiring an on/off switch").
+
 ## Troubleshooting
 
 **`nmcli: command not found` / AP step warns and skips.** Your OS image
@@ -772,9 +815,11 @@ For anyone auditing before running this on their own hardware:
 
 | What | Where |
 |---|---|
-| apt packages | `python3`, `python3-venv`, `python3-pip`, `build-essential`, `cmake`, `pkg-config`, `nlohmann-json3-dev`, `network-manager`, `ca-certificates`, `curl` (+ `linux-image-rt-arm64` only with `--enable-rt-kernel`) |
+| apt packages | `python3`, `python3-venv`, `python3-pip`, `build-essential`, `cmake`, `pkg-config`, `nlohmann-json3-dev`, `network-manager`, `ca-certificates`, `curl`, `fonts-dejavu-core`, `polkitd` (+ `linux-image-rt-arm64` only with `--enable-rt-kernel`) |
 | system user | `ampmodeler` (or `--service-user`), no login shell |
 | data directory | `/var/lib/multieffect-amp-modeler/` (`state.json` + `assets/`) |
-| systemd units | `/etc/systemd/system/multieffect-control-daemon.service`, `/etc/systemd/system/multieffect-audio-engine.service` |
+| systemd units | `/etc/systemd/system/multieffect-control-daemon.service`, `/etc/systemd/system/multieffect-audio-engine.service`, `multieffect-display-client.service` (unless `--lcd none`), `multieffect-health-logger.service` |
+| persistent journal | `/etc/systemd/journald.conf.d/multieffect.conf` (logs kept across reboots, max 200 MB) |
+| polkit rule | `/etc/polkit-1/rules.d/50-multieffect-power.rules` (lets the service user reboot / power off, nothing else) |
 | build output | `<repo>/audio-engine/build/`, `<repo>/control-daemon/.venv/` (inside your checkout, gitignored) |
 | NetworkManager | one connection profile named `multieffect-ap` (skippable with `--skip-ap`) |

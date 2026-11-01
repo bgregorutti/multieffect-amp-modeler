@@ -432,14 +432,17 @@ apt-get update -qq
 # portaudio19-dev backs the engine's real-time audio I/O (step 4 builds
 # with -DAUDIO_ENGINE_WITH_PORTAUDIO=ON); git is needed because that same
 # step's -DAUDIO_ENGINE_WITH_REAL_NAM=ON fetches NeuralAmpModelerCore and
-# Eigen via CMake FetchContent, which shells out to git.
+# Eigen via CMake FetchContent, which shells out to git. polkitd is what
+# lets the daemon reboot / power off the Pi for the app (step 6c); Raspberry
+# Pi OS Lite does not ship it.
 apt-get install -y --no-install-recommends \
   python3 python3-venv python3-pip \
   build-essential cmake pkg-config nlohmann-json3-dev \
   portaudio19-dev git \
   network-manager dnsmasq-base \
   ca-certificates curl \
-  fonts-dejavu-core
+  fonts-dejavu-core \
+  polkitd
 
 # --------------------------------------------------------------------------
 # 1b. Onboard display overlay (--lcd waveshare35c). Only the device-tree
@@ -711,6 +714,9 @@ else
   # Listed first: it's the one that shows boot progress for the other two.
   UNITS=(display-client "${UNITS[@]}")
 fi
+# Records temperature, power/throttling flags and load every 15 s, so the
+# (now persistent) journal shows what the Pi looked like before a crash.
+UNITS+=(health-logger)
 
 for unit in "${UNITS[@]}"; do
   sed \
@@ -735,6 +741,32 @@ for unit in "${UNITS[@]}"; do
   systemctl enable "multieffect-${unit}.service"
   systemctl restart "multieffect-${unit}.service"
 done
+
+# --------------------------------------------------------------------------
+# 6b. Persistent journal. Raspberry Pi OS keeps logs in RAM only, so a crash
+#     or power loss takes them along -- see deploy/system/journald-*.conf.
+#     Previous boots then show up in `journalctl --list-boots`, and
+#     deploy/tools/diagnose.sh can include them.
+# --------------------------------------------------------------------------
+install -D -m 0644 "${REPO_DIR}/deploy/system/journald-multieffect.conf" \
+  /etc/systemd/journald.conf.d/multieffect.conf
+systemctl restart systemd-journald
+journalctl --flush >/dev/null 2>&1 || true
+
+# --------------------------------------------------------------------------
+# 6c. Reboot / power-off from the app. The daemon asks systemd-logind, which
+#     asks polkit; this rule allows exactly those two actions for
+#     ${SERVICE_USER} (see deploy/system/polkit-multieffect.rules and
+#     control-daemon/src/control_daemon/system_power.py).
+# --------------------------------------------------------------------------
+if [[ -d /etc/polkit-1 ]]; then
+  sed -e "s#__SERVICE_USER__#${SERVICE_USER}#g" \
+    "${REPO_DIR}/deploy/system/polkit-multieffect.rules" \
+    > /etc/polkit-1/rules.d/50-multieffect-power.rules
+  chmod 0644 /etc/polkit-1/rules.d/50-multieffect-power.rules
+else
+  warn "polkit is not installed: the app's Restart / Shut down buttons will be refused"
+fi
 
 # --------------------------------------------------------------------------
 # 7. Wi-Fi access point (NetworkManager "shared" mode: DHCP server + NAT
@@ -860,6 +892,9 @@ cat <<SUMMARY
   logs             : journalctl -u multieffect-control-daemon -f
                        journalctl -u multieffect-audio-engine -f
                        journalctl -u multieffect-display-client -f
+                       journalctl -u multieffect-health-logger -f
+  after a problem   : sudo ./deploy/tools/diagnose.sh   (one file to share)
+                       python3 scripts/check_assets.py --state ${DATA_DIR}/state.json
 
 Not wired up yet (see ARCHITECTURE.md "Spec coverage"):
   - Physical footswitches: the daemon has the GPIO backend but does not

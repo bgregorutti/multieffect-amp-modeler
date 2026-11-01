@@ -1,0 +1,23 @@
+[Unit]
+Description=Multi-Effect Amp Modeler - health logger (temperature, power, load)
+Documentation=file://__REPO_DIR__/deploy/README.md
+
+[Service]
+Type=simple
+ExecStart=__REPO_DIR__/deploy/tools/health-logger.sh 15
+Restart=always
+RestartSec=5
+# vcgencmd talks to the firmware through /dev/vcio, group 'video'.
+User=__SERVICE_USER__
+Group=__SERVICE_USER__
+SupplementaryGroups=video
+# Out of the audio engine's way (it is pinned to CPUs 1-3).
+CPUAffinity=0
+Nice=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+
+[Install]
+WantedBy=multi-user.target
