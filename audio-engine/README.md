@@ -280,7 +280,7 @@ time rather than played back as-is:
 ## Real-time-safe IR length cap
 
 Also discovered during real hardware testing, alongside the sample-rate
-mismatch above: `ConvolutionEngine`'s naive O(n·m) convolution (deviation
+mismatch above: the first `ConvolutionEngine`'s naive O(n·m) convolution (deviation
 #3 below) genuinely cannot keep up with a long real-world cabinet IR at
 real-time block rates -- this isn't theoretical. Measured on a real dev
 machine, `--audio`'s default 256-sample/48kHz block gives a 5.33ms
@@ -290,22 +290,33 @@ above) took **~8.3ms to convolve one block -- 156% of budget, a guaranteed
 dropout on every single block**, which is exactly the "horrible, jerky"
 audio reported when first testing through real hardware.
 
-`loadImpulseResponseFile` now truncates any IR longer than
-`kMaxRealtimeIrSamples` (8192 samples, ~171ms @ 48kHz) with a short linear
-fade-out (`truncateIrWithFadeOut`) so the cut is inaudible rather than a
-click. 8192 was chosen directly from measurement, not guessed: comparable
-lengths used ~37-43% of the block budget in benchmarking, leaving solid
-headroom for the rest of the effect chain and OS scheduling jitter. Real
-amp-sim cabinet IRs are typically much shorter (10-50ms) -- this cap only
-bites for unusually long "room capture" style IRs, and re-verified against
-the actual triggering IR file: it now loads at exactly 8192 samples and
-uses **2.0ms (38%) of budget**, not 8.3ms.
+`loadImpulseResponseFile` truncates any IR longer than
+`kMaxRealtimeIrSamples` with a short linear fade-out
+(`truncateIrWithFadeOut`) so the cut is inaudible rather than a click.
+With the naive engine the cap was 8192 samples (~171ms), chosen so the
+convolution used ~38% of the block budget on a dev machine. That was still
+too much on the Pi next to a heavy NAM: capped IRs + full NAM gave
+"crunchy/jerky" sound (docs/dsp-load-brief.md).
 
-This is a stopgap, not the fix the naive-convolution deviation below
-already calls for: a partitioned/FFT-based convolution engine would use a
-long IR's *full* length in real time instead of cutting it short. That
-remains the real follow-up; capping IR length is what makes real hardware
-testing usable today without waiting on it.
+**Fixed: partitioned FFT convolution.** `ConvolutionEngine` now uses the
+vendored `FFTConvolver` (MIT, Darkglass fork of HiFi-LoFi's library,
+`third_party/fftconvolver/`) with uniform 64-sample partitions: no added
+latency, no allocation in `process()` (tested), output identical to the
+direct form within 1e-6. The cap is now 16384 samples (~341ms), a bound on
+room tail rather than on CPU. `tools/conv_bench.cpp` (`build/conv_bench`)
+prints per-block CPU time vs the budget; on an x86 dev box at 64 samples /
+48kHz:
+
+| IR taps | naive (old) mean / worst | FFT mean / worst |
+|---------|--------------------------|------------------|
+| 2048    | 13% / >100%              | 0.3% / jitter    |
+| 8192    | 55% / 97%                | 0.5% / 12%       |
+| 16384   | 110% / 306%              | 1.2% / 14%       |
+| 65536   | 409% / 583%              | 3.9% / 18%       |
+
+(Worst-case figures include container scheduling jitter.) To measure on
+the Pi: stop the service, then `taskset -c 3 build/conv_bench`, or
+`conv_bench --ir /path/to/cab.wav` for real files (loaded without the cap).
 
 ## IR gain normalization
 
@@ -765,7 +776,7 @@ be buildable) are for later manual/hardware validation, not this test.
 | `block_type_registry`     | Static per-type parameter schema (label/unit/min/max/default) for every native block type -- backs the `list_block_types` command, see "Commands" below |
 | `wav_file`               | Hand-rolled RIFF/WAVE parser (reads PCM16/PCM24/PCM32/float32, mono or downmixed) + writer (PCM16/float32) |
 | `resample`                 | `resampleLinear`: naive linear-interpolation sample-rate conversion (see "Sample rate policy" below) |
-| `convolution`              | Naive O(n·m) time-domain cabinet-IR convolution engine, streaming across arbitrary block sizes; `loadImpulseResponseFile` resamples to the engine's target rate and truncates to a real-time-safe length (see "Real-time-safe IR length cap") |
+| `convolution`              | Partitioned FFT cabinet-IR convolution (vendored FFTConvolver), streaming across arbitrary block sizes, zero latency; `loadImpulseResponseFile` resamples to the engine's target rate and truncates to a real-time-safe length (see "Real-time-safe IR length cap") |
 | `nam_model`                  | Real `.nam` JSON metadata parser (`NamModelMetadata`) + `INamModel` interface + `StubNamModel` (identity/gain passthrough -- default when `AUDIO_ENGINE_WITH_REAL_NAM` is off) |
 | `real_nam_model`               | `RealNamModel`: real WaveNet/LSTM inference via vendored NeuralAmpModelerCore, built only when `AUDIO_ENGINE_WITH_REAL_NAM` is on -- see "Real NAM inference" above |
 | `vst3_host`                       | `IHostedPlugin`/`Vst3EffectBlock` (block type `"vst3"`) + `loadVst3Plugin()`; `Vst3PluginHost` (real hosting, built only when `AUDIO_ENGINE_WITH_VST3` is on) or a stub that throws a clear error otherwise -- see "VST3 plugin hosting" above |
@@ -986,22 +997,11 @@ inference became a same-day drop-in behind the `INamModel` interface this
 section always said it would be. See "Real NAM inference" below for what
 actually shipped, including real measured performance numbers.
 
-### 3. Naive (not partitioned/FFT) convolution for cabinet IRs
+### 3. ~~Naive convolution for cabinet IRs~~ (resolved)
 
-`convolution.hpp`'s `ConvolutionEngine` is a textbook O(n·m) time-domain
-FIR convolution: correct, simple, and fully tested (impulse IR ->
-identity; hand-computed two-tap result; streaming across arbitrary block
-sizes matches one-shot convolution -- see `tests/test_convolution.cpp`),
-but it does not scale to real cabinet-IR lengths (hundreds to thousands of
-taps) at real-time block rates -- confirmed by real benchmarking once real
-hardware/audio I/O existed to test against (not guessed at), see
-"Real-time-safe IR length cap" above for the measured numbers and the
-truncation stopgap now in place. A partitioned/FFT-based (e.g.
-uniform-partitioned overlap-save) convolution engine, which would use a
-long IR's full length instead of capping it, remains the known follow-up
-for real-time performance -- flagged rather than attempted here, consistent
-with the product spec's own "latency is the main project risk, validate
-early" framing.
+Resolved: `ConvolutionEngine` now uses partitioned FFT convolution (see
+"Real-time-safe IR length cap" above). `convolveFull()` keeps the direct
+form as the test reference.
 
 ### 4. Preset-switching crossfade curve: equal-power, not linear
 
@@ -1074,8 +1074,5 @@ passing.**
 - **Loading LV2 plugin binaries.** (VST3 hosting shipped -- see "VST3
   plugin hosting" above -- but only VST3; an LV2 host would be a separate,
   unimplemented effort.)
-- **FFT-based/partitioned convolution performance optimization** -- see
-  deviation #3 above; naive convolution is correct but not real-time-fast
-  at production IR lengths.
 - **JUCE integration** -- see deviation #1 above; PortAudio covers the
   "get real audio flowing on a dev machine" need without it.

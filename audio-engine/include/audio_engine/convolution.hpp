@@ -1,35 +1,42 @@
 // Cabinet impulse-response convolution.
 //
-// This is a NAIVE time-domain (O(n*m)) convolution engine: for each output
-// sample it sums `ir.size()` multiply-adds against a history buffer. This
-// is correct and simple to reason about/test, but does not scale to the
-// (~hundreds to thousands of taps) IR lengths a real cabinet IR can have
-// at real-time block rates on a Raspberry Pi -- confirmed, not just
-// theorized: a real 34623-sample cabinet IR (resampled to 48kHz) measured
-// at ~8.3ms to convolve one 256-sample/48kHz block on a real dev machine,
-// 156% of the 5.33ms budget -- i.e. a guaranteed dropout on every single
-// block (see "real-time-safe IR length cap" below, and
-// audio-engine/README.md "Sample rate policy" for the full numbers this
-// was derived from).
+// ConvolutionEngine uses uniformly partitioned FFT convolution (vendored
+// FFTConvolver, MIT, third_party/fftconvolver/ -- the Darkglass fork of
+// HiFi-LoFi's library). The IR is cut into kConvolutionPartitionSize-sample
+// partitions whose spectra are computed once at load time; each partition of
+// input then costs one forward FFT, one inverse FFT and one complex
+// multiply-add per IR partition, instead of ir.size() multiply-adds per
+// sample. No added latency: output sample n depends on input up to n, exactly
+// like the direct form.
 //
-// Deliberately deferred follow-up (see audio-engine/README.md): a
-// partitioned/FFT-based (e.g. uniform-partitioned overlap-save) convolution
-// engine is the known next step for using a long IR's full length in real
-// time without a cap. Per the product spec's own framing ("latency is the
-// main project risk, validate early"), that optimization is flagged rather
-// than attempted here.
+// History: the first version was a naive time-domain O(n*m) loop. A capped
+// 8192-tap IR cost ~8192 MACs/sample (~390M/s at 48kHz) plus two heap
+// allocations per block, which overran the 64-sample block budget on the Pi
+// with heavier NAMs ("crunchy/jerky" sound, docs/dsp-load-brief.md).
+// convolveFull() below keeps that direct form as the test reference;
+// tools/conv_bench.cpp compares both.
 #pragma once
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "audio_engine/effect_block.hpp"
 
+namespace fftconvolver {
+class FFTConvolver;
+}
+
 namespace audio_engine {
 
-// Streaming convolution against a fixed impulse response, maintaining a
-// history ring buffer across process() calls so callers can feed audio in
+// FFT partition size. Matches the engine's default 64-sample block
+// (AudioIoConfig::blockSize) so each callback does one FFT/IFFT pair; other
+// block sizes still work (the convolver buffers internally, zero latency).
+inline constexpr std::size_t kConvolutionPartitionSize = 64;
+
+// Streaming convolution against a fixed impulse response, keeping its
+// input history across process() calls so callers can feed audio in
 // arbitrarily-sized blocks (as a real-time engine would) and still get a
 // result identical to convolving the whole signal at once.
 class ConvolutionEngine : public EffectBlock {
@@ -38,7 +45,10 @@ public:
 
     ConvolutionEngine() = default;
     explicit ConvolutionEngine(std::vector<float> impulseResponse);
+    ~ConvolutionEngine() override;
 
+    // Allocates (FFT of every IR partition): call at load time, never from
+    // the audio callback.
     void setImpulseResponse(std::vector<float> impulseResponse);
     const std::vector<float>& impulseResponse() const { return ir_; }
 
@@ -48,18 +58,18 @@ public:
 
 private:
     std::vector<float> ir_;
-    std::vector<float> history_;  // most recent ir_.size()-1 input samples, oldest first
+    std::unique_ptr<fftconvolver::FFTConvolver> conv_;
 };
 
-// Real-time-safe IR length cap: 8192 samples (~171ms @ 48kHz). Chosen from
-// the benchmark above's numbers -- at this length, naive convolution uses
-// well under half the 5.33ms/block budget (measured ~37% for a comparable
-// length), leaving headroom for the rest of the effect chain plus OS
-// scheduling jitter. Real amp-sim cabinet IRs are typically much shorter
-// (10-50ms); this cap only bites for unusually long "room capture" style
-// IRs (some commercial packs bake in room ambience/reverb tail, which is
-// exactly what triggered writing this in the first place).
-inline constexpr std::size_t kMaxRealtimeIrSamples = 8192;
+// IR length cap: 16384 samples (~341ms @ 48kHz). With the FFT engine the
+// cost grows slowly with length (tools/conv_bench, x86 dev box, 64-sample
+// blocks: 8192 taps ~0.5% of the block budget, 16384 ~1%, vs 55% / 110%
+// for the old direct form), so this is no longer a CPU limit but a sanity
+// bound on memory and on room/reverb tails: real cabinet IRs keep 99.9% of
+// their energy within ~100ms (scripts/check_assets.py), and the longest
+// ones seen (0.2-5.9s room captures) are mostly room tail. Was 8192 with
+// the naive engine.
+inline constexpr std::size_t kMaxRealtimeIrSamples = 16384;
 
 // Truncates `ir` to at most `maxSamples`, if longer, with a short linear
 // fade-out over the last min(maxSamples, 256) samples so the cut doesn't

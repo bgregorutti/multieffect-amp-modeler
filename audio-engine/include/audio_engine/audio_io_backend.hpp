@@ -27,12 +27,11 @@ struct AudioIoConfig {
     double sampleRate = 48000.0;
     // 64 samples (~1.33ms @ 48kHz) -- lowered from an earlier 256-sample
     // default after real hardware testing surfaced round-trip latency as
-    // a real, audible issue (see README.md "Latency"). Benchmarked safe:
-    // the real-time-capped convolution engine (see
-    // convolution.hpp/kMaxRealtimeIrSamples) uses ~38% of the per-block
-    // budget at 64 samples, essentially the same margin as at 256 (block
-    // work and budget both scale ~linearly with block size), so this
-    // isn't trading safety margin for latency. Override with
+    // a real, audible issue (see README.md "Latency"). The FFT convolution
+    // engine (convolution.hpp, partition size 64) costs ~1% of the
+    // per-block budget at the IR cap on an x86 dev box (tools/conv_bench;
+    // run it on the Pi for the real figure); NAM inference is now the
+    // dominant cost. Override with
     // `audio_engine ... --audio --block-size N` if your machine can't
     // keep up (more OS scheduling jitter matters more at smaller blocks
     // on a general-purpose, non-RTOS scheduler) or wants to go lower.

@@ -21,6 +21,17 @@ add_compile_options(-Wall -Wextra)
 find_package(nlohmann_json 3.10 REQUIRED)
 find_package(Threads REQUIRED)
 
+# --- Vendored FFTConvolver (MIT, see third_party/fftconvolver/) ---------
+add_library(fftconvolver STATIC
+  third_party/fftconvolver/AudioFFT.cpp
+  third_party/fftconvolver/FFTConvolver.cpp
+  third_party/fftconvolver/TwoStageFFTConvolver.cpp
+  third_party/fftconvolver/Utilities.cpp
+)
+target_include_directories(fftconvolver SYSTEM PUBLIC third_party/fftconvolver)
+target_compile_options(fftconvolver PRIVATE -w)
+set_target_properties(fftconvolver PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 # --- Core library (everything except main.cpp) -------------------------
 add_library(audio_engine_core
   src/preset_model.cpp
@@ -44,6 +55,7 @@ add_library(audio_engine_core
 )
 target_include_directories(audio_engine_core PUBLIC include)
 target_link_libraries(audio_engine_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads)
+target_link_libraries(audio_engine_core PRIVATE fftconvolver)
 
 # --- Real-time audio I/O (optional, dev-machine testing) -----------------
 # Off by default: a production/Pi build need not link PortAudio at all if
@@ -260,6 +272,11 @@ endif()
 # --- Executable ----------------------------------------------------------
 add_executable(audio_engine src/main.cpp)
 target_link_libraries(audio_engine PRIVATE audio_engine_core)
+
+# Convolution benchmark: naive direct form vs partitioned FFT, per-block
+# CPU time against the real-time budget -- see tools/conv_bench.cpp.
+add_executable(conv_bench tools/conv_bench.cpp)
+target_link_libraries(conv_bench PRIVATE audio_engine_core fftconvolver)
 
 # --- Tests ---------------------------------------------------------------
 enable_testing()

@@ -12,10 +12,10 @@ it runs on the pedal as is.
 
 What the engine does with them (audio-engine/src):
 
-* IRs are convolved directly (time domain): the cost is proportional to the
-  IR's length, and anything longer than 8192 samples at 48 kHz (171 ms) is
-  cut to 8192 -- so every long IR runs at that maximum cost. Cabinet IRs
-  rarely need more than 50-100 ms; the rest is usually room tail or silence.
+* IRs use partitioned FFT convolution: cheap even when long (about 1% of a
+  64-sample block at the cap on x86). Anything longer than 16384 samples at
+  48 kHz (341 ms) is cut to 16384. Cabinet IRs rarely need more than
+  50-100 ms; the rest is usually room tail or silence.
 * NAM: the cost is roughly proportional to the model's weight count. A
   "SlimmableContainer" file (newer TONE3000 exports) holds several
   sub-models; the engine runs the last, largest one.
@@ -30,7 +30,7 @@ import struct
 import sys
 
 ENGINE_SR = 48000
-IR_CAP_SAMPLES = 8192  # kMaxRealtimeIrSamples, convolution.hpp
+IR_CAP_SAMPLES = 16384  # kMaxRealtimeIrSamples, convolution.hpp
 IR_COMFORTABLE_MS = 100
 NAM_HEAVY_WEIGHTS = 10000
 
@@ -110,7 +110,7 @@ def ir_report(path: str):
     taps = min(round(len(x) * ENGINE_SR / sr), IR_CAP_SAMPLES)
     flags = []
     if taps >= IR_CAP_SAMPLES:
-        flags.append("long: runs at the maximum cost (cut to 171 ms)")
+        flags.append(f"long: cut to {IR_CAP_SAMPLES * 1000 // ENGINE_SR} ms")
     elif length_ms > IR_COMFORTABLE_MS:
         flags.append(f"over {IR_COMFORTABLE_MS} ms")
     if channels > 1:

@@ -1,6 +1,10 @@
 #include "audio_engine/convolution.hpp"
 
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
+#include <new>
+#include <random>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -9,6 +13,51 @@
 
 using namespace audio_engine;
 
+// Counts heap allocations while g_countAllocs is set, to prove process() is
+// allocation-free (real-time safe). Replacing global operator new is
+// program-wide, but it only counts; behaviour is unchanged.
+namespace {
+std::atomic<bool> g_countAllocs{false};
+std::atomic<int> g_allocCount{0};
+}  // namespace
+
+// GCC flags malloc/free inside replaced operator new/delete as "mismatched"
+// once inlined; that pairing is exactly what the replacement intends.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+void* operator new(std::size_t n) {
+    if (g_countAllocs.load(std::memory_order_relaxed)) g_allocCount.fetch_add(1, std::memory_order_relaxed);
+    if (void* p = std::malloc(n ? n : 1)) return p;
+    throw std::bad_alloc();
+}
+void operator delete(void* p) noexcept { std::free(p); }
+void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+#pragma GCC diagnostic pop
+
+namespace {
+
+std::vector<float> randomSignal(std::size_t n, std::mt19937& rng, float amp = 0.5f) {
+    std::uniform_real_distribution<float> u(-amp, amp);
+    std::vector<float> v(n);
+    for (float& s : v) s = u(rng);
+    return v;
+}
+
+// Feeds `x` through `engine` in blocks cycling through `blockSizes`.
+std::vector<float> streamThrough(ConvolutionEngine& engine, std::vector<float> x,
+                                 const std::vector<std::size_t>& blockSizes) {
+    std::size_t pos = 0, i = 0;
+    while (pos < x.size()) {
+        const std::size_t n = std::min(blockSizes[i++ % blockSizes.size()], x.size() - pos);
+        engine.process(x.data() + pos, n);
+        pos += n;
+    }
+    return x;
+}
+
+}  // namespace
+
 TEST(Convolution, ImpulseIrIsIdentity) {
     ConvolutionEngine engine({1.0f});  // unit impulse IR: y[n] = x[n]
     engine.prepare(48000.0);
@@ -16,7 +65,8 @@ TEST(Convolution, ImpulseIrIsIdentity) {
     std::vector<float> input = {0.1f, -0.2f, 0.3f, 0.0f, -0.9f, 1.0f};
     std::vector<float> expected = input;
     engine.process(input);
-    for (size_t i = 0; i < input.size(); ++i) EXPECT_FLOAT_EQ(input[i], expected[i]);
+    // FFT round-off: exact zeros come back as ~1e-9, not bit-exact.
+    for (size_t i = 0; i < input.size(); ++i) EXPECT_NEAR(input[i], expected[i], 1e-6f);
 }
 
 // Hand-computed two-tap convolution: ir = [a, b]; y[n] = a*x[n] + b*x[n-1].
@@ -89,8 +139,8 @@ TEST(Convolution, ResetClearsHistoryBetweenIrSwaps) {
     engine.setImpulseResponse({1.0f});  // swap to identity IR; should reset history
     std::vector<float> probe = {0.3f, -0.4f};
     engine.process(probe);
-    EXPECT_FLOAT_EQ(probe[0], 0.3f);
-    EXPECT_FLOAT_EQ(probe[1], -0.4f);
+    EXPECT_NEAR(probe[0], 0.3f, 1e-6f);
+    EXPECT_NEAR(probe[1], -0.4f, 1e-6f);
 }
 
 TEST(Convolution, LoadsImpulseResponseFromWavFile) {
@@ -198,4 +248,81 @@ TEST(Convolution, NormalizeIrEnergyIsANoOpForSilentIr) {
     std::vector<float> silence(10, 0.0f);
     std::vector<float> result = normalizeIrEnergy(silence);
     EXPECT_EQ(result, silence);  // must not divide by ~0
+}
+
+// The FFT engine must reproduce the direct-form convolution (convolveFull,
+// the old engine's algorithm) for any IR length -- shorter than, equal to,
+// and not a multiple of the 64-sample partition -- and any host block size,
+// including irregular ones.
+TEST(Convolution, PartitionedFftMatchesDirectConvolution) {
+    std::mt19937 rng(42);
+    const std::vector<std::size_t> irLengths = {1, 7, 63, 64, 65, 1000, 8192};
+    const std::vector<std::vector<std::size_t>> blockPatterns = {
+        {1}, {63}, {64}, {256}, {1000}, {5, 64, 17, 128, 1, 300}};
+    for (std::size_t irLen : irLengths) {
+        std::vector<float> ir = normalizeIrEnergy(randomSignal(irLen, rng, 1.0f));
+        std::vector<float> x = randomSignal(3 * 4096 + 37, rng);  // not a multiple of 64
+        std::vector<float> ref = convolveFull(x, ir);
+        ref.resize(x.size());
+        for (const auto& pattern : blockPatterns) {
+            ConvolutionEngine engine(ir);
+            engine.prepare(48000.0);
+            std::vector<float> y = streamThrough(engine, x, pattern);
+            double maxErr = 0.0;
+            for (std::size_t i = 0; i < y.size(); ++i) maxErr = std::max(maxErr, double(std::fabs(y[i] - ref[i])));
+            EXPECT_LT(maxErr, 1e-5) << "irLen " << irLen << " first block " << pattern[0];
+        }
+    }
+}
+
+TEST(Convolution, ImpulseInGivesIrOut) {
+    std::mt19937 rng(7);
+    std::vector<float> ir = normalizeIrEnergy(randomSignal(5000, rng, 1.0f));
+    ConvolutionEngine engine(ir);
+    engine.prepare(48000.0);
+    std::vector<float> x(6000, 0.0f);
+    x[0] = 1.0f;
+    std::vector<float> y = streamThrough(engine, x, {64, 13, 200});
+    for (std::size_t i = 0; i < ir.size(); ++i) ASSERT_NEAR(y[i], ir[i], 1e-6f) << "index " << i;
+    for (std::size_t i = ir.size(); i < y.size(); ++i) ASSERT_NEAR(y[i], 0.0f, 1e-6f) << "index " << i;
+}
+
+TEST(Convolution, ResetClearsHistoryButKeepsIr) {
+    std::mt19937 rng(9);
+    std::vector<float> ir = normalizeIrEnergy(randomSignal(700, rng, 1.0f));
+    ConvolutionEngine engine(ir);
+    engine.prepare(48000.0);
+    std::vector<float> noise = randomSignal(1000, rng);
+    engine.process(noise);  // leaves a tail in the convolver
+    engine.reset();
+    std::vector<float> x(800, 0.0f);
+    x[0] = 1.0f;
+    engine.process(x);
+    for (std::size_t i = 0; i < ir.size(); ++i) ASSERT_NEAR(x[i], ir[i], 1e-6f) << "index " << i;
+}
+
+TEST(Convolution, SilentIrOutputsSilence) {
+    ConvolutionEngine engine(std::vector<float>(300, 0.0f));
+    engine.prepare(48000.0);
+    std::mt19937 rng(3);
+    std::vector<float> x = randomSignal(500, rng);
+    engine.process(x);
+    for (float s : x) EXPECT_EQ(s, 0.0f);
+}
+
+// Real-time safety: no heap allocation in the audio path (the old engine
+// allocated two vectors per block).
+TEST(Convolution, ProcessDoesNotAllocate) {
+    std::mt19937 rng(5);
+    ConvolutionEngine engine(normalizeIrEnergy(randomSignal(kMaxRealtimeIrSamples, rng, 1.0f)));
+    engine.prepare(48000.0);
+    std::vector<float> x = randomSignal(64 * 50, rng);
+    g_allocCount = 0;
+    g_countAllocs = true;
+    for (std::size_t pos = 0; pos < x.size(); pos += 64) engine.process(x.data() + pos, 64);
+    engine.process(x.data(), 17);
+    engine.process(x.data(), 300);
+    engine.reset();
+    g_countAllocs = false;
+    EXPECT_EQ(g_allocCount.load(), 0);
 }
