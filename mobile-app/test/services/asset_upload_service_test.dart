@@ -174,6 +174,10 @@ class _FakeDaemonClientForRegister extends DaemonClientBase {
   @override
   Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd) =>
       throw UnimplementedError();
+
+  @override
+  Future<Map<String, dynamic>> systemPower(SystemPowerCommand cmd) =>
+      throw UnimplementedError();
 }
 
 void main() {

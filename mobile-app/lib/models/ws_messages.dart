@@ -320,6 +320,22 @@ class ListBlockTypesCommand implements DaemonCommand {
   Map<String, dynamic> toJson() => {'type': type};
 }
 
+/// Reboot or power off the pedal. Answered with `command_ok` just before the
+/// shutdown starts; no `state_changed` follows.
+class SystemPowerCommand implements DaemonCommand {
+  @override
+  String get type => 'system_power';
+
+  /// `reboot` or `poweroff`.
+  final String action;
+
+  const SystemPowerCommand.reboot() : action = 'reboot';
+  const SystemPowerCommand.powerOff() : action = 'poweroff';
+
+  @override
+  Map<String, dynamic> toJson() => {'type': type, 'action': action};
+}
+
 // ---------------------------------------------------------------------------
 // Server -> client
 // ---------------------------------------------------------------------------

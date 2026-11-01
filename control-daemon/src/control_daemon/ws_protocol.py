@@ -173,6 +173,14 @@ class ListBlockTypesMessage(BaseModel):
     type: Literal["list_block_types"] = "list_block_types"
 
 
+class SystemPowerMessage(BaseModel):
+    """Reboot or power off the Pi. Replied to with ``command_ok`` before the
+    shutdown starts; never followed by a ``state_changed``."""
+
+    type: Literal["system_power"] = "system_power"
+    action: Literal["reboot", "poweroff"]
+
+
 class FootswitchPressMessage(BaseModel):
     """Sent by a footswitch-role client for a single logical (already
     debounced, if it came through the in-process GPIO path) button press,
@@ -198,6 +206,7 @@ APP_ONLY_MESSAGES = {
     "rename_asset": RenameAssetMessage,
     "set_block_param": SetBlockParamMessage,
     "list_block_types": ListBlockTypesMessage,
+    "system_power": SystemPowerMessage,
 }
 
 FOOTSWITCH_ONLY_MESSAGES = {

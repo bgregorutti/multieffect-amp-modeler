@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../models/ws_messages.dart';
 import '../services/daemon_client.dart';
 import '../services/daemon_endpoint_store.dart';
 import '../state/daemon_state_controller.dart';
@@ -45,6 +46,49 @@ class ConnectionScreen extends StatelessWidget {
       case ConnectionStatus.error:
         return Colors.red;
     }
+  }
+
+  /// Asks first: both cut the sound, and powering off needs someone at the
+  /// pedal to bring it back.
+  Future<void> _requestPower(BuildContext context, SystemPowerCommand cmd) async {
+    final reboot = cmd.action == 'reboot';
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(reboot ? 'Restart the pedal?' : 'Shut down the pedal?'),
+        content: Text(reboot
+            ? 'The sound stops for about a minute while the pedal restarts. '
+                'The app reconnects by itself.'
+            : 'The sound stops, and the pedal stays off until its power '
+                'switch is used again. Wait for the screen to go dark before '
+                'unplugging it.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            key: const Key('confirm-power-button'),
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text(reboot ? 'Restart' : 'Shut down'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !context.mounted) return;
+
+    String message;
+    try {
+      await controller.client.systemPower(cmd);
+      message = reboot ? 'Restarting the pedal…' : 'Shutting down the pedal…';
+    } on DaemonCommandError catch (e) {
+      message = e.message;
+    }
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+      content: Text(message),
+      duration: const Duration(seconds: 6),
+    ));
   }
 
   @override
@@ -143,6 +187,39 @@ class ConnectionScreen extends StatelessWidget {
                     state.tempoBpm != null
                         ? '${state.tempoBpm!.toStringAsFixed(1)} BPM'
                         : 'No tempo set',
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          key: const Key('reboot-button'),
+                          icon: const Icon(Icons.restart_alt),
+                          label: const Text('Restart'),
+                          onPressed: status == ConnectionStatus.connected
+                              ? () => _requestPower(
+                                  context, const SystemPowerCommand.reboot())
+                              : null,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          key: const Key('poweroff-button'),
+                          icon: const Icon(Icons.power_settings_new),
+                          label: const Text('Shut down'),
+                          onPressed: status == ConnectionStatus.connected
+                              ? () => _requestPower(
+                                  context, const SystemPowerCommand.powerOff())
+                              : null,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
               ),

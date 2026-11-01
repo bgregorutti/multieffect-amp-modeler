@@ -223,6 +223,7 @@ model" for the engine-side shape.
 | `connection_manager.py`              | Tracks connected sockets + roles, broadcast helper |
 | `app.py`                              | FastAPI app: WS route + HTTP upload endpoint, wires everything together |
 | `main.py`                              | uvicorn entrypoint, reads env config |
+| `system_power.py`                       | Reboot / power off on the app's request, through logind + polkit |
 
 ## WebSocket protocol
 
@@ -366,6 +367,12 @@ before the resulting broadcast copy on that same connection.
 // (label/unit/min/max/default) -- a pure query, fetch once (e.g. on
 // connect), not per-rig state. See audio-engine's block_type_registry.hpp.
 {"type": "list_block_types"}
+
+// Reboot or power off the Pi ("reboot" | "poweroff"). Checked with
+// systemd-logind first (needs the polkit rule deploy/install.sh installs):
+// refused -> error "power_refused"; allowed -> command_ok, then the action
+// runs a second later. No state_changed follows. See system_power.py.
+{"type": "system_power", "action": "reboot"}
 ```
 
 ### Client -> server: footswitch-only event

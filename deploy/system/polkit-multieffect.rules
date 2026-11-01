@@ -1,0 +1,22 @@
+// Installed by deploy/install.sh as
+// /etc/polkit-1/rules.d/50-multieffect-power.rules.
+//
+// Lets the control daemon's service user reboot or power off the Pi (the
+// app's Restart / Shut down buttons), and nothing else. The daemon runs
+// with NoNewPrivileges=true, so sudo is not an option; it asks
+// systemd-logind instead, which consults this rule. The "-multiple-sessions"
+// variants apply when someone is logged in over SSH, "-ignore-inhibit" when
+// a program holds a shutdown inhibitor.
+polkit.addRule(function (action, subject) {
+  var allowed = [
+    "org.freedesktop.login1.reboot",
+    "org.freedesktop.login1.reboot-multiple-sessions",
+    "org.freedesktop.login1.reboot-ignore-inhibit",
+    "org.freedesktop.login1.power-off",
+    "org.freedesktop.login1.power-off-multiple-sessions",
+    "org.freedesktop.login1.power-off-ignore-inhibit",
+  ];
+  if (subject.user == "__SERVICE_USER__" && allowed.indexOf(action.id) >= 0) {
+    return polkit.Result.YES;
+  }
+});

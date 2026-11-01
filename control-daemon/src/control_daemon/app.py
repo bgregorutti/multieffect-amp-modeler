@@ -46,6 +46,7 @@ from starlette.websockets import WebSocketDisconnect
 from .audio_engine_client import AudioEngineClient
 from .connection_manager import ConnectionManager
 from .state import DaemonStateManager, StateError
+from .system_power import SystemPower, SystemPowerError
 from .ws_protocol import (
     APP_ONLY_MESSAGES,
     FOOTSWITCH_ONLY_MESSAGES,
@@ -58,6 +59,7 @@ from .ws_protocol import (
     FootswitchPressMessage,
     HelloMessage,
     ListBlockTypesMessage,
+    SystemPowerMessage,
     RegisterAssetMessage,
     RenameAssetMessage,
     ReorderRigsMessage,
@@ -91,6 +93,7 @@ UPLOAD_CHUNK_SIZE = 1 << 20  # 1 MiB
 def create_app(
     store_path: Path,
     audio_engine: Optional[AudioEngineClient] = None,
+    system_power: Optional[SystemPower] = None,
 ) -> FastAPI:
     """Build a fully-wired FastAPI app around a fresh DaemonStateManager.
 
@@ -113,6 +116,7 @@ def create_app(
     )
 
     connection_manager = ConnectionManager()
+    system_power = system_power or SystemPower()
     asset_dir = store_path.parent / "assets"
 
     # Reasons queued by a state mutation made by a WS message handler (run on
@@ -259,7 +263,7 @@ def create_app(
                 raw = await websocket.receive_json()
                 await _dispatch(
                     websocket, role, raw, state_manager, connection_manager,
-                    pending_broadcasts, dispatch_lock,
+                    pending_broadcasts, dispatch_lock, system_power,
                 )
         except WebSocketDisconnect as exc:
             logger.info("client disconnected: %s role=%s code=%s", peer, role, exc.code)
@@ -277,6 +281,7 @@ async def _dispatch(
     connection_manager: ConnectionManager,
     pending_broadcasts: List[str],
     dispatch_lock: asyncio.Lock,
+    system_power: SystemPower,
 ) -> None:
     if not isinstance(raw, dict) or "type" not in raw:
         await websocket.send_json(
@@ -334,7 +339,7 @@ async def _dispatch(
         token = _in_dispatch.set(True)
         started = time.monotonic()
         try:
-            result = await asyncio.to_thread(_apply, state_manager, message)
+            result = await asyncio.to_thread(_apply, state_manager, message, system_power)
         except StateError as exc:
             await connection_manager.send(
                 websocket, ErrorMessage(code=exc.code, message=exc.message).model_dump()
@@ -371,7 +376,9 @@ async def _dispatch(
             )
 
 
-def _apply(state_manager: DaemonStateManager, message) -> Optional[dict]:
+def _apply(
+    state_manager: DaemonStateManager, message, system_power: Optional[SystemPower] = None
+) -> Optional[dict]:
     """Apply one validated, role-checked client message. Returns a JSON-able
     dict to send back to the sender as `command_ok.result`, or None to send
     nothing beyond the (already-happening) broadcast."""
@@ -467,5 +474,15 @@ def _apply(state_manager: DaemonStateManager, message) -> Optional[dict]:
     if isinstance(message, FootswitchPressMessage):
         state_manager.apply_footswitch_press(message.switch_index)
         return None
+
+    if isinstance(message, SystemPowerMessage):
+        if system_power is None:
+            raise StateError("power_unavailable", "reboot/poweroff is not wired up")
+        try:
+            system_power.check(message.action)
+        except SystemPowerError as exc:
+            raise StateError("power_refused", str(exc)) from exc
+        system_power.schedule(message.action)
+        return {"action": message.action}
 
     raise AssertionError(f"no handler wired for message type {type(message)!r}")

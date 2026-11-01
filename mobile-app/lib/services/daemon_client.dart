@@ -46,6 +46,7 @@ abstract class DaemonClientBase {
   Future<Map<String, dynamic>> renameAsset(RenameAssetCommand cmd);
   Future<Map<String, dynamic>> setBlockParam(SetBlockParamCommand cmd);
   Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd);
+  Future<Map<String, dynamic>> systemPower(SystemPowerCommand cmd);
 }
 
 /// Wraps a WebSocket connection to the control daemon.
@@ -109,7 +110,7 @@ class DaemonClient extends DaemonClientBase {
   /// broadcast (a pure query -- see `list_block_types`'s own docstring:
   /// "never mutates state or notifies"). Everything else is a mutation and
   /// is always followed by one on this same connection.
-  static const _queryOnlyCommandTypes = {'list_block_types'};
+  static const _queryOnlyCommandTypes = {'list_block_types', 'system_power'};
 
   DaemonClient({
     required this.uri,
@@ -444,6 +445,10 @@ class DaemonClient extends DaemonClientBase {
 
   @override
   Future<Map<String, dynamic>> listBlockTypes(ListBlockTypesCommand cmd) =>
+      _sendCommand(cmd);
+
+  @override
+  Future<Map<String, dynamic>> systemPower(SystemPowerCommand cmd) =>
       _sendCommand(cmd);
 
   @override
