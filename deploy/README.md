@@ -215,6 +215,34 @@ kernel hasn't loaded the overlay yet), then the boot bar going through
 the live rig/preset screen. On `sudo poweroff`, the panel shows "Shutting
 down…". Driver checks and troubleshooting: `display-client/README.md`.
 
+## Footswitches
+
+Wire each switch between its GPIO pin and any ground pin; the internal
+pull-up does the rest (no resistor). Then tell the daemon which pin is
+which switch, in `deploy/config.env`:
+
+```bash
+FOOTSWITCH_PINS="0:5,1:12,2:6,3:13"   # switch_index:BCM_pin
+```
+
+(or `--footswitch-pins`) and re-run `sudo ./deploy/install.sh`. With no
+mapping saved yet, the daemon sets switch 0 = next preset, 1 = previous
+preset, 2 = next rig, 3 = previous rig; so the line above means GPIO 5
+next preset, GPIO 12 previous preset, GPIO 6 next rig, GPIO 13 previous
+rig. Change what each switch does in the app's footswitch screen.
+
+Check the wiring before anything else (each pin should read `hi` at rest
+and `lo` while held):
+
+```bash
+pinctrl set 5,6,12,13 ip pu
+watch -n0.2 pinctrl get 5,6,12,13
+```
+
+Each press is logged: `journalctl -u multieffect-control-daemon -f | grep
+footswitch`. A bad pin list or no access to the GPIO pins logs
+`footswitches disabled: ...` and the daemon keeps running without them.
+
 ## Loading NAM/IR/VST3 asset packs
 
 Copying a `.nam`/`.wav` file straight into `${DATA_DIR}/assets` (see
@@ -377,13 +405,6 @@ place for it.
   driven at 48kHz runs at the wrong rate -- audible as a shifted frequency
   response, not as an error. See "Sample rate policy" in
   `audio-engine/README.md`.
-- **No footswitch or onboard display client** -- `footswitch/` and
-  `display/` are still just planned. `GpioZeroFootswitchBackend` exists in
-  the daemon but is never instantiated (nothing builds a
-  `FootswitchInputController`, and `create_app` takes no footswitch
-  backend). This does not block testing: `footswitch_press` arrives over
-  the WebSocket from a client with role `footswitch`, which is how the web
-  and mobile apps drive the switches today.
 - **No PREEMPT_RT kernel by default.** `docs/open-questions.md` #1 (Pi 4 vs
   5, latency) is still open and needs this kernel (or Elk Audio OS) plus
   real benchmarking -- now finally possible, since audio I/O is on.
@@ -815,7 +836,7 @@ For anyone auditing before running this on their own hardware:
 
 | What | Where |
 |---|---|
-| apt packages | `python3`, `python3-venv`, `python3-pip`, `build-essential`, `cmake`, `pkg-config`, `nlohmann-json3-dev`, `network-manager`, `ca-certificates`, `curl`, `fonts-dejavu-core`, `polkitd` (+ `linux-image-rt-arm64` only with `--enable-rt-kernel`) |
+| apt packages | `python3`, `python3-venv`, `python3-pip`, `python3-gpiozero`, `python3-lgpio`, `build-essential`, `cmake`, `pkg-config`, `nlohmann-json3-dev`, `network-manager`, `ca-certificates`, `curl`, `fonts-dejavu-core`, `polkitd` (+ `linux-image-rt-arm64` only with `--enable-rt-kernel`) |
 | system user | `ampmodeler` (or `--service-user`), no login shell |
 | data directory | `/var/lib/multieffect-amp-modeler/` (`state.json` + `assets/`) |
 | systemd units | `/etc/systemd/system/multieffect-control-daemon.service`, `/etc/systemd/system/multieffect-audio-engine.service`, `multieffect-display-client.service` (unless `--lcd none`), `multieffect-health-logger.service` |

@@ -359,6 +359,20 @@ FootswitchAction = Annotated[
 ]
 
 
+
+def default_footswitch_mapping() -> Dict[int, FootswitchAction]:
+    """The four-switch layout the pedal is built around, with the same
+    indices as scripts/keyboard_footswitch.py: 0/1 step through the presets
+    of the current rig, 2/3 through the rigs. Seeded when physical
+    footswitches are configured and no mapping was saved yet."""
+    return {
+        0: NextPresetAction(),
+        1: PrevPresetAction(),
+        2: NextRigAction(),
+        3: PrevRigAction(),
+    }
+
+
 class DaemonState(BaseModel):
     """The full persisted + in-memory state of the daemon.
 

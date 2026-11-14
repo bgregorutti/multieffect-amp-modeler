@@ -85,6 +85,7 @@ Configuration is via environment variables (see `src/control_daemon/main.py`):
 | `CONTROL_DAEMON_PORT`         | `8765`                | Bind port                     |
 | `CONTROL_DAEMON_LOG_LEVEL`    | `info`                | uvicorn log level             |
 | `CONTROL_DAEMON_AUDIO_ENGINE_SOCKET` | unset (uses `NullAudioEngineClient`) | Path to `audio-engine`'s control socket -- see "Audio engine wiring" below |
+| `CONTROL_DAEMON_FOOTSWITCH_PINS` | unset (no GPIO footswitches) | `switch_index:BCM_pin` pairs, e.g. `0:5,1:12,2:6,3:13`. Read with `gpiozero` (internal pull-ups, switch to ground). With no mapping saved, seeds 0/1 = next/prev preset, 2/3 = next/prev rig |
 
 Uploaded `.nam`/IR binaries are written under `<store dir>/assets/`.
 
@@ -216,7 +217,7 @@ model" for the engine-side shape.
 | `models.py`                 | Pydantic models: `Rig`, `Preset`, `PresetBlockState`, `EffectBlock`, `Asset`, `ResolvedPreset`/`resolve_preset`, footswitch actions, the versioned `DaemonState`, the v1->v2 migration |
 | `persistence.py`             | Atomic JSON load/save (temp file + `os.replace`) |
 | `debounce.py`                 | Software debounce utility (clock-injectable, unit tested in isolation) |
-| `gpio.py`                       | `FootswitchInputBackend` ABC, `MockFootswitchBackend`, `GpioZeroFootswitchBackend` (lazy import), `FootswitchInputController` (wires debounce on top of a backend) |
+| `gpio.py`                       | `FootswitchInputBackend` ABC, `MockFootswitchBackend`, `GpioZeroFootswitchBackend` (lazy import, polls the pins), `FootswitchInputController` (wires debounce on top of a backend) |
 | `audio_engine_client.py`         | `AudioEngineClient` ABC + `NullAudioEngineClient` |
 | `state.py`                        | `DaemonStateManager`: the single source of truth, all mutation methods, applies footswitch actions |
 | `ws_protocol.py`                    | Pydantic models for every client<->server WS message |
@@ -485,17 +486,17 @@ rigs at the same cab IR is normal use, not an error.
 * **Two footswitch-input ingress paths, one convergence point.** Requirement
   6 (GPIO abstraction + software debounce) is implemented as a fully
   standalone, unit-tested unit (`gpio.py` + `debounce.py`,
-  `FootswitchInputController`) for a future in-process reader driven by
-  real GPIO hardware. Requirement 2's WS `footswitch_press` event is a
+  `FootswitchInputController`), the in-process reader driven by real GPIO
+  hardware. Requirement 2's WS `footswitch_press` event is a
   second, independent ingress for an already-logical press (e.g. from a
-  footswitch relay process). Both would ultimately call
+  footswitch relay process). Both end up calling
   `DaemonStateManager.apply_footswitch_press(switch_index)` -- debouncing
   only makes sense on raw voltage-level pin readings, never on discrete WS
   JSON messages, so it is deliberately only wired into the GPIO path.
-  `create_app()` does not start a `FootswitchInputController` by default
-  (there is no real GPIO hardware in this repo/environment to read from);
-  wiring one up on an actual Pi is a few lines in `main.py` using
-  `GpioZeroFootswitchBackend`.
+  `create_app(footswitch_backend=...)` starts a `FootswitchInputController`
+  with the app; `main.py` builds a `GpioZeroFootswitchBackend` from
+  `CONTROL_DAEMON_FOOTSWITCH_PINS`. A GPIO press is applied like a WS
+  command (dispatch lock, worker thread, then its broadcast).
 * **State mutation methods are synchronous, not async.** `DaemonStateManager`
   has no asyncio/websockets dependency at all -- it is plain, easily
   unit-testable Python. `app.py` bridges a mutation's resulting broadcast

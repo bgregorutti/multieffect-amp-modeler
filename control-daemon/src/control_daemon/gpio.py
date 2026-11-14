@@ -21,6 +21,7 @@ logical press events -- see debounce.py for why that layering exists.
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Dict, Optional
 
@@ -87,20 +88,20 @@ class GpioZeroFootswitchBackend(FootswitchInputBackend):
     deferred to ``__init__`` so the daemon stays importable (and fully
     testable) on a normal Linux dev machine with no GPIO library installed
     at all.
+
+    Pins are polled from one background thread rather than reported through
+    gpiozero's edge callbacks: ``Debouncer`` only promotes a level once it
+    sees it again after the debounce window, and an edge callback reports a
+    clean press exactly once, so the press would never register. Polling 4
+    pins every 5 ms is negligible CPU.
     """
 
-    def __init__(
-        self,
-        pins: Dict[int, int],
-        bounce_time: Optional[float] = None,
-    ) -> None:
+    def __init__(self, pins: Dict[int, int], poll_interval_s: float = 0.005) -> None:
         """
-        ``pins``: mapping of switch_index -> BCM GPIO pin number.
-        ``bounce_time``: optional hardware-level debounce hint passed
-            through to gpiozero. The daemon's own software ``Debouncer``
-            still runs on top of this backend regardless (see
-            ``FootswitchInputController``), so this is purely an optional
-            extra layer, not a substitute.
+        ``pins``: mapping of switch_index -> BCM GPIO pin number. Each switch
+            connects its pin to ground; the internal pull-up keeps it high
+            at rest.
+        ``poll_interval_s``: how often every pin is read.
         """
         try:
             from gpiozero import Button  # type: ignore
@@ -114,26 +115,36 @@ class GpioZeroFootswitchBackend(FootswitchInputBackend):
 
         self._Button = Button
         self._pins = pins
-        self._bounce_time = bounce_time
+        self._poll_interval_s = poll_interval_s
         self._buttons: Dict[int, object] = {}
-        self._callback: Optional[RawEventCallback] = None
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
 
     def start(self, on_raw_event: RawEventCallback) -> None:
-        self._callback = on_raw_event
         for switch_index, pin in self._pins.items():
-            button = self._Button(pin, pull_up=True, bounce_time=self._bounce_time)
-            button.when_pressed = lambda i=switch_index: self._callback(i, 0)
-            button.when_released = lambda i=switch_index: self._callback(i, 1)
-            self._buttons[switch_index] = button
+            self._buttons[switch_index] = self._Button(pin, pull_up=True)
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._poll, args=(on_raw_event,), name="footswitch-poll", daemon=True
+        )
+        self._thread.start()
+
+    def _poll(self, on_raw_event: RawEventCallback) -> None:
+        while not self._stop.wait(self._poll_interval_s):
+            for switch_index, button in self._buttons.items():
+                on_raw_event(switch_index, 0 if button.is_pressed else 1)
 
     def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            self._thread = None
         for button in self._buttons.values():
             try:
                 button.close()
             except Exception:
                 pass
         self._buttons.clear()
-        self._callback = None
 
 
 class FootswitchInputController:

@@ -18,6 +18,8 @@ Wants=network.target
 Type=notify
 User=__SERVICE_USER__
 Group=__SERVICE_USER__
+# gpio: /dev/gpiochip*, to read the footswitches.
+SupplementaryGroups=gpio
 WorkingDirectory=__REPO_DIR__/control-daemon
 Environment=CONTROL_DAEMON_STORE_PATH=__DATA_DIR__/state.json
 Environment=CONTROL_DAEMON_HOST=0.0.0.0
@@ -31,6 +33,13 @@ Environment=CONTROL_DAEMON_LOG_LEVEL=info
 # engine's effects (big_muff, tube_screamer, noise_gate, tone_stack, delay...)
 # would ever be offered. Matches audio-engine.service's ExecStart socket path.
 Environment=CONTROL_DAEMON_AUDIO_ENGINE_SOCKET=/run/multieffect-amp-modeler/audio-engine.sock
+# Physical footswitches, switch_index:BCM_pin pairs (empty = none). Set by
+# install.sh from FOOTSWITCH_PINS / --footswitch-pins.
+Environment=CONTROL_DAEMON_FOOTSWITCH_PINS=__FOOTSWITCH_PINS__
+# lgpio (gpiozero's pin library on a Pi) creates its notification pipes in
+# LG_WD, by default the working directory -- read-only under
+# ProtectSystem=strict. /tmp is this unit's own PrivateTmp.
+Environment=LG_WD=/tmp
 ExecStart=__REPO_DIR__/control-daemon/.venv/bin/control-daemon
 Restart=on-failure
 RestartSec=2

@@ -38,7 +38,7 @@ daemon only, never to the engine.
 | Pedal DSP reference | Python (`vst-python/`) | Reference implementation the C++ pedal blocks are ported from and validated against -- not what runs on the Pi |
 | Mobile app | Flutter | V1 built and tested (`mobile-app/`) |
 | Onboard display client | Python, Pillow, direct framebuffer (no X) | V1 step 1 (text layout) built and tested on a dev machine (`display-client/`); not yet run on the real panel |
-| Footswitches (4, GPIO) | Python, in the daemon (`gpio.py`, `debounce.py`) | GPIO backend + software debounce built and tested against a mock; **not yet started by the daemon** on a Pi |
+| Footswitches (4, GPIO) | Python, in the daemon (`gpio.py`, `debounce.py`) | Read by the daemon on the Pi when `FOOTSWITCH_PINS` is set; tested against a mock |
 | Potentiometers (V2) | External I2C ADC on software I2C | Not started (V2) |
 | Power management / boot | systemd + soft-latch power board | Service readiness, ordering and boot/shutdown screens done; power board and its overlays not yet chosen/wired |
 | Deployment | Bash + systemd + NetworkManager | Script + guide written (`deploy/`); not yet run on real hardware |
@@ -64,15 +64,18 @@ Done:
 - Software debounce on raw pin levels (`debounce.py`), with a GPIO
   abstraction (`gpio.py`): `GpioZeroFootswitchBackend` uses internal
   pull-ups and active-low SPST wiring, exactly as the spec's wiring
-  section describes. It is tested against `MockFootswitchBackend`.
+  section describes. It polls the pins every 5 ms (the debouncer needs
+  repeated readings, not single edges). It is tested against
+  `MockFootswitchBackend` and a fake `gpiozero`.
+- The daemon starts it when `CONTROL_DAEMON_FOOTSWITCH_PINS` is set
+  (`FOOTSWITCH_PINS` in `deploy/config.env`), e.g. `0:5,1:12,2:6,3:13` for
+  **GPIO 5, 12, 6, 13** (physical pins 29, 32, 31, 33). A press goes
+  through the same dispatch lock as a WS command. With no saved mapping it
+  seeds 0/1 = next/prev preset, 2/3 = next/prev rig.
 - No configuration logic onboard: `footswitch`-role clients may only send
   `footswitch_press`.
 
 Ongoing:
-- The daemon does not yet *start* a `FootswitchInputController`. `main.py`
-  needs a config entry mapping switch indices to **GPIO 5, 6, 12, 13**
-  (physical pins 29, 31, 32, 33) and a default mapping for them. Until
-  then `scripts/keyboard_footswitch.py` stands in.
 - Optional per-switch status LEDs, bypass and tap-tempo switches: not
   started. `toggle_bypass`/`tap_tempo` already exist as mappable actions.
 - GPIO budget: no code claims pins outside 27-40, but nothing enforces it

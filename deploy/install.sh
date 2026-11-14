@@ -64,6 +64,11 @@ LCD=""
 LCD_SIZE=""
 # Clockwise rotation applied by the client in software (--lcd-rotate).
 LCD_ROTATE="0"
+# Physical footswitches (--footswitch-pins): comma-separated
+# switch_index:BCM_pin pairs, each switch wired from its pin to ground.
+# Indices follow the default mapping: 0 next preset, 1 previous preset,
+# 2 next rig, 3 previous rig. Empty = no GPIO footswitches.
+FOOTSWITCH_PINS=""
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -150,6 +155,12 @@ Options:
                              with --lcd waveshare35c).
   --lcd-rotate DEG          0/90/180/270, clockwise, applied by the display
                              client (default: 0).
+  --footswitch-pins LIST    Physical footswitches, as switch_index:BCM_pin
+                             pairs, e.g. '0:5,1:12,2:6,3:13'. Each switch
+                             connects its pin to ground (internal pull-up).
+                             With no mapping saved yet, 0/1 = next/previous
+                             preset and 2/3 = next/previous rig; change it
+                             in the app's footswitch screen. Default: none.
   --service-user NAME       System user the services run as (default: ${SERVICE_USER})
   -h, --help                 Show this help.
 
@@ -194,6 +205,7 @@ while [[ $# -gt 0 ]]; do
     --lcd) LCD="${2:-}"; shift 2 ;;
     --lcd-size) LCD_SIZE="${2:-}"; shift 2 ;;
     --lcd-rotate) LCD_ROTATE="${2:-}"; shift 2 ;;
+    --footswitch-pins) FOOTSWITCH_PINS="${2:-}"; shift 2 ;;
     --service-user) SERVICE_USER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
@@ -212,6 +224,10 @@ if [[ -n "${LCD_SIZE}" ]]; then
   [[ "${LCD_SIZE}" =~ ^([0-9]+)x([0-9]+)$ ]] \
     || die "--lcd-size must look like 480x320, got '${LCD_SIZE}'"
   LCD_WIDTH="${BASH_REMATCH[1]}"; LCD_HEIGHT="${BASH_REMATCH[2]}"
+fi
+FOOTSWITCH_PINS="${FOOTSWITCH_PINS// /}"
+if [[ -n "${FOOTSWITCH_PINS}" && ! "${FOOTSWITCH_PINS}" =~ ^[0-9]+:[0-9]+(,[0-9]+:[0-9]+)*$ ]]; then
+  die "--footswitch-pins must look like 0:5,1:12,2:6,3:13, got '${FOOTSWITCH_PINS}'"
 fi
 [[ "${LCD_ROTATE}" =~ ^(0|90|180|270)$ ]] \
   || die "--lcd-rotate must be 0, 90, 180 or 270, got '${LCD_ROTATE}'"
@@ -434,9 +450,11 @@ apt-get update -qq
 # step's -DAUDIO_ENGINE_WITH_REAL_NAM=ON fetches NeuralAmpModelerCore and
 # Eigen via CMake FetchContent, which shells out to git. polkitd is what
 # lets the daemon reboot / power off the Pi for the app (step 6c); Raspberry
-# Pi OS Lite does not ship it.
+# Pi OS Lite does not ship it. python3-gpiozero/python3-lgpio read the
+# footswitches; the daemon's venv sees them through --system-site-packages
+# (step 5), since lgpio is a C extension pip would have to compile.
 apt-get install -y --no-install-recommends \
-  python3 python3-venv python3-pip \
+  python3 python3-venv python3-pip python3-gpiozero python3-lgpio \
   build-essential cmake pkg-config nlohmann-json3-dev \
   portaudio19-dev git \
   network-manager dnsmasq-base \
@@ -562,6 +580,13 @@ if ! getent group audio >/dev/null 2>&1; then
        "SupplementaryGroups=audio and will fail to start. Create it" \
        "(groupadd -r audio) or drop that line from the unit."
 fi
+# Same for 'gpio' (owner of /dev/gpiochip* on Raspberry Pi OS), which
+# control-daemon.service needs to read the footswitches.
+if ! getent group gpio >/dev/null 2>&1; then
+  log "no 'gpio' group on this system -- creating it (control-daemon.service" \
+      "declares SupplementaryGroups=gpio)"
+  groupadd -r gpio
+fi
 
 # --------------------------------------------------------------------------
 # 3. Persistent data directory (presets/banks/footswitch-mapping JSON +
@@ -646,7 +671,10 @@ else
   # 5. control-daemon: venv + install (runtime deps only, no dev/test extras)
   # ------------------------------------------------------------------------
   log "setting up control-daemon virtualenv"
-  python3 -m venv "${REPO_DIR}/control-daemon/.venv"
+  # --system-site-packages: gpiozero + lgpio come from apt (step 1).
+  # Re-running venv on an existing one rewrites its pyvenv.cfg, so an older
+  # venv picks this up too.
+  python3 -m venv --system-site-packages "${REPO_DIR}/control-daemon/.venv"
   "${REPO_DIR}/control-daemon/.venv/bin/pip" install --quiet --upgrade pip
   "${REPO_DIR}/control-daemon/.venv/bin/pip" install --quiet -e "${REPO_DIR}/control-daemon"
 
@@ -666,6 +694,11 @@ fi
 # 6. systemd units
 # --------------------------------------------------------------------------
 log "installing systemd units"
+if [[ -n "${FOOTSWITCH_PINS}" ]]; then
+  log "control-daemon will read footswitches on GPIO (switch:pin) ${FOOTSWITCH_PINS}"
+else
+  log "no --footswitch-pins set -- no GPIO footswitches"
+fi
 # Quoted in the substitution, not here, so a device name with spaces ("USB
 # Audio CODEC") survives into ExecStart as one argument. Empty when no
 # device was configured, leaving the engine on the OS default.
@@ -727,6 +760,7 @@ for unit in "${UNITS[@]}"; do
     -e "s#__LCD_WIDTH__#${LCD_WIDTH}#g" \
     -e "s#__LCD_HEIGHT__#${LCD_HEIGHT}#g" \
     -e "s#__LCD_ROTATE__#${LCD_ROTATE}#g" \
+    -e "s#__FOOTSWITCH_PINS__#${FOOTSWITCH_PINS}#g" \
     "${REPO_DIR}/deploy/systemd/${unit}.service" \
     > "/etc/systemd/system/multieffect-${unit}.service"
 done
@@ -897,8 +931,6 @@ cat <<SUMMARY
                        python3 scripts/check_assets.py --state ${DATA_DIR}/state.json
 
 Not wired up yet (see ARCHITECTURE.md "Spec coverage"):
-  - Physical footswitches: the daemon has the GPIO backend but does not
-    start it; scripts/keyboard_footswitch.py stands in for now.
   - Soft-power board (gpio-shutdown / gpio-poweroff overlays): board not
     chosen yet.
 

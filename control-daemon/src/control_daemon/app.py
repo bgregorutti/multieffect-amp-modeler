@@ -45,6 +45,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from .audio_engine_client import AudioEngineClient
 from .connection_manager import ConnectionManager
+from .gpio import FootswitchInputBackend, FootswitchInputController
+from .models import default_footswitch_mapping
 from .state import DaemonStateManager, StateError
 from .system_power import SystemPower, SystemPowerError
 from .ws_protocol import (
@@ -94,18 +96,44 @@ def create_app(
     store_path: Path,
     audio_engine: Optional[AudioEngineClient] = None,
     system_power: Optional[SystemPower] = None,
+    footswitch_backend: Optional[FootswitchInputBackend] = None,
 ) -> FastAPI:
     """Build a fully-wired FastAPI app around a fresh DaemonStateManager.
 
     A factory (rather than a single module-level app) so tests can spin up
     independent, isolated daemon instances against their own temp store
     paths.
+
+    ``footswitch_backend``: physical footswitches read in-process (GPIO on
+    the Pi). Started and stopped with the app; None = none wired, presses
+    can still arrive over the WS from a ``footswitch``-role client.
     """
     @asynccontextmanager
     async def _lifespan(fastapi_app: FastAPI):
-        fastapi_app.state.main_loop = asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
+        fastapi_app.state.main_loop = loop
         fastapi_app.state.main_thread_id = threading.get_ident()
-        yield
+        controller: Optional[FootswitchInputController] = None
+        if footswitch_backend is not None:
+            # Called on the backend's polling thread: hand the press to the
+            # loop, where it queues behind any command being applied.
+            controller = FootswitchInputController(
+                backend=footswitch_backend,
+                on_press=lambda index: asyncio.run_coroutine_threadsafe(
+                    _footswitch_press(index), loop
+                ),
+            )
+            try:
+                controller.start()
+            except Exception:
+                # E.g. no access to /dev/gpiochip*: keep serving the app.
+                logger.exception("footswitches disabled: could not open the GPIO pins")
+                controller = None
+        try:
+            yield
+        finally:
+            if controller is not None:
+                controller.stop()
 
     app = FastAPI(title="control-daemon", lifespan=_lifespan)
     app.add_middleware(
@@ -151,10 +179,36 @@ def create_app(
         on_change=_on_state_changed,
     )
 
+    async def _footswitch_press(switch_index: int) -> None:
+        """A press from the in-process footswitches. Same path as a WS
+        command: applied under the dispatch lock in a worker thread (a rig
+        change reloads the engine), then its broadcast is flushed."""
+        async with dispatch_lock:
+            token = _in_dispatch.set(True)
+            started = time.monotonic()
+            try:
+                await asyncio.to_thread(state_manager.apply_footswitch_press, switch_index)
+            except Exception:
+                logger.exception("footswitch %d press failed", switch_index)
+            finally:
+                _in_dispatch.reset(token)
+            logger.info(
+                "footswitch %d pressed (applied in %.2fs)",
+                switch_index, time.monotonic() - started,
+            )
+            while pending_broadcasts:
+                reason = pending_broadcasts.pop(0)
+                await connection_manager.broadcast(
+                    StateChangedMessage(state=state_manager.state_view(), reason=reason).model_dump()
+                )
+
     app.state.connection_manager = connection_manager
     app.state.state_manager = state_manager
     app.state.main_loop = None
     app.state.main_thread_id = None
+
+    if footswitch_backend is not None and not state_manager.state.footswitch_mapping:
+        state_manager.set_footswitch_mapping(default_footswitch_mapping())
 
     # ---------------------------------------------------------------- HTTP --
 

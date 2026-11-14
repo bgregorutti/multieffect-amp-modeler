@@ -12,6 +12,11 @@ CONTROL_DAEMON_AUDIO_ENGINE_SOCKET path to the audio-engine control socket
                                     the daemon runs with NullAudioEngineClient
                                     (no real engine required) -- see
                                     audio_engine_client.py.
+CONTROL_DAEMON_FOOTSWITCH_PINS     physical footswitches, as comma-separated
+                                    switch_index:BCM_pin pairs, e.g.
+                                    "0:5,1:12,2:6,3:13". Each switch connects
+                                    its pin to ground. Unset or empty = no
+                                    GPIO footswitches.
 """
 
 from __future__ import annotations
@@ -19,12 +24,14 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
+from typing import Dict, Optional
 
 import uvicorn
 
 from . import sd_notify
 from .app import create_app
 from .audio_engine_client import AudioEngineClient, NullAudioEngineClient, UnixSocketAudioEngineClient
+from .gpio import FootswitchInputBackend, GpioZeroFootswitchBackend
 
 logger = logging.getLogger("control_daemon.main")
 
@@ -52,11 +59,48 @@ def _build_audio_engine() -> AudioEngineClient:
     return UnixSocketAudioEngineClient(socket_path)
 
 
+def parse_footswitch_pins(spec: str) -> Dict[int, int]:
+    """``"0:5,1:12"`` -> ``{0: 5, 1: 12}``. Raises ValueError on a malformed
+    pair or a pin used twice."""
+    pins: Dict[int, int] = {}
+    for pair in spec.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        index, sep, pin = pair.partition(":")
+        if not sep:
+            raise ValueError(f"expected switch_index:pin, got {pair!r}")
+        pins[int(index)] = int(pin)
+    if len(set(pins.values())) != len(pins):
+        raise ValueError(f"a GPIO pin is used by more than one switch in {spec!r}")
+    return pins
+
+
+def _build_footswitch_backend() -> Optional[FootswitchInputBackend]:
+    spec = os.environ.get("CONTROL_DAEMON_FOOTSWITCH_PINS", "").strip()
+    if not spec:
+        return None
+    # A bad pin list or a missing GPIO library must not take the whole
+    # daemon down with it: the app still works without the switches.
+    try:
+        pins = parse_footswitch_pins(spec)
+        backend = GpioZeroFootswitchBackend(pins)
+    except (ValueError, RuntimeError) as exc:
+        logger.error("footswitches disabled: %s", exc)
+        return None
+    logger.info("footswitches on GPIO %s", ", ".join(f"{i}->{p}" for i, p in sorted(pins.items())))
+    return backend
+
+
 def _build_app():
     store_path = Path(
         os.environ.get("CONTROL_DAEMON_STORE_PATH", "./data/state.json")
     ).resolve()
-    return create_app(store_path=store_path, audio_engine=_build_audio_engine())
+    return create_app(
+        store_path=store_path,
+        audio_engine=_build_audio_engine(),
+        footswitch_backend=_build_footswitch_backend(),
+    )
 
 
 # Importable ASGI app target, e.g. `uvicorn control_daemon.main:app`.
@@ -65,14 +109,14 @@ app = None
 
 def run() -> None:
     global app
-    app = _build_app()
     host = os.environ.get("CONTROL_DAEMON_HOST", "0.0.0.0")
     port = int(os.environ.get("CONTROL_DAEMON_PORT", "8765"))
     log_level = os.environ.get("CONTROL_DAEMON_LOG_LEVEL", "info")
     # uvicorn only configures its own loggers: without this, every INFO line
     # of the daemon itself (clients connecting and leaving, slow commands)
-    # was silently dropped.
+    # was silently dropped. Before _build_app, which already logs.
     logging.basicConfig(level=log_level.upper(), format="%(levelname)s %(name)s: %(message)s")
+    app = _build_app()
     logger.info("starting control daemon on %s:%s", host, port)
     _NotifyingServer(uvicorn.Config(
         app, host=host, port=port, log_level=log_level,
