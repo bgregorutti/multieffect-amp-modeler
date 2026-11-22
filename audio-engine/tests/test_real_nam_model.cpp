@@ -153,3 +153,43 @@ TEST(RealNamModel, NoGainAppliedWhenModelReportsNoLoudness) {
     model.process(buf.data(), buf.size());
     EXPECT_NEAR(buf[0], 0.5f, 1e-5f);
 }
+
+namespace {
+// The fixture container holds three sub-models (an LSTM up to 0.33, a small
+// WaveNet up to 0.66, a larger WaveNet up to 1.0), so different sizes must
+// produce different output for the same input.
+std::vector<float> renderContainerAtSize(double size) {
+    std::string path = examplePath("slimmable_container.nam");
+    auto dsp = nam::get_dsp(std::filesystem::path(path));
+    EXPECT_TRUE(setNamSlimmableSize(*dsp, size));
+    RealNamModel model(parseNamModelFile(path), std::move(dsp));
+    model.prepare(48000.0);
+
+    std::vector<float> signal(4800);
+    for (std::size_t i = 0; i < signal.size(); ++i) {
+        signal[i] = 0.3f * std::sin(static_cast<float>(i) * 0.05f);
+    }
+    for (std::size_t i = 0; i + 64 <= signal.size(); i += 64) model.process(signal.data() + i, 64);
+    return signal;
+}
+
+double meanAbsDiff(const std::vector<float>& a, const std::vector<float>& b) {
+    double sum = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) sum += std::fabs(a[i] - b[i]);
+    return sum / a.size();
+}
+}  // namespace
+
+TEST(RealNamModel, SlimmableSizeSelectsADifferentSubModel) {
+    const auto full = renderContainerAtSize(1.0);
+    const auto small = renderContainerAtSize(0.0);
+    for (float s : small) ASSERT_TRUE(std::isfinite(s));
+    EXPECT_GT(meanAbsDiff(full, small), 1e-4);
+    // Same size twice: deterministic, so the difference above is the size.
+    EXPECT_LT(meanAbsDiff(full, renderContainerAtSize(1.0)), 1e-7);
+}
+
+TEST(RealNamModel, SlimmableSizeIsIgnoredByAPlainModel) {
+    auto dsp = nam::get_dsp(std::filesystem::path(examplePath("wavenet.nam")));
+    EXPECT_FALSE(setNamSlimmableSize(*dsp, 0.0));
+}

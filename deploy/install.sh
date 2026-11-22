@@ -64,6 +64,10 @@ LCD=""
 LCD_SIZE=""
 # Clockwise rotation applied by the client in software (--lcd-rotate).
 LCD_ROTATE="0"
+# Which sub-model of a slimmable .nam the engine runs (--nam-size): 0 =
+# the smallest, 1 = full size. Empty = the engine's default (1). TONE3000
+# exports carry a small and a full-size model of the same capture.
+NAM_SIZE=""
 # Physical footswitches (--footswitch-pins): comma-separated
 # switch_index:BCM_pin pairs, each switch wired from its pin to ground.
 # Indices follow the default mapping: 0 next preset, 1 previous preset,
@@ -155,6 +159,11 @@ Options:
                              with --lcd waveshare35c).
   --lcd-rotate DEG          0/90/180/270, clockwise, applied by the display
                              client (default: 0).
+  --nam-size X              Which sub-model of a slimmable .nam (TONE3000
+                             exports carry a small and a full-size one) the
+                             engine runs, 0 (smallest) to 1 (full size).
+                             Default: the engine's own 1. Compare the CPU
+                             cost first with audio-engine/build/nam_render.
   --footswitch-pins LIST    Physical footswitches, as switch_index:BCM_pin
                              pairs, e.g. '0:5,1:12,2:6,3:13'. Each switch
                              connects its pin to ground (internal pull-up).
@@ -206,6 +215,7 @@ while [[ $# -gt 0 ]]; do
     --lcd-size) LCD_SIZE="${2:-}"; shift 2 ;;
     --lcd-rotate) LCD_ROTATE="${2:-}"; shift 2 ;;
     --footswitch-pins) FOOTSWITCH_PINS="${2:-}"; shift 2 ;;
+    --nam-size) NAM_SIZE="${2:-}"; shift 2 ;;
     --service-user) SERVICE_USER="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (see --help)" ;;
@@ -224,6 +234,9 @@ if [[ -n "${LCD_SIZE}" ]]; then
   [[ "${LCD_SIZE}" =~ ^([0-9]+)x([0-9]+)$ ]] \
     || die "--lcd-size must look like 480x320, got '${LCD_SIZE}'"
   LCD_WIDTH="${BASH_REMATCH[1]}"; LCD_HEIGHT="${BASH_REMATCH[2]}"
+fi
+if [[ -n "${NAM_SIZE}" && ! "${NAM_SIZE}" =~ ^(0(\.[0-9]+)?|1(\.0*)?)$ ]]; then
+  die "--nam-size must be a number from 0 to 1, e.g. 0 or 0.5, got '${NAM_SIZE}'"
 fi
 FOOTSWITCH_PINS="${FOOTSWITCH_PINS// /}"
 if [[ -n "${FOOTSWITCH_PINS}" && ! "${FOOTSWITCH_PINS}" =~ ^[0-9]+:[0-9]+(,[0-9]+:[0-9]+)*$ ]]; then
@@ -721,6 +734,13 @@ else
        "real names with:" \
        "${REPO_DIR}/audio-engine/build/audio_engine --list-devices"
   AUDIO_FLAG_ARGS=""
+fi
+
+# Unlike --block-size, applies with or without --audio: it changes which
+# model is loaded, not how the device is opened.
+if [[ -n "${NAM_SIZE}" ]]; then
+  log "audio-engine will run slimmable NAM models at size ${NAM_SIZE}"
+  AUDIO_FLAG_ARGS="${AUDIO_FLAG_ARGS} --nam-size ${NAM_SIZE}"
 fi
 
 # Appended only alongside --audio: the engine parses --block-size in any mode

@@ -84,6 +84,9 @@ std::shared_ptr<INamModel> FileAssetLoader::loadNam(const std::string& storedPat
     // between get_dsp's path overload and its nlohmann::json overload
     // (json has an implicit string constructor).
     auto dsp = nam::get_dsp(std::filesystem::path(storedPath));
+    // Before RealNamModel's prepare(): its Reset() then prewarms only the
+    // sub-model that will actually run.
+    setNamSlimmableSize(*dsp, namSize_);
     return std::make_shared<RealNamModel>(std::move(meta), std::move(dsp));
 #else
     return std::make_shared<StubNamModel>(std::move(meta));

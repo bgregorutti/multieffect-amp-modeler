@@ -2,6 +2,8 @@
 
 #include <cmath>
 
+#include <NAM/slimmable.h>
+
 namespace audio_engine {
 
 namespace {
@@ -22,6 +24,13 @@ float loudnessNormalizationGain(double modelLoudnessDb) {
     return static_cast<float>(std::pow(10.0, (kNamTargetLoudnessDb - modelLoudnessDb) / 20.0));
 }
 }  // namespace
+
+bool setNamSlimmableSize(nam::DSP& dsp, double size) {
+    auto* slimmable = dynamic_cast<nam::SlimmableModel*>(&dsp);
+    if (slimmable == nullptr) return false;
+    slimmable->SetSlimmableSize(size);
+    return true;
+}
 
 RealNamModel::RealNamModel(NamModelMetadata metadata, std::unique_ptr<nam::DSP> dsp)
     : metadata_(std::move(metadata)), dsp_(std::move(dsp)) {

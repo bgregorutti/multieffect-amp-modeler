@@ -597,8 +597,26 @@ peak/RMS stats for each -- for directly listening to or diffing what the
 model actually did, rather than inferring it from aggregate numbers
 alone:
 ```bash
-./audio-engine/build-nam/nam_render <input.wav> <model.nam> dry.wav wet.wav [block_size]
+./audio-engine/build-nam/nam_render <input.wav> <model.nam> dry.wav wet.wav [block_size] [nam_size]
 ```
+It also prints the mean and worst processing time per block against the
+real-time budget. `nam_size` is the engine's `--nam-size` (below).
+
+### Slimmable NAM models (`--nam-size`)
+
+Most TONE3000 exports are a `SlimmableContainer`: a small and a full-size
+WaveNet of the same capture (about 1,900 and 12,100 weights: 3 vs 8
+channels, same 23 layers). NeuralAmpModelerCore runs the full one by
+default. `audio_engine ... --nam-size X` (0 = smallest, 1 = full, the
+default) calls `SetSlimmableSize` on each model right after loading it,
+before `prepare()`, so only the sub-model that runs gets prewarmed. Files
+with a single model ignore it. Set it on the Pi with `NAM_SIZE` in
+`deploy/config.env`.
+
+Measured on an Apple M-series dev machine at block size 64, the small one
+is only ~13% cheaper on average (worst block about 2x faster): with so few
+channels the per-layer overhead, not the weight count, dominates. Measure
+on the Pi with `nam_render ... 64 0` vs `... 64 1` before relying on it.
 
 ### NAM output loudness normalization
 

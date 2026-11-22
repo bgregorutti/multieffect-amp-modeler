@@ -1,7 +1,7 @@
 // Audio engine process entry point.
 //
 // Usage: audio_engine <control-socket-path> [--audio] [--block-size N]
-//                     [--device NAME]
+//                     [--device NAME] [--nam-size X]
 //        audio_engine --list-devices
 //
 // Starts the control socket server (see control_socket.hpp) bound to the
@@ -27,6 +27,11 @@
 // ALSA default device is the onboard bcm2835 with no capture side at all
 // -- see AudioIoConfig::device. --list-devices prints the names to choose
 // from and exits; it needs no control socket, so it can be run on its own.
+//
+// --nam-size X (0.0-1.0, default 1.0) picks which sub-model of a slimmable
+// .nam file runs: 0 = the smallest. TONE3000's exports ship a small and a
+// full-size model of the same capture, and the full one barely fits the
+// 64-sample budget on a Pi 4. Files with a single model ignore it.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -70,7 +75,7 @@ int main(int argc, char** argv) {
 
     if (argc < 2) {
         std::cerr << "usage: " << argv[0]
-                  << " <control-socket-path> [--audio] [--block-size N] [--device NAME]\n"
+                  << " <control-socket-path> [--audio] [--block-size N] [--device NAME] [--nam-size X]\n"
                   << "       " << argv[0] << " --list-devices\n";
         return 2;
     }
@@ -81,6 +86,7 @@ int main(int argc, char** argv) {
     // the flag rather than rejecting it as unrecognized.
     [[maybe_unused]] std::size_t blockSizeOverride = 0;  // 0 == use AudioIoConfig's default
     [[maybe_unused]] std::string deviceName;              // empty == use the OS default device
+    double namSize = 1.0;                                 // full-size NAM sub-models
     for (int i = 2; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--audio") {
@@ -89,13 +95,23 @@ int main(int argc, char** argv) {
             blockSizeOverride = static_cast<std::size_t>(std::strtoul(argv[++i], nullptr, 10));
         } else if (arg == "--device" && i + 1 < argc) {
             deviceName = argv[++i];
+        } else if (arg == "--nam-size" && i + 1 < argc) {
+            char* end = nullptr;
+            namSize = std::strtod(argv[++i], &end);
+            if (end == argv[i] || *end != '\0' || namSize < 0.0 || namSize > 1.0) {
+                std::cerr << "audio-engine: --nam-size must be a number from 0 to 1, got '" << argv[i] << "'\n";
+                return 2;
+            }
         }
     }
 
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
-    auto loader = std::make_shared<audio_engine::FileAssetLoader>();
+    auto loader = std::make_shared<audio_engine::FileAssetLoader>(namSize);
+    if (namSize < 1.0) {
+        std::cerr << "audio-engine: NAM size " << namSize << " (slimmable models run a smaller sub-model)\n";
+    }
     audio_engine::EngineState engineState(loader);
     audio_engine::ControlSocketServer server;
 

@@ -64,9 +64,18 @@ public:
 // asset is parsed via loadImpulseResponseFile() (wav_file.hpp).
 class FileAssetLoader : public IAssetLoader {
 public:
+    // `namSize`: which sub-model of a slimmable .nam to run, 0.0 (smallest,
+    // cheapest) to 1.0 (full size, the default). See setNamSlimmableSize in
+    // real_nam_model.hpp; ignored by models that aren't slimmable and by
+    // builds without real NAM inference.
+    explicit FileAssetLoader(double namSize = 1.0) : namSize_(namSize) {}
+
     std::shared_ptr<INamModel> loadNam(const std::string& storedPath) override;
     std::shared_ptr<IrHandle> loadIr(const std::string& storedPath, double targetSampleRate) override;
     std::unique_ptr<EffectBlock> loadVst3(const std::string& storedPath) override;
+
+private:
+    double namSize_;
 };
 
 // Builds one EffectBlock from a preset's EffectBlockSpec. Recognized

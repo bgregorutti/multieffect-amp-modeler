@@ -32,6 +32,14 @@ namespace audio_engine {
 // and clipped audibly with zero compensation.
 inline constexpr double kNamTargetLoudnessDb = -22.0;
 
+// Picks the sub-model of a slimmable .nam (e.g. TONE3000's
+// "SlimmableContainer", which ships a small and a full-size WaveNet of the
+// same capture): 0.0 = smallest, 1.0 = full size (the library's own
+// default). Must run before RealNamModel::prepare(), on the loading thread
+// -- it resets the newly active sub-model. Returns false, doing nothing,
+// for a model that isn't slimmable.
+bool setNamSlimmableSize(nam::DSP& dsp, double size);
+
 class RealNamModel : public INamModel {
 public:
     using EffectBlock::process;  // bring the std::vector<float>& convenience overload back into scope

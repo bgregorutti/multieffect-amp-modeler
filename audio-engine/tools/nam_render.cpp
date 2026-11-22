@@ -7,8 +7,13 @@
 // from aggregate stats alone. Built only when AUDIO_ENGINE_WITH_REAL_NAM
 // is on (see CMakeLists.txt) -- needs the vendored NeuralAmpModelerCore.
 //
-// Usage: nam_render <input.wav> <model.nam> <dry_out.wav> <wet_out.wav> [block_size]
+// Usage: nam_render <input.wav> <model.nam> <dry_out.wav> <wet_out.wav> [block_size] [nam_size]
+//
+// nam_size (0-1, default 1) is the engine's --nam-size: which sub-model
+// of a slimmable .nam runs. Also prints the processing time per block
+// against the real-time budget, to compare sizes on the Pi itself.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -43,7 +48,8 @@ void printStats(const char* label, const std::vector<float>& buf) {
 
 int main(int argc, char** argv) {
     if (argc < 5) {
-        fprintf(stderr, "usage: %s <input.wav> <model.nam> <dry_out.wav> <wet_out.wav> [block_size]\n", argv[0]);
+        fprintf(stderr, "usage: %s <input.wav> <model.nam> <dry_out.wav> <wet_out.wav> [block_size] [nam_size]\n",
+                argv[0]);
         return 2;
     }
     const std::string inputPath = argv[1];
@@ -51,6 +57,7 @@ int main(int argc, char** argv) {
     const std::string dryOutPath = argv[3];
     const std::string wetOutPath = argv[4];
     const std::size_t blockSize = argc > 5 ? static_cast<std::size_t>(std::stoul(argv[5])) : 64;
+    const double namSize = argc > 6 ? std::stod(argv[6]) : 1.0;
     constexpr double kEngineSampleRate = 48000.0;
 
     try {
@@ -72,17 +79,34 @@ int main(int argc, char** argv) {
                dsp->GetExpectedSampleRate());
         if (dsp->HasLoudness()) printf(" loudness=%.2fdB", dsp->GetLoudness());
         printf("\n");
+        if (setNamSlimmableSize(*dsp, namSize)) printf("  slimmable: running size %.2f\n", namSize);
 
         RealNamModel model(meta, std::move(dsp));
         model.prepare(kEngineSampleRate);
 
         std::vector<float> wet = dry;
         std::size_t i = 0;
+        double worstMs = 0.0;
+        const auto started = std::chrono::steady_clock::now();
         for (; i + blockSize <= wet.size(); i += blockSize) {
+            const auto t0 = std::chrono::steady_clock::now();
             model.process(wet.data() + i, blockSize);
+            const double ms =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            worstMs = std::max(worstMs, ms);
         }
+        const double totalMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        const std::size_t blocks = i / blockSize;
         if (i < wet.size()) {
             model.process(wet.data() + i, wet.size() - i);  // final partial block
+        }
+
+        const double budgetMs = 1000.0 * static_cast<double>(blockSize) / kEngineSampleRate;
+        if (blocks > 0) {
+            printf("\n=== timing (block_size=%zu, budget %.3f ms) ===\n", blockSize, budgetMs);
+            printf("  mean %.3f ms/block (%.0f%% of budget), worst %.3f ms (%.0f%%)\n", totalMs / blocks,
+                   100.0 * totalMs / blocks / budgetMs, worstMs, 100.0 * worstMs / budgetMs);
         }
 
         printf("\n=== stats (block_size=%zu) ===\n", blockSize);
